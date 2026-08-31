@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<HiStreamProject schemaVersion="1" mode="eFacetRT">
+  <Control>
+    <outDir>C:\work\streamsim\validation\urban_dem_building\output</outDir>
+    <rayTracingDepth>4</rayTracingDepth>
+    <GPU>0</GPU>
+    <isDEM>1</isDEM>
+    <isImage>1</isImage>
+    <isTemperature>1</isTemperature>
+    <isAlbedo>0</isAlbedo>
+    <isDisplay>0</isDisplay>
+    <isOrth>0</isOrth>
+    <isUAVtrave>0</isUAVtrave>
+  </Control>
+  <Geometry>
+    <Light>
+      <light name="Solar">
+        <lightAngle><lightAngle>30,135</lightAngle></lightAngle>
+        <skyTemperature>250</skyTemperature>
+        <directScatteringRatio>0.8</directScatteringRatio>
+        <esunFileName>C:\work\histream\defined\Esun_.dat</esunFileName>
+        <eskyFileName>C:\work\histream\defined\Esky_.dat</eskyFileName>
+      </light>
+    </Light>
+    <Sensor>
+      <sensor name="MainSensor" type="Multispectral sensor">
+        <pixelResolutionX>64</pixelResolutionX>
+        <pixelResolutionY>48</pixelResolutionY>
+        <controlBand>550,850,10500</controlBand>
+        <viewAngle><viewAngle type="custom"><viewAngles>0,0</viewAngles></viewAngle></viewAngle>
+      </sensor>
+    </Sensor>
+  </Geometry>
+  <Scene>
+    <sceneSizeX>50</sceneSizeX>
+    <sceneSizeY>40</sceneSizeY>
+    <Height>15</Height>
+    <voxelSize>1</voxelSize>
+    <bgSpectral>soil</bgSpectral>
+    <bgThermal>soil_temperature</bgThermal>
+    <bgBioType>soilSet</bgBioType>
+    <bgBioName>soilset</bgBioName>
+    <DEM>C:\work\streamsim\validation\urban_dem_building\terrain\dem_test_input.tif</DEM>
+    <Object>
+      <object objName="Tree population">
+        <types>Vegetation</types>
+        <meshNames>Tree</meshNames>
+        <spectralNames>green_leaf</spectralNames>
+        <thermalNames>vegetation_temperature</thermalNames>
+        <canopyNames>canopy_default</canopyNames>
+        <bioNames>leaf_c3</bioNames>
+        <propNames>leaf_c3</propNames>
+        <shapeTypes>ellipsoid</shapeTypes>
+        <shapes>4,4,8</shapes>
+        <isLarge>0</isLarge>
+        <fileName>C:\work\streamsim\validation\urban_tree_building\models\tree.obj</fileName>
+        <objectfile>C:\work\streamsim\validation\urban_tree_building\models\tree.obj</objectfile>
+        <objectPosition>C:\work\streamsim\validation\urban_tree_building\positions\tree_position.txt</objectPosition>
+        <isdisfromFile>1</isdisfromFile>
+      </object>
+      <object objName="Building">
+        <types>Building</types>
+        <meshNames>wall,roof</meshNames>
+        <spectralNames>concrete,concrete</spectralNames>
+        <thermalNames>building_temperature,building_temperature</thermalNames>
+        <canopyNames>canopy_default</canopyNames>
+        <bioNames>soil_dry</bioNames>
+        <propNames>soil_dry</propNames>
+        <shapeTypes>cube</shapeTypes>
+        <shapes>8,6,7</shapes>
+        <isLarge>0</isLarge>
+        <fileName>C:\work\streamsim\validation\urban_tree_building\models\building.obj</fileName>
+        <objectfile>C:\work\streamsim\validation\urban_tree_building\models\building.obj</objectfile>
+        <objectPosition>C:\work\streamsim\validation\urban_tree_building\positions\building_position.txt</objectPosition>
+        <isdisfromFile>1</isdisfromFile>
+      </object>
+    </Object>
+  </Scene>
+  <Attribute>
+    <Spectral>
+      <spectral id="1" name="soil" type="BSM">
+        <reflectance>0.20</reflectance><transmittance>0.0</transmittance>
+        <tau_TIR>0</tau_TIR><ref_TIR>0.05</ref_TIR>
+        <SMC>25</SMC><BSMBrightness>0.5</BSMBrightness><BSMlat>0</BSMlat><BSMlon>0</BSMlon>
+      </spectral>
+      <spectral id="2" name="green_leaf" type="Prospect">
+        <reflectance>0.08,0.45</reflectance><transmittance>0.04,0.35</transmittance>
+        <tau_TIR>0</tau_TIR><ref_TIR>0.03</ref_TIR>
+        <Cab>40</Cab><Cw>0.01</Cw><Cdm>0.01</Cdm><Cs>0</Cs><N>1.5</N>
+      </spectral>
+      <spectral id="3" name="dry_leaf" type="Prospect">
+        <reflectance>0.16,0.38</reflectance><transmittance>0.08,0.25</transmittance>
+        <tau_TIR>0</tau_TIR><ref_TIR>0.05</ref_TIR>
+        <Cab>15</Cab><Cw>0.003</Cw><Cdm>0.02</Cdm><Cs>0</Cs><N>1.8</N>
+      </spectral>
+      <spectral id="4" name="concrete" type="custom">
+        <reflectance>0.35</reflectance><transmittance>0.0</transmittance>
+        <tau_TIR>0</tau_TIR><ref_TIR>0.08</ref_TIR><spectral_file></spectral_file>
+      </spectral>
+      <spectral id="5" name="water_surface" type="custom">
+        <reflectance>0.04</reflectance><transmittance>0.0</transmittance>
+        <tau_TIR>0</tau_TIR><ref_TIR>0.02</ref_TIR><spectral_file></spectral_file>
+      </spectral>
+    </Spectral>
+    <Thermal><thermal id="1" name="soil_temperature"><sunlitTemperature>305</sunlitTemperature><shadedTemperature>295</shadedTemperature></thermal>
+      <thermal id="2" name="vegetation_temperature"><sunlitTemperature>300</sunlitTemperature><shadedTemperature>296</shadedTemperature></thermal>
+      <thermal id="3" name="building_temperature"><sunlitTemperature>310</sunlitTemperature><shadedTemperature>300</shadedTemperature></thermal>
+      <thermal id="4" name="water_temperature"><sunlitTemperature>295</sunlitTemperature><shadedTemperature>295</shadedTemperature></thermal></Thermal>
+    <Canopy><canopy name="canopy_default"><lai>3</lai><density>1</density><hc>2</hc><G>0.5</G><LIDFa>-0.35</LIDFa><LIDFb>-0.15</LIDFb><hspot>0.2</hspot><leafwidth>0.1</leafwidth></canopy></Canopy>
+    <Biochemistry><property><leafBio name="leaf_c3"><Vcmax>80</Vcmax><m>9</m><BallBerry>0.01</BallBerry><Type>3</Type><kV>0.6396</kV><Rdparam>0.015</Rdparam><Tparam>0.2,0.3,288,313,328</Tparam><Tyear>25</Tyear><beta>0.507</beta><kNPQs>0</kNPQs><qLs>1</qLs><stressfactor>1</stressfactor><Tcor>0</Tcor></leafBio></property>
+      <property><leafBio name="leaf_c4"><Vcmax>60</Vcmax><m>4</m><BallBerry>0.01</BallBerry><Type>4</Type><kV>0.7</kV><Rdparam>0.012</Rdparam><Tparam>0.2,0.3,288,313,328</Tparam><Tyear>25</Tyear><beta>0.507</beta><kNPQs>0</kNPQs><qLs>1</qLs><stressfactor>1</stressfactor><Tcor>0</Tcor></leafBio></property>
+      <property><soilSet name="soilset"><method>1</method><rss>2000</rss><cs>1180</cs><rhos>1800</rhos><lambdas>1.55</lambdas><Tsoil>25</Tsoil><SMC>25</SMC><Satwater>0.45</Satwater></soilSet></property>
+      <property><soilSet name="soil_dry"><method>1</method><rss>4000</rss><cs>1000</cs><rhos>1600</rhos><lambdas>0.8</lambdas><Tsoil>30</Tsoil><SMC>10</SMC><Satwater>0.38</Satwater></soilSet></property>
+      <property><soilSet name="soil_wet"><method>1</method><rss>800</rss><cs>1400</cs><rhos>1900</rhos><lambdas>2</lambdas><Tsoil>22</Tsoil><SMC>35</SMC><Satwater>0.5</Satwater></soilSet></property>
+      <property><waterSet name="water_set"><rss>0</rss><heatCapacity>4186000</heatCapacity><mixingDepth>0.5</mixingDepth><evaporationCoefficient>1</evaporationCoefficient></waterSet></property></Biochemistry>
+    <Aerodynamics><aerodynamic name="default"><type>0</type><L>0</L><ustar>0.3</ustar><hc_veg>1</hc_veg><hc_build>1</hc_build><lai>0</lai><leaf_width>0.1</leaf_width><stepsizeatmos>1000</stepsizeatmos></aerodynamic></Aerodynamics>
+  </Attribute>
+  <Meteorology>
+    <startTimeNode>24</startTimeNode><endTimeNode>25</endTimeNode>
+    <z>1</z><Tsold>300</Tsold><SatWater>0.45</SatWater><dTime>1800</dTime>
+    <filePath>C:\work\histream\defined\meteo.txt</filePath>
+    <Latitude>40</Latitude><Longitude>116</Longitude>
+  </Meteorology>
+</HiStreamProject>

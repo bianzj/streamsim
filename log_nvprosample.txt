@@ -1,0 +1,1 @@
+RT BLAS: reducing from: 12288 to: 4736 = 7552 (61.46% smaller) 

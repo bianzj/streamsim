@@ -1,0 +1,138 @@
+^C:\WORK\STREAMSIM\MODELS\NVPRO_CORE\NVVKHL\SHADERS\HDR_DOME.COMP
+setlocal
+cd C:\work\streamsim\models\nvpro_core
+if %errorlevel% neq 0 goto :cmEnd
+C:
+if %errorlevel% neq 0 goto :cmEnd
+echo C:/VulkanSDK/1.3.275.0/Bin/glslangValidator.exe -Invvkhl/shaders -IC:/work/streamsim/models/nvpro_core -g --target-env vulkan1.3 --vn hdr_dome_comp -o C:/work/streamsim/models/nvpro_core/_autogen/hdr_dome.comp.h C:/work/streamsim/models/nvpro_core/nvvkhl/shaders/hdr_dome.comp
+if %errorlevel% neq 0 goto :cmEnd
+C:\VulkanSDK\1.3.275.0\Bin\glslangValidator.exe -Invvkhl/shaders -IC:/work/streamsim/models/nvpro_core -g --target-env vulkan1.3 --vn hdr_dome_comp -o C:/work/streamsim/models/nvpro_core/_autogen/hdr_dome.comp.h C:/work/streamsim/models/nvpro_core/nvvkhl/shaders/hdr_dome.comp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\WORK\STREAMSIM\MODELS\NVPRO_CORE\NVVKHL\SHADERS\HDR_INTEGRATE_BRDF.COMP
+setlocal
+cd C:\work\streamsim\models\nvpro_core
+if %errorlevel% neq 0 goto :cmEnd
+C:
+if %errorlevel% neq 0 goto :cmEnd
+echo C:/VulkanSDK/1.3.275.0/Bin/glslangValidator.exe -Invvkhl/shaders -IC:/work/streamsim/models/nvpro_core -g --target-env vulkan1.3 --vn hdr_integrate_brdf_comp -o C:/work/streamsim/models/nvpro_core/_autogen/hdr_integrate_brdf.comp.h C:/work/streamsim/models/nvpro_core/nvvkhl/shaders/hdr_integrate_brdf.comp
+if %errorlevel% neq 0 goto :cmEnd
+C:\VulkanSDK\1.3.275.0\Bin\glslangValidator.exe -Invvkhl/shaders -IC:/work/streamsim/models/nvpro_core -g --target-env vulkan1.3 --vn hdr_integrate_brdf_comp -o C:/work/streamsim/models/nvpro_core/_autogen/hdr_integrate_brdf.comp.h C:/work/streamsim/models/nvpro_core/nvvkhl/shaders/hdr_integrate_brdf.comp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\WORK\STREAMSIM\MODELS\NVPRO_CORE\NVVKHL\SHADERS\HDR_PREFILTER_DIFFUSE.COMP
+setlocal
+cd C:\work\streamsim\models\nvpro_core
+if %errorlevel% neq 0 goto :cmEnd
+C:
+if %errorlevel% neq 0 goto :cmEnd
+echo C:/VulkanSDK/1.3.275.0/Bin/glslangValidator.exe -Invvkhl/shaders -IC:/work/streamsim/models/nvpro_core -g --target-env vulkan1.3 --vn hdr_prefilter_diffuse_comp -o C:/work/streamsim/models/nvpro_core/_autogen/hdr_prefilter_diffuse.comp.h C:/work/streamsim/models/nvpro_core/nvvkhl/shaders/hdr_prefilter_diffuse.comp
+if %errorlevel% neq 0 goto :cmEnd
+C:\VulkanSDK\1.3.275.0\Bin\glslangValidator.exe -Invvkhl/shaders -IC:/work/streamsim/models/nvpro_core -g --target-env vulkan1.3 --vn hdr_prefilter_diffuse_comp -o C:/work/streamsim/models/nvpro_core/_autogen/hdr_prefilter_diffuse.comp.h C:/work/streamsim/models/nvpro_core/nvvkhl/shaders/hdr_prefilter_diffuse.comp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\WORK\STREAMSIM\MODELS\NVPRO_CORE\NVVKHL\SHADERS\HDR_PREFILTER_GLOSSY.COMP
+setlocal
+cd C:\work\streamsim\models\nvpro_core
+if %errorlevel% neq 0 goto :cmEnd
+C:
+if %errorlevel% neq 0 goto :cmEnd
+echo C:/VulkanSDK/1.3.275.0/Bin/glslangValidator.exe -Invvkhl/shaders -IC:/work/streamsim/models/nvpro_core -g --target-env vulkan1.3 --vn hdr_prefilter_glossy_comp -o C:/work/streamsim/models/nvpro_core/_autogen/hdr_prefilter_glossy.comp.h C:/work/streamsim/models/nvpro_core/nvvkhl/shaders/hdr_prefilter_glossy.comp
+if %errorlevel% neq 0 goto :cmEnd
+C:\VulkanSDK\1.3.275.0\Bin\glslangValidator.exe -Invvkhl/shaders -IC:/work/streamsim/models/nvpro_core -g --target-env vulkan1.3 --vn hdr_prefilter_glossy_comp -o C:/work/streamsim/models/nvpro_core/_autogen/hdr_prefilter_glossy.comp.h C:/work/streamsim/models/nvpro_core/nvvkhl/shaders/hdr_prefilter_glossy.comp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\WORK\STREAMSIM\MODELS\NVPRO_CORE\NVVKHL\SHADERS\PASSTHROUGH.VERT
+setlocal
+cd C:\work\streamsim\models\nvpro_core
+if %errorlevel% neq 0 goto :cmEnd
+C:
+if %errorlevel% neq 0 goto :cmEnd
+echo C:/VulkanSDK/1.3.275.0/Bin/glslangValidator.exe -Invvkhl/shaders -IC:/work/streamsim/models/nvpro_core -g --target-env vulkan1.3 --vn passthrough_vert -o C:/work/streamsim/models/nvpro_core/_autogen/passthrough.vert.h C:/work/streamsim/models/nvpro_core/nvvkhl/shaders/passthrough.vert
+if %errorlevel% neq 0 goto :cmEnd
+C:\VulkanSDK\1.3.275.0\Bin\glslangValidator.exe -Invvkhl/shaders -IC:/work/streamsim/models/nvpro_core -g --target-env vulkan1.3 --vn passthrough_vert -o C:/work/streamsim/models/nvpro_core/_autogen/passthrough.vert.h C:/work/streamsim/models/nvpro_core/nvvkhl/shaders/passthrough.vert
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\WORK\STREAMSIM\MODELS\NVPRO_CORE\NVVKHL\SHADERS\SKY.COMP
+setlocal
+cd C:\work\streamsim\models\nvpro_core
+if %errorlevel% neq 0 goto :cmEnd
+C:
+if %errorlevel% neq 0 goto :cmEnd
+echo C:/VulkanSDK/1.3.275.0/Bin/glslangValidator.exe -Invvkhl/shaders -IC:/work/streamsim/models/nvpro_core -g --target-env vulkan1.3 --vn sky_comp -o C:/work/streamsim/models/nvpro_core/_autogen/sky.comp.h C:/work/streamsim/models/nvpro_core/nvvkhl/shaders/sky.comp
+if %errorlevel% neq 0 goto :cmEnd
+C:\VulkanSDK\1.3.275.0\Bin\glslangValidator.exe -Invvkhl/shaders -IC:/work/streamsim/models/nvpro_core -g --target-env vulkan1.3 --vn sky_comp -o C:/work/streamsim/models/nvpro_core/_autogen/sky.comp.h C:/work/streamsim/models/nvpro_core/nvvkhl/shaders/sky.comp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\WORK\STREAMSIM\MODELS\NVPRO_CORE\NVVKHL\SHADERS\TONEMAPPER.COMP
+setlocal
+cd C:\work\streamsim\models\nvpro_core
+if %errorlevel% neq 0 goto :cmEnd
+C:
+if %errorlevel% neq 0 goto :cmEnd
+echo C:/VulkanSDK/1.3.275.0/Bin/glslangValidator.exe -Invvkhl/shaders -IC:/work/streamsim/models/nvpro_core -g --target-env vulkan1.3 --vn tonemapper_comp -o C:/work/streamsim/models/nvpro_core/_autogen/tonemapper.comp.h C:/work/streamsim/models/nvpro_core/nvvkhl/shaders/tonemapper.comp
+if %errorlevel% neq 0 goto :cmEnd
+C:\VulkanSDK\1.3.275.0\Bin\glslangValidator.exe -Invvkhl/shaders -IC:/work/streamsim/models/nvpro_core -g --target-env vulkan1.3 --vn tonemapper_comp -o C:/work/streamsim/models/nvpro_core/_autogen/tonemapper.comp.h C:/work/streamsim/models/nvpro_core/nvvkhl/shaders/tonemapper.comp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\WORK\STREAMSIM\MODELS\NVPRO_CORE\NVVKHL\SHADERS\TONEMAPPER.FRAG
+setlocal
+cd C:\work\streamsim\models\nvpro_core
+if %errorlevel% neq 0 goto :cmEnd
+C:
+if %errorlevel% neq 0 goto :cmEnd
+echo C:/VulkanSDK/1.3.275.0/Bin/glslangValidator.exe -Invvkhl/shaders -IC:/work/streamsim/models/nvpro_core -g --target-env vulkan1.3 --vn tonemapper_frag -o C:/work/streamsim/models/nvpro_core/_autogen/tonemapper.frag.h C:/work/streamsim/models/nvpro_core/nvvkhl/shaders/tonemapper.frag
+if %errorlevel% neq 0 goto :cmEnd
+C:\VulkanSDK\1.3.275.0\Bin\glslangValidator.exe -Invvkhl/shaders -IC:/work/streamsim/models/nvpro_core -g --target-env vulkan1.3 --vn tonemapper_frag -o C:/work/streamsim/models/nvpro_core/_autogen/tonemapper.frag.h C:/work/streamsim/models/nvpro_core/nvvkhl/shaders/tonemapper.frag
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\WORK\STREAMSIM\MODELS\NVPRO_CORE\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\Microsoft Visual Studio\18\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -SC:/work/streamsim/models/histream -BC:/work/streamsim/models/histream/build --check-stamp-file C:/work/streamsim/models/histream/build/nvpro_core/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

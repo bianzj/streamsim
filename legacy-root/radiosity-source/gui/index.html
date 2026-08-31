@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>FacetLab · 辐射度与图像模拟</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "/three/build/three.module.js",
+        "three/addons/": "/three/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark"><span></span><span></span><span></span></div>
+        <div><strong>FACETLAB</strong><small>Raster Simulation Studio</small></div>
+      </div>
+      <div class="project-state">
+        <span class="status-dot ready" id="service-dot"></span>
+        <div><strong>forest_plot_6x6</strong><small id="scene-summary">加载场景…</small></div>
+      </div>
+      <div class="top-run-state">
+        <span id="top-stage">引擎待命</span>
+        <div class="top-progress"><i id="top-progress-bar"></i></div>
+        <em id="top-progress-value">0%</em>
+      </div>
+      <button class="button primary" id="run-current">运行辐射度求解</button>
+    </header>
+
+    <main class="studio-grid">
+      <aside class="sidebar">
+        <section>
+          <span class="eyebrow">SIMULATION WORKFLOW</span>
+          <nav class="workflow-list">
+            <button class="workflow active" data-workspace="radiosity">
+              <b>01</b><span><strong>辐射度求解</strong><small>双面辐射度 · 三维面元结果</small></span>
+            </button>
+            <button class="workflow" data-workspace="image">
+              <b>02</b><span><strong>图像模拟</strong><small>传感器 · 波段 · 观测几何</small></span>
+            </button>
+          </nav>
+        </section>
+
+        <section class="scene-structure">
+          <div class="section-title"><span>场景结构</span><em>Y-UP</em></div>
+          <div class="scene-item active"><i class="tree-icon"></i><span>36 棵树 / 林冠面元</span><em id="leaf-count">—</em></div>
+          <div class="scene-item"><i class="soil-icon"></i><span>土壤网格面元</span><em id="soil-count">—</em></div>
+          <div class="scene-item"><i class="sun-icon"></i><span>太阳 / 天空</span><em>30° / 135°</em></div>
+          <div class="scene-item"><i class="sensor-icon"></i><span>主传感器</span><em id="sensor-badge">512²</em></div>
+        </section>
+
+        <section class="pipeline">
+          <div class="section-title"><span>当前流程</span></div>
+          <ol id="pipeline-radiosity">
+            <li class="active"><span>1</span>方向光栅</li>
+            <li><span>2</span>可见交换图</li>
+            <li><span>3</span>双面辐射度迭代</li>
+            <li><span>4</span>三维逐面元展示</li>
+          </ol>
+          <ol id="pipeline-image" hidden>
+            <li class="active"><span>1</span>场景光栅</li>
+            <li><span>2</span>波段响应</li>
+            <li><span>3</span>传感器成像</li>
+            <li><span>4</span>影像产品</li>
+          </ol>
+        </section>
+
+        <div class="sidebar-engine">
+          <span class="status-dot ready"></span>
+          <div><strong>原生后端已连接</strong><small>CPU Raster / Vulkan GPU</small></div>
+        </div>
+      </aside>
+
+      <section class="viewport-panel">
+        <canvas id="viewport"></canvas>
+        <div class="viewport-title">
+          <span class="eyebrow" id="viewport-eyebrow">FACET RADIOSITY</span>
+          <h1 id="viewport-heading">逐面元辐射度三维结果</h1>
+        </div>
+        <div class="viewport-toolbar" id="display-modes">
+          <button class="active" data-mode="scene">实体</button>
+          <button data-mode="lightEnhancement" data-radiosity-only>光照增强</button>
+          <button data-mode="radiosity" data-radiosity-only>双面最大</button>
+          <button data-mode="radiosityFront" data-radiosity-only>正面</button>
+          <button data-mode="radiosityBack" data-radiosity-only>背面</button>
+          <button data-mode="sunlit" data-radiosity-only>受光率</button>
+        </div>
+        <div class="viewport-stats">
+          <span id="triangle-stat">0 TRI</span><span>THREE.JS R185</span>
+        </div>
+        <div class="viewport-help">左键旋转 · 右键平移 · 滚轮缩放</div>
+        <div id="legend" class="legend" hidden>
+          <span id="legend-label">辐射度</span><em id="legend-min">0</em>
+          <div></div><em id="legend-max">1</em>
+        </div>
+
+        <aside class="facet-readout" id="facet-readout" hidden>
+          <header><span>SELECTED FACET</span><strong id="facet-id">—</strong></header>
+          <div><span>归属</span><strong id="facet-owner">—</strong></div>
+          <div><span>正面辐射度</span><strong id="facet-front">—</strong></div>
+          <div><span>背面辐射度</span><strong id="facet-back">—</strong></div>
+          <div><span>双面最大值</span><strong id="facet-maximum">—</strong></div>
+          <div><span>光照增强</span><strong id="facet-enhancement">—</strong></div>
+        </aside>
+
+        <section class="image-result" id="image-result" hidden>
+          <header>
+            <div><span class="eyebrow">SENSOR OUTPUT</span><h2 id="image-title">模拟影像</h2></div>
+            <button class="icon-button" id="close-image" aria-label="关闭">×</button>
+          </header>
+          <div class="image-frame"><canvas id="sensor-output"></canvas></div>
+          <footer>
+            <div><span id="image-resolution">—</span><span id="image-band">—</span><span id="image-time">—</span></div>
+            <button class="button ghost" id="save-image">保存 PNG</button>
+          </footer>
+        </section>
+      </section>
+
+      <aside class="inspector">
+        <header><span class="eyebrow">PARAMETERS</span><h2 id="inspector-title">辐射度求解</h2></header>
+
+        <div class="inspector-content" data-inspector="radiosity">
+          <section class="property-group">
+            <h3>计算后端</h3>
+            <div class="backend-switch">
+              <button data-backend="cpu">CPU 光栅</button>
+              <button class="active" data-backend="gpu">Vulkan GPU</button>
+            </div>
+          </section>
+          <section class="property-group fixed-values">
+            <h3>辐射参数</h3>
+            <div><span>叶片反射率 ρ</span><strong>0.10</strong></div>
+            <div><span>叶片透射率 τ</span><strong>0.05</strong></div>
+            <div><span>土壤反射率 ρ</span><strong>0.20</strong></div>
+            <div><span>太阳直射</span><strong>700 W/m²</strong></div>
+            <div><span>天空漫射</span><strong>100 W/m²</strong></div>
+          </section>
+          <section class="property-group fixed-values">
+            <h3>光栅求解器</h3>
+            <div><span>半球方向</span><strong>40</strong></div>
+            <div><span>光栅分辨率</span><strong>384 × 384</strong></div>
+            <div><span>Jacobi 迭代</span><strong>64 × 2</strong></div>
+            <div><span>面元模型</span><strong>双面</strong></div>
+            <div><span>土壤网格</span><strong>48 × 48 / 4,608 面元</strong></div>
+          </section>
+          <button class="button primary full" id="run-radiosity">求解逐面元辐射度</button>
+        </div>
+
+        <div class="inspector-content" data-inspector="image" hidden>
+          <section class="property-group">
+            <h3>传感器</h3>
+            <label><span>输出分辨率</span><select id="image-resolution-input">
+              <option value="256">256 × 256</option>
+              <option value="512" selected>512 × 512</option>
+              <option value="1024">1024 × 1024</option>
+            </select></label>
+            <label><span>成像波段</span><select id="image-band-input">
+              <option value="rgb">可见光 RGB</option>
+              <option value="red">红光 660 nm</option>
+              <option value="nir">近红外 850 nm</option>
+              <option value="thermal">热红外 10,500 nm</option>
+            </select></label>
+            <label><span>投影方式</span><select id="image-projection">
+              <option value="perspective">透视投影</option>
+              <option value="orthographic">正交投影</option>
+            </select></label>
+          </section>
+          <section class="property-group">
+            <h3>观测几何</h3>
+            <label><span>观测天顶角 <em>°</em></span><input id="view-zenith" type="number" min="0" max="80" step="1" value="20"></label>
+            <label><span>观测方位角 <em>°</em></span><input id="view-azimuth" type="number" min="0" max="360" step="1" value="135"></label>
+            <label><span>视场角 <em>°</em></span><input id="field-of-view" type="number" min="10" max="90" step="1" value="36"></label>
+          </section>
+          <section class="property-group compact-note">
+            <h3>光谱预设</h3>
+            <p>健康绿叶：红光 ρ=0.08，近红外 ρ=0.45</p>
+            <p>典型土壤：ρ=0.20；热红外 ε=0.95</p>
+          </section>
+          <button class="button primary full" id="run-image">生成模拟影像</button>
+        </div>
+
+      </aside>
+
+      <section class="console-panel">
+        <header>
+          <div><span class="status-dot" id="run-dot"></span><strong id="run-state">等待运行</strong></div>
+          <span id="run-stage">请选择模拟模块</span>
+          <em id="run-percent">0%</em>
+        </header>
+        <div class="console-body">
+          <div class="log-list" id="log-list">
+            <div><time>--:--:--</time><span>FacetLab 已就绪。</span></div>
+          </div>
+          <div class="result-metrics" id="image-metrics" hidden>
+            <div><span>影像尺寸</span><strong id="metric-image-size">—</strong></div>
+            <div><span>波段产品</span><strong id="metric-image-band">—</strong></div>
+            <div><span>成像耗时</span><strong id="metric-image-time">—</strong></div>
+            <div><span>观测角</span><strong id="metric-view-angle">—</strong></div>
+          </div>
+          <div class="result-metrics" id="radiosity-metrics">
+            <div><span>后端 / 总耗时</span><strong id="metric-backend">—</strong></div>
+            <div><span>叶片辐射度均值</span><strong id="metric-radiosity-mean">—</strong></div>
+            <div><span>叶片辐射度范围</span><strong id="metric-radiosity-range">—</strong></div>
+            <div><span>光照增强均值 / 最大</span><strong id="metric-enhancement">—</strong></div>
+            <div><span>交换边 / 闭合</span><strong id="metric-graph">—</strong></div>
+            <div><span>面元 / 双面数</span><strong id="metric-facets">—</strong></div>
+            <div><span>迭代 / 最大变化</span><strong id="metric-convergence">—</strong></div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <div class="toast" id="toast"></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

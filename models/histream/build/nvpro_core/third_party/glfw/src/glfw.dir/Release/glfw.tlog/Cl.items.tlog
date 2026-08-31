@@ -1,0 +1,15 @@
+C:\work\streamsim\models\nvpro_core\third_party\glfw\src\context.c;C:\work\streamsim\models\histream\build\nvpro_core\third_party\glfw\src\glfw.dir\Release\context.obj
+C:\work\streamsim\models\nvpro_core\third_party\glfw\src\init.c;C:\work\streamsim\models\histream\build\nvpro_core\third_party\glfw\src\glfw.dir\Release\init.obj
+C:\work\streamsim\models\nvpro_core\third_party\glfw\src\input.c;C:\work\streamsim\models\histream\build\nvpro_core\third_party\glfw\src\glfw.dir\Release\input.obj
+C:\work\streamsim\models\nvpro_core\third_party\glfw\src\monitor.c;C:\work\streamsim\models\histream\build\nvpro_core\third_party\glfw\src\glfw.dir\Release\monitor.obj
+C:\work\streamsim\models\nvpro_core\third_party\glfw\src\vulkan.c;C:\work\streamsim\models\histream\build\nvpro_core\third_party\glfw\src\glfw.dir\Release\vulkan.obj
+C:\work\streamsim\models\nvpro_core\third_party\glfw\src\window.c;C:\work\streamsim\models\histream\build\nvpro_core\third_party\glfw\src\glfw.dir\Release\window.obj
+C:\work\streamsim\models\nvpro_core\third_party\glfw\src\win32_init.c;C:\work\streamsim\models\histream\build\nvpro_core\third_party\glfw\src\glfw.dir\Release\win32_init.obj
+C:\work\streamsim\models\nvpro_core\third_party\glfw\src\win32_joystick.c;C:\work\streamsim\models\histream\build\nvpro_core\third_party\glfw\src\glfw.dir\Release\win32_joystick.obj
+C:\work\streamsim\models\nvpro_core\third_party\glfw\src\win32_monitor.c;C:\work\streamsim\models\histream\build\nvpro_core\third_party\glfw\src\glfw.dir\Release\win32_monitor.obj
+C:\work\streamsim\models\nvpro_core\third_party\glfw\src\win32_time.c;C:\work\streamsim\models\histream\build\nvpro_core\third_party\glfw\src\glfw.dir\Release\win32_time.obj
+C:\work\streamsim\models\nvpro_core\third_party\glfw\src\win32_thread.c;C:\work\streamsim\models\histream\build\nvpro_core\third_party\glfw\src\glfw.dir\Release\win32_thread.obj
+C:\work\streamsim\models\nvpro_core\third_party\glfw\src\win32_window.c;C:\work\streamsim\models\histream\build\nvpro_core\third_party\glfw\src\glfw.dir\Release\win32_window.obj
+C:\work\streamsim\models\nvpro_core\third_party\glfw\src\wgl_context.c;C:\work\streamsim\models\histream\build\nvpro_core\third_party\glfw\src\glfw.dir\Release\wgl_context.obj
+C:\work\streamsim\models\nvpro_core\third_party\glfw\src\egl_context.c;C:\work\streamsim\models\histream\build\nvpro_core\third_party\glfw\src\glfw.dir\Release\egl_context.obj
+C:\work\streamsim\models\nvpro_core\third_party\glfw\src\osmesa_context.c;C:\work\streamsim\models\histream\build\nvpro_core\third_party\glfw\src\glfw.dir\Release\osmesa_context.obj

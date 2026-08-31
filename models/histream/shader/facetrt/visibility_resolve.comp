@@ -1,0 +1,117 @@
+#version 460
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_atomic_int64 : require
+
+#define MAX_FRAGMENTS 64u
+#define EMPTY_KEY 0xfffffffffffffffful
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct FragmentRecord {
+    uint depthBits;
+    uint cameraSide;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer FragmentBuffer {
+    FragmentRecord records[];
+};
+layout(std430, set = 0, binding = 1) readonly buffer PixelCounts {
+    uint pixelCounts[];
+};
+layout(std430, set = 0, binding = 2) buffer EdgeKeys {
+    uint64_t edgeKeys[];
+};
+layout(std430, set = 0, binding = 3) buffer EdgeCounts {
+    uint edgeCounts[];
+};
+layout(std430, set = 0, binding = 4) buffer Denominators {
+    uint denominators[];
+};
+layout(std430, set = 0, binding = 5) buffer SkyCounts {
+    uint skyCounts[];
+};
+layout(std430, set = 0, binding = 6) buffer Statistics {
+    uint statistics[];
+};
+
+layout(push_constant) uniform VisibilityPush {
+    mat4 viewProjection;
+    vec4 viewDirection;
+    uvec4 raster;
+} pc;
+
+uint hashKey(uint64_t key)
+{
+    key ^= key >> 33;
+    key *= 0xff51afd7ed558ccdul;
+    key ^= key >> 33;
+    return uint(key) ^ uint(key >> 32);
+}
+
+void addEdge(uint sideA, uint sideB)
+{
+    if ((sideA >> 1u) == (sideB >> 1u)) {
+        return;
+    }
+
+    const uint lo = min(sideA, sideB);
+    const uint hi = max(sideA, sideB);
+    const uint64_t key = (uint64_t(lo) << 32) | uint64_t(hi);
+    const uint mask = pc.raster.w - 1u;
+    uint slot = hashKey(key) & mask;
+
+    for (uint probe = 0u; probe < pc.raster.w; ++probe) {
+        const uint64_t previous = atomicCompSwap(edgeKeys[slot], EMPTY_KEY, key);
+        if (previous == EMPTY_KEY || previous == key) {
+            atomicAdd(edgeCounts[slot], 1u);
+            return;
+        }
+        slot = (slot + 1u) & mask;
+    }
+    atomicAdd(statistics[1], 1u);
+}
+
+void main()
+{
+    const uint pixel = gl_GlobalInvocationID.x;
+    const uint pixelTotal = pc.raster.x * pc.raster.y;
+    if (pixel >= pixelTotal) {
+        return;
+    }
+
+    const uint count = min(min(pixelCounts[pixel], pc.raster.z), MAX_FRAGMENTS);
+    if (count == 0u) {
+        return;
+    }
+
+    FragmentRecord localRecords[MAX_FRAGMENTS];
+    for (uint i = 0u; i < count; ++i) {
+        localRecords[i] = records[pixel * pc.raster.z + i];
+    }
+
+    // Private-memory insertion sort; depth is in [0,1], so float bit order is valid.
+    for (uint i = 1u; i < count; ++i) {
+        const FragmentRecord value = localRecords[i];
+        uint j = i;
+        while (j > 0u && localRecords[j - 1u].depthBits > value.depthBits) {
+            localRecords[j] = localRecords[j - 1u];
+            --j;
+        }
+        localRecords[j] = value;
+    }
+
+    for (uint i = 0u; i < count; ++i) {
+        const uint cameraSide = localRecords[i].cameraSide;
+        atomicAdd(denominators[cameraSide], 1u);
+        atomicAdd(denominators[cameraSide ^ 1u], 1u);
+    }
+
+    atomicAdd(skyCounts[localRecords[0].cameraSide], 1u);
+    atomicAdd(skyCounts[localRecords[count - 1u].cameraSide ^ 1u], 1u);
+
+    for (uint i = 0u; i + 1u < count; ++i) {
+        const uint nearBackSide = localRecords[i].cameraSide ^ 1u;
+        const uint farCameraSide = localRecords[i + 1u].cameraSide;
+        addEdge(nearBackSide, farCameraSide);
+    }
+}

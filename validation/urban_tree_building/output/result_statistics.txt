@@ -1,0 +1,19 @@
+StreamSim validation summary
+scene=urban_tree_building
+objects=7 trees + 1 building + ground
+gpu_radiosity=PASS
+facet_count=4746
+geometry_facets=138
+ground_facets=4608
+radiosity_min=0.198126242
+radiosity_max=141.243561
+light_enhancement_min=0
+light_enhancement_max=124.737541
+sunlit_min=0
+sunlit_max=1
+gpu_total_ms=291.356
+raytracing=PASS
+image_size=64x48x3
+facet_eb=TIMEOUT_55S
+voxel_rt=TIMEOUT_25S
+voxel_eb=TIMEOUT_25S

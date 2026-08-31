@@ -1,0 +1,10 @@
+^C:\WORK\STREAMSIM\MODELS\HISTREAM\BUILD\CMAKEFILES\4DBE47A2C0A645945260F84881AC8A2F\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\Microsoft Visual Studio\18\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -SC:/work/streamsim/models/histream -BC:/work/streamsim/models/histream/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/work/streamsim/models/histream/build/histream.slnx
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

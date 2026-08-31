@@ -1,0 +1,154 @@
+#version 460
+#extension GL_ARB_separate_shader_objects : enable
+#extension GL_EXT_nonuniform_qualifier : enable
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_scalar_block_layout : enable
+#extension GL_EXT_ray_tracing : enable
+#extension GL_EXT_ray_query : enable
+#extension GL_ARB_shader_clock : enable                 // Using clockARB
+#extension GL_EXT_shader_image_load_formatted : enable  // The folowing extension allow to pass images as function parameters
+
+#extension GL_NV_shader_sm_builtins : require     // Debug - gl_WarpIDNV, gl_SMIDNV
+#extension GL_ARB_gpu_shader_int64 : enable       // Debug - heatmap value
+#extension GL_EXT_shader_realtime_clock : enable  // Debug - heatmap timing
+
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_debug_printf : enable
+#extension GL_KHR_memory_scope_semantics:require
+#extension GL_EXT_shader_atomic_float: require 
+
+#define VOXEL_LST_BIND_ININDEX
+#define VOXELLST
+
+#include "../bindinglayout.h"
+#include "../parameters.h"
+#include "../global.glsl"
+#include "../functions.glsl"
+#include "../nanovdb_info.glsl"
+
+layout(local_size_x = GROUP_SIZEX) in;
+
+
+void main()
+{
+    //------------------------------------------------------------
+    // Initialization for the position and SSBO index
+    //------------------------------------------------------------
+    // get bufferId, voxelId, instanceId and typeId
+    uint bufferId = uint(gl_GlobalInvocationID.x);
+    if(voxelLinks[bufferId].isValid==0) return;
+    //voxelRes: voxel number in 3 dimentions
+    ivec3 voxelRes = ivec3(setting.voxelSize);
+    
+    //-------------------------
+    // various parameters index
+    //-------------------------
+    uint instanceId = voxelLinks[bufferId].instanceId;
+    // VoxelInstanceLink instanceLink = instanceLinks[instanceId];
+    InstanceLink instanceLink = instanceLinks[instanceId];
+    MeshLink meshLink = meshLinks[instanceLink.meshId];
+    uint spectralId,canopyId,bioId,typeId;
+    bioId = meshLink.bioId;
+    typeId = meshLink.type;
+    float Ta = ubom.meteo.Ta;
+    float dtime = ubom.meteo.dtime;
+    float Ts,Gst;
+
+
+    uint TlastId = bufferId * TLASTNUM;
+ 
+    bool type = (abs(typeId*1.0 - TYPE_SOIL*1.0) < 0.1)
+                || (abs(typeId*1.0 - TYPE_BUILDING*1.0) < 0.1)
+                || (abs(typeId*1.0 - TYPE_WATER*1.0) < 0.1);
+    if(type)
+    {
+        /// 对温度进行真实的赋值，使得其是缓慢变化的
+        /// 如果 alpha_toSolar 增大，光照组分提升，阴影组分不变
+        /// 如果 alpha_toSolar 减小，光照组分不变，阴影组分提升
+        if (voxelDirs[bufferId].solar_last > -0.5){
+            if (voxelDirs[bufferId].solar > voxelDirs[bufferId].solar_last){
+                float sunlitTemperature = voxelTempes[bufferId].sunlit;
+                float shadedTemperature = voxelTempes[bufferId].shaded;
+                sunlitTemperature = sunlitTemperature + (voxelDirs[bufferId].solar - voxelDirs[bufferId].solar_last) * (shadedTemperature - sunlitTemperature);
+                voxelTempes[bufferId].sunlit = sunlitTemperature;
+            }
+
+            if ((voxelDirs[bufferId].solar < voxelDirs[bufferId].solar_last)){
+                float sunlitTemperature = voxelTempes[bufferId].sunlit;
+                float shadedTemperature = voxelTempes[bufferId].shaded;
+                shadedTemperature = shadedTemperature + (shadedTemperature - sunlitTemperature) * (voxelDirs[bufferId].solar - voxelDirs[bufferId].solar_last) / (1 - voxelDirs[bufferId].solar);
+                voxelTempes[bufferId].shaded = shadedTemperature;
+            }
+        }
+
+        if(typeId == TYPE_WATER)
+        {
+            for(int i = TLASTNUM - 1; i > 0; i--)
+            {
+                voxelTlasts[TlastId+i] = voxelTlasts[TlastId+i-1];
+            }
+            float waterTemperature = 0.5 * (
+                voxelTempes[bufferId].sunlit + voxelTempes[bufferId].shaded);
+            voxelTempes[bufferId].sunlit = waterTemperature;
+            voxelTempes[bufferId].shaded = waterTemperature;
+            voxelTlasts[TlastId].sunlit = waterTemperature - 273.15;
+            voxelTlasts[TlastId].shaded = waterTemperature - 273.15;
+            return;
+        }
+
+        if(abs(soilSets[bioId].method-1)<0.1)
+        {
+            for(int i =TLASTNUM-1; i>0; i--)
+            {   
+                voxelTlasts[TlastId+i].sunlit = voxelTlasts[TlastId+i-1].sunlit;
+                voxelTlasts[TlastId+i].shaded = voxelTlasts[TlastId+i-1].shaded;
+            }
+            float Tsunlit,Tshaded;
+            Tsunlit = voxelTempes[bufferId].sunlit;
+            Tshaded = voxelTempes[bufferId].shaded;
+            if(Tsunlit > TMAX_THRESHOLD || Tshaded > TMAX_THRESHOLD)
+            {
+                Tsunlit = Ta+2.0+273.15;
+                Tshaded = Ta+1.0+273.15;
+            }
+            if(Tsunlit < TMIN_THRESHOLD || Tshaded < TMIN_THRESHOLD)
+            {
+                Tsunlit = Ta+2.0+273.15;
+                Tshaded = Ta+1.0+273.15;
+            }
+           
+            voxelTlasts[TlastId].sunlit = Tsunlit-273.15;
+            voxelTlasts[TlastId].shaded = Tshaded-273.15;
+        }
+        if(soilSets[bioId].method ==2){ //廓线计算
+
+             for(int issunlit = 0;issunlit < 2;issunlit++)
+            {
+                if(issunlit == 0)
+                {
+                    Ts = voxelTempes[bufferId].shaded; 
+                }else
+                {
+                    Ts = voxelTempes[bufferId].sunlit; 
+                }
+
+                float ToldProfile[TLASTNUM],Mprofile[TLASTNUM],TnewProfile[TLASTNUM];
+                for(int kdepth = 0;kdepth <TLASTNUM;kdepth++){
+                    if(issunlit == 0) ToldProfile[kdepth] = voxelTlasts[TlastId+kdepth].shaded;
+                    else ToldProfile[kdepth] = voxelTlasts[TlastId+kdepth].sunlit;
+                    TnewProfile[kdepth] = 0;
+                    Mprofile[kdepth] = ubom.meteo.sm;
+                }
+                Soilheatflux(ToldProfile,Mprofile,Ts-273.15,Gst,TnewProfile,dtime);
+
+                for(int kdepth = 0;kdepth <TLASTNUM;kdepth++){
+                    if(issunlit == 0) voxelTlasts[TlastId + kdepth].shaded = TnewProfile[kdepth];
+                    else voxelTlasts[TlastId + kdepth].sunlit = TnewProfile[kdepth];
+                }
+
+            }
+        }
+    }
+
+}

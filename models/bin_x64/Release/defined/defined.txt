@@ -1,0 +1,14 @@
+LAi density height width Gleaf LIDFa LIDFb hspot leafwidth type dist
+3.15  1      3      3    0.5  -0.35 -0.15 0.2  0.2     1     1 
+Cab   Cw     Cdm      Cs    N    rho_thermal tau_thermal
+58.0 0.013 0.0036    0.0  1.86    0.025        0.01 
+ Vcmo M Type  Tpar Tpar Tpar Tpar Tpar Rdparam  Tyear beta kNPQs qls  kv stressfactor 
+ 80  9  0    0.2  0.3  281  313  328   0.015    20   0.4  0.0    1 0.6396  1  
+BSMBright BSMlat BSMlon  rs_thermal
+0.5        25     45      0.07 
+rs   cs   rhos  lamda rbs  smc  tsoil   satwater
+200  1180   1100     1.55   10  0.25  20     0.45 
+z0 d   rbc  cr cd  cd1  psicor  cssoil   rwc rbs
+10 1.34 10 0.35 0.2   20.6   0.2  0.01  0.0  10  
+z, sm, ea, Ca, Oa, Tsold, SatWater, dTIme
+15 0.25 15 380 209 25 0.45 1800 

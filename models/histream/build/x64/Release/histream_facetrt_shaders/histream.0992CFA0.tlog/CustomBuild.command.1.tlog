@@ -1,0 +1,78 @@
+^C:\WORK\STREAMSIM\MODELS\HISTREAM\BUILD\CMAKEFILES\936833D52A13BCC200C9A1CB215E51F5\DIRECT_RESOLVE.COMP.SPV.RULE
+setlocal
+"C:\Program Files\Microsoft Visual Studio\18\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E make_directory C:/work/streamsim/models/histream/build/shader/facetrt
+if %errorlevel% neq 0 goto :cmEnd
+C:\VulkanSDK\1.3.275.0\Bin\glslc.exe --target-env=vulkan1.2 C:/work/streamsim/models/histream/shader/facetrt/direct_resolve.comp -o C:/work/streamsim/models/histream/build/shader/facetrt/direct_resolve.comp.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\WORK\STREAMSIM\MODELS\HISTREAM\BUILD\CMAKEFILES\936833D52A13BCC200C9A1CB215E51F5\RADIOSITY.COMP.SPV.RULE
+setlocal
+"C:\Program Files\Microsoft Visual Studio\18\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E make_directory C:/work/streamsim/models/histream/build/shader/facetrt
+if %errorlevel% neq 0 goto :cmEnd
+C:\VulkanSDK\1.3.275.0\Bin\glslc.exe --target-env=vulkan1.2 C:/work/streamsim/models/histream/shader/facetrt/radiosity.comp -o C:/work/streamsim/models/histream/build/shader/facetrt/radiosity.comp.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\WORK\STREAMSIM\MODELS\HISTREAM\BUILD\CMAKEFILES\936833D52A13BCC200C9A1CB215E51F5\VISIBILITY.FRAG.SPV.RULE
+setlocal
+"C:\Program Files\Microsoft Visual Studio\18\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E make_directory C:/work/streamsim/models/histream/build/shader/facetrt
+if %errorlevel% neq 0 goto :cmEnd
+C:\VulkanSDK\1.3.275.0\Bin\glslc.exe --target-env=vulkan1.2 C:/work/streamsim/models/histream/shader/facetrt/visibility.frag -o C:/work/streamsim/models/histream/build/shader/facetrt/visibility.frag.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\WORK\STREAMSIM\MODELS\HISTREAM\BUILD\CMAKEFILES\936833D52A13BCC200C9A1CB215E51F5\VISIBILITY.VERT.SPV.RULE
+setlocal
+"C:\Program Files\Microsoft Visual Studio\18\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E make_directory C:/work/streamsim/models/histream/build/shader/facetrt
+if %errorlevel% neq 0 goto :cmEnd
+C:\VulkanSDK\1.3.275.0\Bin\glslc.exe --target-env=vulkan1.2 C:/work/streamsim/models/histream/shader/facetrt/visibility.vert -o C:/work/streamsim/models/histream/build/shader/facetrt/visibility.vert.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\WORK\STREAMSIM\MODELS\HISTREAM\BUILD\CMAKEFILES\936833D52A13BCC200C9A1CB215E51F5\VISIBILITY_RESOLVE.COMP.SPV.RULE
+setlocal
+"C:\Program Files\Microsoft Visual Studio\18\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E make_directory C:/work/streamsim/models/histream/build/shader/facetrt
+if %errorlevel% neq 0 goto :cmEnd
+C:\VulkanSDK\1.3.275.0\Bin\glslc.exe --target-env=vulkan1.2 C:/work/streamsim/models/histream/shader/facetrt/visibility_resolve.comp -o C:/work/streamsim/models/histream/build/shader/facetrt/visibility_resolve.comp.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\WORK\STREAMSIM\MODELS\HISTREAM\BUILD\CMAKEFILES\4DBE47A2C0A645945260F84881AC8A2F\HISTREAM_FACETRT_SHADERS.RULE
+setlocal
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\WORK\STREAMSIM\MODELS\HISTREAM\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\Microsoft Visual Studio\18\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -SC:/work/streamsim/models/histream -BC:/work/streamsim/models/histream/build --check-stamp-file C:/work/streamsim/models/histream/build/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

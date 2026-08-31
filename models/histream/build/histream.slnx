@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Solution>
+	<Configurations>
+		<BuildType Name="Debug"/>
+		<BuildType Name="Release"/>
+		<BuildType Name="MinSizeRel"/>
+		<BuildType Name="RelWithDebInfo"/>
+		<Platform Name="x64"/>
+	</Configurations>
+	<Project Path="histream.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="7f196aca-3e33-3761-9650-0209e9625dfa">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="nvpro_core/third_party/fmt.vcxproj"/>
+		<BuildDependency Project="nvpro_core/third_party/glfw/src/glfw.vcxproj"/>
+		<BuildDependency Project="histream_faceteb_shaders.vcxproj"/>
+		<BuildDependency Project="histream_facetrt_shaders.vcxproj"/>
+		<BuildDependency Project="nvpro_core/third_party/imgui.vcxproj"/>
+		<BuildDependency Project="nvpro_core/third_party/implot.vcxproj"/>
+		<BuildDependency Project="nvpro_core/nvpro_core.vcxproj"/>
+	</Project>
+	<Project Path="histream_faceteb_shaders.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="f3bb5517-3c49-3692-9967-57087fca2af8">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+	</Project>
+	<Project Path="histream_facetrt_shaders.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="0992cfa0-0caf-372b-af01-2f38207ea6b5">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+	</Project>
+	<Project Path="nvpro_core/nvpro_core.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="41d3cfaf-8cf7-3689-bf62-79643a9544fa">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="nvpro_core/third_party/fmt.vcxproj"/>
+		<BuildDependency Project="nvpro_core/third_party/glfw/src/glfw.vcxproj"/>
+		<BuildDependency Project="nvpro_core/third_party/imgui.vcxproj"/>
+		<BuildDependency Project="nvpro_core/third_party/implot.vcxproj"/>
+	</Project>
+	<Folder Name="/GLFW3/">
+		<Project Path="nvpro_core/third_party/glfw/src/update_mappings.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="c1fe91df-a48c-3cc7-a014-24c07b33882a">
+			<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+			<Build Solution="Debug|*" Project="false"/>
+			<Build Solution="Release|*" Project="false"/>
+			<Build Solution="MinSizeRel|*" Project="false"/>
+			<Build Solution="RelWithDebInfo|*" Project="false"/>
+		</Project>
+	</Folder>
+	<Folder Name="/ThirdParty/">
+		<Project Path="nvpro_core/third_party/fmt.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="6593bb53-9702-3ecb-9235-85da9dd003e5">
+			<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		</Project>
+		<Project Path="nvpro_core/third_party/glfw/src/glfw.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="75069267-59a8-3268-bd1b-3683a76984cc">
+			<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		</Project>
+		<Project Path="nvpro_core/third_party/imgui.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="4085d91d-9193-3011-8f41-fe07d4d51acd">
+			<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		</Project>
+		<Project Path="nvpro_core/third_party/implot.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="edfe0caf-a4e6-3afe-b122-dd7502a53fad">
+			<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		</Project>
+	</Folder>
+	<Folder Name="/_cmake/">
+		<Project Path="ALL_BUILD.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="ea0841d6-c5ac-30a7-9348-b9ae5fedeb22" DefaultStartup="true">
+			<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+			<BuildDependency Project="nvpro_core/third_party/fmt.vcxproj"/>
+			<BuildDependency Project="nvpro_core/third_party/glfw/src/glfw.vcxproj"/>
+			<BuildDependency Project="histream.vcxproj"/>
+			<BuildDependency Project="histream_faceteb_shaders.vcxproj"/>
+			<BuildDependency Project="histream_facetrt_shaders.vcxproj"/>
+			<BuildDependency Project="nvpro_core/third_party/imgui.vcxproj"/>
+			<BuildDependency Project="nvpro_core/third_party/implot.vcxproj"/>
+			<BuildDependency Project="nvpro_core/nvpro_core.vcxproj"/>
+		</Project>
+		<Project Path="INSTALL.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="1a63043a-891e-3cb3-8822-ebd634da1134">
+			<BuildDependency Project="ALL_BUILD.vcxproj"/>
+			<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+			<Build Solution="Debug|*" Project="false"/>
+			<Build Solution="Release|*" Project="false"/>
+			<Build Solution="MinSizeRel|*" Project="false"/>
+			<Build Solution="RelWithDebInfo|*" Project="false"/>
+		</Project>
+		<Project Path="ZERO_CHECK.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="99c8277d-88da-3c08-b060-8d4f01f767f0"/>
+	</Folder>
+</Solution>

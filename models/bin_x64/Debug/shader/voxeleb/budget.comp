@@ -1,0 +1,238 @@
+#version 460
+#extension GL_ARB_separate_shader_objects : enable
+#extension GL_EXT_nonuniform_qualifier : enable
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_scalar_block_layout : enable
+#extension GL_EXT_ray_tracing : enable
+#extension GL_EXT_ray_query : enable
+#extension GL_ARB_shader_clock : enable                 // Using clockARB
+#extension GL_EXT_shader_image_load_formatted : enable  // The folowing extension allow to pass images as function parameters
+
+#extension GL_NV_shader_sm_builtins : require     // Debug - gl_WarpIDNV, gl_SMIDNV
+#extension GL_ARB_gpu_shader_int64 : enable       // Debug - heatmap value
+#extension GL_EXT_shader_realtime_clock : enable  // Debug - heatmap timing
+
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_debug_printf : enable
+#extension GL_KHR_memory_scope_semantics:require
+#extension GL_EXT_shader_atomic_float: require 
+
+
+#define VOXEL_LST_BIND_ININDEX
+#define VOXELLST 
+
+#include "../bindinglayout.h"
+#include "../parameters.h"
+#include "../global.glsl"
+#include "../functions.glsl"
+#include "../nanovdb_info.glsl"
+
+#define NUM_VNIR 2001 
+#define NUM_BAND 2002
+
+layout(local_size_x = GROUP_SIZEX) in;
+
+void main()
+{
+    //------------------------------------------------------------
+    // Initialization for the position and SSBO index
+    //------------------------------------------------------------
+    uint bufferId = uint(gl_GlobalInvocationID.x);
+    //voxelRes: voxel number in 3 dimentions
+    ivec3 voxelRes = ivec3(setting.voxelSize);
+    uint instanceId = voxelLinks[bufferId].instanceId;
+
+    int faceId = voxelLinks[bufferId].faceId;
+    //if(primId0 - faceid0*10 == 0) return; 
+
+    //-------------------------
+    // various parameters index
+    //-------------------------
+    // VoxelInstanceLink instanceLink = instanceLinks[instanceId];
+    InstanceLink instanceLink = instanceLinks[instanceId];
+    MeshLink meshLink = meshLinks[instanceLink.meshId];
+    uint spectralId,canopyId,bioId,typeId;
+    spectralId = meshLink.spectralId;
+    canopyId = meshLink.canopyId;
+    bioId = meshLink.bioId;
+    typeId = meshLink.type;
+    if(typeId == TYPE_NULL) return;
+    //-------------------------
+    // various parameters associated with radiation 
+    //-------------------------
+    // in: incident direct+diffuse VNIR+TIR radiance
+    float inShadedRad = voxelNetRads[bufferId].diffuseVrad + voxelNetRads[bufferId].diffuseTrad;
+    float inSunlitRad = inShadedRad + voxelNetRads[bufferId].directTrad + voxelNetRads[bufferId].directVrad;
+    float TsunlitOld,TshadedOld;
+    TsunlitOld = voxelTempes[bufferId].sunlit;
+    TshadedOld = voxelTempes[bufferId].shaded;
+    // in: thermal emittance radiance 
+    uint spectralBase = spectralId * NUM_BAND;
+    float refl = spectralMaterials[spectralBase + NUM_VNIR].reflectance;
+    float trans = spectralMaterials[spectralBase + NUM_VNIR].transmittance;
+    float emis = 1-refl-trans;
+    float outShadedRad;
+    float outSunlitRad;
+    // float outShadedRad = Stefen_Boltzmann(TshadedOld,emis);
+    // float outSunlitRad = Stefen_Boltzmann(TsunlitOld,emis);
+    //---------------------------------------------
+    // Calculate net radiation for sunlit/shaded veg/soil
+    //---------------------------------------------
+    float netSunlitRad,netShadedRad;
+    if(typeId == TYPE_VEGETATION)
+    { 
+        // float lai = canopies[canopyId].lai;
+        // float p = calReCor(lai);
+        // float w = refl + trans;
+        // float s = (w - p* w) / (1 - p* w);
+        // float a = (1-w) / (1 - p *w); 
+        // emis = a;
+        outShadedRad = Stefen_Boltzmann(TshadedOld,emis);
+        outSunlitRad = Stefen_Boltzmann(TsunlitOld,emis);
+        netSunlitRad = inSunlitRad - outSunlitRad;
+        netShadedRad = inShadedRad - outShadedRad;
+    }else if(typeId == TYPE_SOIL || typeId == TYPE_BUILDING || typeId == TYPE_WATER)
+    {
+        outShadedRad = Stefen_Boltzmann(TshadedOld,emis);
+        outSunlitRad = Stefen_Boltzmann(TsunlitOld,emis);
+        netSunlitRad = inSunlitRad - outSunlitRad;
+        netShadedRad = inShadedRad - outShadedRad;
+    }// IF TYPE
+
+    // soil heat storage 
+    float Gsunlit,Gshaded;
+    if(typeId == TYPE_WATER)
+    {
+        Gsunlit = voxelHeatFlux[bufferId].Gsunlit;
+        Gshaded = voxelHeatFlux[bufferId].Gshaded;
+    }
+    else
+    {
+        if(abs(voxelHeatFlux[bufferId].Gsunlit - GST)<0.01) Gsunlit = netSunlitRad * GST;
+        else Gsunlit = voxelHeatFlux[bufferId].Gsunlit;
+        if(abs(voxelHeatFlux[bufferId].Gshaded - GST)<0.01) Gshaded = netShadedRad * GST;
+        else Gshaded = voxelHeatFlux[bufferId].Gshaded;
+    }
+
+    //-------------------------------------------------------
+    //  Update surface temperature : old
+    //-------------------------------------------------------
+    // float Tsunlit,Tshaded;
+    // float Ta = ubom.meteo.Ta;
+    // float innovation1 = 0,innovation2 = 0;
+    // float wc = 0.1;  // update coefficient 
+    // // wc = 0.2;
+    // float raa = voxelRaas[bufferId].raa ;
+    // float diffHeatfluxSunlit =  voxelHeatFlux[bufferId].LEsunlit + Gsunlit;
+    // float diffHeatfluxShaded =  voxelHeatFlux[bufferId].LEshaded + Gshaded;
+    // innovation1 = raa/ (RHOA * CP) * (netSunlitRad - diffHeatfluxSunlit);
+    // Tsunlit = ubom.meteo.Ta +273.15+  wc* innovation1 +(1-wc) * (TsunlitOld-273.15 - ubom.meteo.Ta);
+    // innovation2 = raa / (RHOA * CP) * (netShadedRad - diffHeatfluxShaded);
+    // Tshaded = ubom.meteo.Ta +273.15+ wc * innovation2 +(1-wc) * (TshadedOld-273.15 - ubom.meteo.Ta);
+    // int count = 0;
+    // if (abs(innovation1) > RAD_THRESHOLD) count = count + 1;
+    // if( abs(innovation2) > RAD_THRESHOLD) count = count + 1;
+
+    //-------------------------------------------------------
+    //  Update surface temperature : new
+    //-------------------------------------------------------
+    float Tsunlit,Tshaded;
+    float Ta = ubom.meteo.Ta;
+    float e_to_q = MH20 / MAIR / ubom.meteo.p;
+    float ei_sunlit = es_fun(TsunlitOld);
+    float s_sunlit = s_fun(ei_sunlit, TsunlitOld);
+    float ei_shaded = es_fun(TshadedOld);
+    float s_shaded = s_fun(ei_shaded, TshadedOld);
+    float innovation1 = 0,innovation2 = 0;
+    float raa = voxelRaas[bufferId].raa ;
+    float rss_sunlit = voxelRsss[bufferId].sunlit;
+    float rss_shaded = voxelRsss[bufferId].shaded;
+    float diffSunlitRad, diffShadedRad;
+    // float diffSunlitRad = netSunlitRad - (voxelHeatFlux[bufferId].LEsunlit + Gsunlit + voxelHeatFlux[bufferId].Hsunlit);
+    // float diffShadedRad = netShadedRad - (voxelHeatFlux[bufferId].LEshaded + Gshaded + voxelHeatFlux[bufferId].Hshaded);
+    float lambdas_sunlit = (2.501-0.002361*TsunlitOld)*1E6;
+    float lambdas_shaded = (2.501-0.002361*TshadedOld)*1E6;
+    float wc = 0.2;
+    // if(setting.theIteration>5) wc = 0.3;
+    // if(setting.theIteration>10) wc = 0.2;
+    // if(setting.theIteration>30) wc = 0.1;
+    // Tsunlit = TsunlitOld + diffSunlitRad * wc / ((RHOA*CP)/raa+
+    //     RHOA*lambdas_sunlit*e_to_q*s_sunlit/(raa+rss_sunlit)+4*SIGMASB*pow(TsunlitOld,3));
+    // Tshaded = TshadedOld + diffShadedRad * wc / ((RHOA*CP)/raa+
+    //     RHOA*lambdas_shaded*e_to_q*s_shaded/(raa+rss_shaded)+4*SIGMASB*pow(TshadedOld,3));
+    //    分母第二项太大了，导致温度修正量很小很小
+    // 暂时先用下列近似情况
+    // Tsunlit = TsunlitOld + diffSunlitRad * wc / ((RHOA*CP)/raa + (RHOA*CP)/raa + 4*SIGMASB*pow(TsunlitOld,3));
+    // Tshaded = TshadedOld + diffShadedRad * wc / ((RHOA*CP)/raa + (RHOA*CP)/raa + 4*SIGMASB*pow(TshadedOld,3));
+    // Tsunlit = TsunlitOld + diffSunlitRad * wc / ((RHOA*CP)/raa + 4*SIGMASB*pow(TsunlitOld,3));
+    // Tshaded = TshadedOld + diffShadedRad * wc / ((RHOA*CP)/raa + 4*SIGMASB*pow(TshadedOld,3));
+    if(typeId == TYPE_VEGETATION)
+    { 
+        diffSunlitRad = netSunlitRad - (voxelHeatFlux[bufferId].LEsunlit + voxelHeatFlux[bufferId].Hsunlit);
+        diffShadedRad = netShadedRad - (voxelHeatFlux[bufferId].LEshaded + voxelHeatFlux[bufferId].Hshaded);
+        Tsunlit = TsunlitOld + diffSunlitRad * wc / ((RHOA*CP)/raa + 4*SIGMASB*pow(TsunlitOld,3));
+        Tshaded = TshadedOld + diffShadedRad * wc / ((RHOA*CP)/raa + 4*SIGMASB*pow(TshadedOld,3));
+    }else if(typeId == TYPE_WATER)
+    {
+        float sunlitFraction = clamp(voxelDirs[bufferId].solar, 0.0, 1.0);
+        float TwaterOld = mix(TshadedOld, TsunlitOld, sunlitFraction);
+        float netWaterRad = mix(netShadedRad, netSunlitRad, sunlitFraction);
+        float Hwater = mix(voxelHeatFlux[bufferId].Hshaded,
+                           voxelHeatFlux[bufferId].Hsunlit, sunlitFraction);
+        float LEwater = mix(voxelHeatFlux[bufferId].LEshaded,
+                            voxelHeatFlux[bufferId].LEsunlit, sunlitFraction);
+        float Qwater = mix(Gshaded, Gsunlit, sunlitFraction);
+        // Open-water balance: Rn = H + LE + Qw.
+        float waterResidual = netWaterRad - Hwater - LEwater - Qwater;
+        float storageRate = max(
+            waterSets[bioId].heatCapacity * max(waterSets[bioId].mixingDepth, 0.01)
+            / max(ubom.meteo.dtime, 1.0), 1.0);
+        float denominator = storageRate + (RHOA * CP) / max(raa, 1.0)
+                            + 4.0 * SIGMASB * pow(TwaterOld, 3);
+        float Twater = TwaterOld + wc * waterResidual / denominator;
+        Tsunlit = Twater;
+        Tshaded = Twater;
+        diffSunlitRad = waterResidual;
+        diffShadedRad = waterResidual;
+    }else if(typeId == TYPE_SOIL || typeId == TYPE_BUILDING)
+    {
+        diffSunlitRad = netSunlitRad - (voxelHeatFlux[bufferId].LEsunlit + Gsunlit + voxelHeatFlux[bufferId].Hsunlit);
+        diffShadedRad = netShadedRad - (voxelHeatFlux[bufferId].LEshaded + Gshaded + voxelHeatFlux[bufferId].Hshaded);
+        Tsunlit = TsunlitOld + diffSunlitRad * wc / ((RHOA*CP)/raa + (RHOA*CP)/raa + 4*SIGMASB*pow(TsunlitOld,3));
+        Tshaded = TshadedOld + diffShadedRad * wc / ((RHOA*CP)/raa + (RHOA*CP)/raa + 4*SIGMASB*pow(TshadedOld,3));
+    }// IF TYPE
+    int count=0;
+    if (abs(diffSunlitRad) > RAD_THRESHOLD) count = count + 1;
+    if (abs(diffShadedRad) > RAD_THRESHOLD) count = count + 1;
+
+
+
+    //-----------------------------------------
+    // adjust bad temperature 
+    //-----------------------------------------
+    if(Tsunlit > TMAX_THRESHOLD || Tshaded > TMAX_THRESHOLD)
+    {
+        Tsunlit = Ta + 2.0 + 273.15;
+        Tshaded = Ta + 1.0 + 273.15;
+    }
+    if(Tsunlit < TMIN_THRESHOLD || Tshaded < TMIN_THRESHOLD)
+    {
+        Tsunlit = Ta + 2.0 + 273.15;
+        Tshaded = Ta + 1.0 + 273.15;
+    }
+
+
+    //-------------------------------------------
+    // SAVE BACK
+    //------------------------------------------- 
+
+    
+    voxelTempes[bufferId].sunlit = Tsunlit;
+    voxelTempes[bufferId].shaded = Tshaded;
+    atomicAdd(ebState.count,count,gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
+
+
+}
+
+
