@@ -62,12 +62,32 @@ bool Buffer::createBuffer(std::shared_ptr<VoxelebIO> &voxellstio){
 
     // tempe
     VkCommandBuffer cmdBufTempe = cmdGen.createCommandBuffer();
-    std::vector<VoxelTempe> voxelTempes(n_voxel, VoxelTempe{305, 295});
+    std::vector<VoxelTempe> voxelTempes(n_voxel, VoxelTempe{298.15f, 298.15f});
     for (int i = 0; i < n_voxel; ++i) {
         const int instanceId = voxelio->voxellinks[i].instanceId;
         const int meshId = instanceio->instanceLinks[instanceId].meshId;
-        if (meshio->meshLinks[meshId].type == static_cast<int>(Type::WATER)) {
-            voxelTempes[i] = VoxelTempe{298.15f, 298.15f};
+        const MeshLink &meshLink = meshio->meshLinks[meshId];
+        if (meshLink.type == static_cast<int>(Type::SOIL)) {
+            const int bioId = meshLink.bioId;
+            if (bioId >= 0 && bioId < static_cast<int>(meshio->soilsets.size())) {
+                const float soilTemperatureC = meshio->soilsets[bioId].Tsoil;
+                if (soilTemperatureC > -100.0f && soilTemperatureC < 100.0f) {
+                    voxelTempes[i] = VoxelTempe{
+                        soilTemperatureC + 273.15f,
+                        soilTemperatureC + 273.15f
+                    };
+                }
+            }
+        } else if (meshLink.type == static_cast<int>(Type::VEGETATION) ||
+                   meshLink.type == static_cast<int>(Type::BUILDING) ||
+                   meshLink.type == static_cast<int>(Type::WATER)) {
+            const int thermalId = meshLink.thermalId;
+            if (thermalId >= 0 && thermalId < static_cast<int>(meshio->thermals.size())) {
+                voxelTempes[i] = VoxelTempe{
+                    meshio->thermals[thermalId].sunlitTemperature,
+                    meshio->thermals[thermalId].shadedTemperature
+                };
+            }
         }
     }
     voxelio->m_pTempeBuffer = std::make_shared<nvvk::Buffer>(m_pAlloc->createBuffer(cmdBufTempe, voxelTempes,

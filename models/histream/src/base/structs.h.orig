@@ -222,10 +222,8 @@ struct SensorXml
     Projection projection;
     glm::vec2 resolution;			   // { WIDTH, HEIGHT }
     std::vector<glm::vec2> viewAngles; // { zenith, azimuth }
-    glm::vec3 position{0.0f, 0.0f, 3000.0f}; // world XYZ: east, north, height (m)
     std::vector<float> waves;
     bool isImage{true};
-    bool isProcess{false};
     bool isOrth{false};
     bool isAlbedo{false};
     bool isTemperature{true};
@@ -290,7 +288,6 @@ struct Background
     glm::vec3 sMax{ 5,5,5 };*/
     float stepsize_surface;
     float stepsize_height;
-    float voxelFillThreshold{0.05f};
     // for dem option
     bool isDEM{false};
     std::string DEMFile;
@@ -398,9 +395,7 @@ struct PrimEntity
     std::vector<float> scales{1};
     std::vector<float> rotations{0};
 
-    bool voxelizeFromObj{false};
-    std::string objFile;
-    float voxelFillThreshold{0.05f};
+
 };
 
 

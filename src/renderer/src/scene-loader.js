@@ -59,6 +59,8 @@ export async function loadXmlScene({ api, world, config, log }) {
       if (item.fileName) {
         const result = await api.readText(item.fileName)
         const source = new OBJLoader().parse(result.content)
+        const sourceBounds = new THREE.Box3().setFromObject(source)
+        if (Number.isFinite(sourceBounds.min.y)) source.position.y -= sourceBounds.min.y
         source.traverse((child) => {
           if (!child.isMesh) return
           child.castShadow = child.receiveShadow = true
@@ -68,7 +70,7 @@ export async function loadXmlScene({ api, world, config, log }) {
           const object = source.clone(true)
           object.userData.projectObject = true
           object.scale.setScalar(sceneScale * placement.scale)
-          object.position.set(placement.x * sceneScale - worldWidth / 2, placement.z * sceneScale, worldDepth / 2 - placement.y * sceneScale)
+          object.position.set(placement.x * sceneScale - worldWidth / 2, placement.z * sceneScale, placement.y * sceneScale - worldDepth / 2)
           object.rotation.y = THREE.MathUtils.degToRad(placement.rotation)
           world.add(object)
           instanceCount += 1
@@ -79,7 +81,7 @@ export async function loadXmlScene({ api, world, config, log }) {
           object.userData.projectObject = true
           object.userData.kind = item.type.includes('build') ? 'building' : 'vegetation'
           object.scale.multiplyScalar(sceneScale * placement.scale)
-          object.position.set(placement.x * sceneScale - worldWidth / 2, placement.z * sceneScale + object.scale.y / 2, worldDepth / 2 - placement.y * sceneScale)
+          object.position.set(placement.x * sceneScale - worldWidth / 2, placement.z * sceneScale + object.scale.y / 2, placement.y * sceneScale - worldDepth / 2)
           object.rotation.y = THREE.MathUtils.degToRad(placement.rotation)
           object.castShadow = object.receiveShadow = true
           world.add(object)

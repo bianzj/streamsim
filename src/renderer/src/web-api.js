@@ -39,6 +39,7 @@ export const webApi = {
   },
   chooseObj: () => chooseFile('.obj,text/plain'),
   importObj: ({ name, content }) => post('/api/project/import-obj', { name, content }),
+  importMeteo: ({ name, content }) => post('/api/project/import-meteo', { name, content }),
   saveDistribution: (data) => post("/api/project/distribution", data),
   readText: (path) => post('/api/project/read', { path }),
   saveXml: async ({ path, content, project }) => {

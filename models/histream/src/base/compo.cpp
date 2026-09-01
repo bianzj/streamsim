@@ -217,6 +217,21 @@ bool Compo::createCompProperty(std::shared_ptr<FileIO> &fileio, std::shared_ptr<
     auto & definedio = modelio->m_defined;
     int num = 0;
 
+    meshio->thermals.clear();
+    meshio->thermalNames.clear();
+    int thermalId = 0;
+    for (const auto &thermalxml : fileio->m_pVoxelebXml->thermalxmls) {
+        meshio->thermals.push_back(Thermal{
+            thermalxml.sunlitTemperature,
+            thermalxml.shadedTemperature
+        });
+        meshio->thermalNames.insert({thermalxml.thermalName, thermalId++});
+    }
+    if (meshio->thermals.empty()) {
+        meshio->thermals.push_back(Thermal{300.0f, 300.0f});
+        meshio->thermalNames.insert({"__default_thermal", 0});
+    }
+
     int id = 0;
     for(auto &spectralxml: fileio->m_pVoxelebXml->spectralxmls ){
 

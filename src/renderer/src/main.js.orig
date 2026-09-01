@@ -36,8 +36,7 @@ const state = {
   presetPhysicalType: 'Vegetation',
   resultFiles: [],
   selectedResult: null,
-  resultRaster: null,
-  resultView: 'image'
+  resultRaster: null
 }
 
 function mergeNamedPresets(presets, values) {
@@ -77,11 +76,6 @@ function parsePair(value, fallback) {
   return parts.length >= 2 && parts.every(Number.isFinite) ? parts : fallback
 }
 
-function parseTriple(value, fallback) {
-  const parts = String(value).split(',').map(Number)
-  return parts.length >= 3 && parts.slice(0, 3).every(Number.isFinite) ? parts.slice(0, 3) : fallback
-}
-
 function parseMaterialNode(node) {
   const type = node.tagName === 'leafBio' ? 'Vegetation' : node.tagName === 'waterSet' ? 'Water' : 'Soil'
   let params
@@ -116,13 +110,6 @@ function parseXml(content) {
   const base = defaultConfig()
   const lightPair = parsePair(xmlValue(doc, 'Geometry Light light lightAngle lightAngle', '30,135'), [30, 135])
   const viewPair = parsePair(xmlValue(doc, 'Geometry Sensor sensor viewAngle viewAngle[type="custom"] viewAngles', '0,0'), [0, 0])
-  const sceneX = Number(xmlValue(doc, 'Scene sceneSizeX', base.scene.x))
-  const sceneY = Number(xmlValue(doc, 'Scene sceneSizeY', base.scene.y))
-  const projectionText = xmlValue(doc, 'Geometry Sensor sensor projection', 'parallel').toLowerCase()
-  const sensorPosition = parseTriple(
-    xmlValue(doc, 'Geometry Sensor sensor sensorPosition', ''),
-    [sceneX / 2, sceneY / 2, 3000]
-  )
   const objectNodes = [...doc.querySelectorAll('Scene Object object')]
   const names = objectNodes.map((node) => node.getAttribute('objName') || node.getAttribute('name') || `对象 ${node.getAttribute('id') || ''}`)
   const items = objectNodes.map((node) => {
@@ -160,18 +147,11 @@ function parseXml(content) {
   return {
     outDir: xmlValue(doc, 'Control outDir', ''),
     scene: {
-      x: sceneX,
-      y: sceneY,
+      x: Number(xmlValue(doc, 'Scene sceneSizeX', base.scene.x)),
+      y: Number(xmlValue(doc, 'Scene sceneSizeY', base.scene.y)),
       height: Number(xmlValue(doc, 'Scene Height', base.scene.height)),
       voxel: Number(xmlValue(doc, 'Scene voxelSize', base.scene.voxel)),
-      voxelFillThreshold: Number(xmlValue(doc, 'Scene voxelFillThreshold', base.scene.voxelFillThreshold)),
-      terrain: xmlValue(doc, 'Control isDEM', '0') === '1',
-      background: {
-        spectralName: xmlValue(doc, 'Scene bgSpectral', base.scene.background.spectralName),
-        thermalName: xmlValue(doc, 'Scene bgThermal', base.scene.background.thermalName),
-        materialType: xmlValue(doc, 'Scene bgBioType', base.scene.background.materialType),
-        materialName: xmlValue(doc, 'Scene bgBioName', base.scene.background.materialName)
-      }
+      terrain: xmlValue(doc, 'Control isDEM', '0') === '1'
     },
     light: {
       zenith: lightPair[0], azimuth: lightPair[1],
@@ -183,9 +163,7 @@ function parseXml(content) {
       x: Number(xmlValue(doc, 'Geometry Sensor sensor pixelResolutionX', base.sensor.x)),
       y: Number(xmlValue(doc, 'Geometry Sensor sensor pixelResolutionY', base.sensor.y)),
       bands: xmlValue(doc, 'Geometry Sensor sensor controlBand', base.sensor.bands),
-      projection: ['perspective', 'central', 'center'].includes(projectionText) ? 'perspective' : 'parallel',
       vza: viewPair[0], vaa: viewPair[1],
-      positionX: sensorPosition[0], positionY: sensorPosition[1], height: sensorPosition[2],
       image: xmlValue(doc, 'Control isImage', '1') === '1',
       temperature: xmlValue(doc, 'Control isTemperature', '1') === '1',
       process: xmlValue(doc, 'Control isProcess', '0') === '1',
@@ -193,10 +171,7 @@ function parseXml(content) {
     },
     control: {
       depth: Number(xmlValue(doc, 'Control rayTracingDepth', base.control.depth)),
-      gpu: Number(xmlValue(doc, 'Control GPU', base.control.gpu)),
-      couplingIterations: Number(xmlValue(doc, 'Control couplingIterations', base.control.couplingIterations)),
-      temperatureTolerance: Number(xmlValue(doc, 'Control temperatureTolerance', base.control.temperatureTolerance)),
-      temperatureRelaxation: Number(xmlValue(doc, 'Control temperatureRelaxation', base.control.temperatureRelaxation))
+      gpu: Number(xmlValue(doc, 'Control GPU', base.control.gpu))
     },
     objects: { count: objectNodes.length, names: names.length ? names : ['均质地表'], items },
     spectra: spectra.length ? spectra : base.spectra,
@@ -214,16 +189,7 @@ function parseXml(content) {
 function updateXml(selector, value) {
   if (!state.xmlText) return
   const parsed = new DOMParser().parseFromString(state.xmlText, 'application/xml')
-  let node = parsed.querySelector(selector)
-  if (!node) {
-    const parts = selector.trim().split(/\s+/)
-    const tagName = parts.pop()
-    const parent = parts.length ? parsed.querySelector(parts.join(' ')) : null
-    if (parent && /^[A-Za-z_][\w:.-]*$/.test(tagName)) {
-      node = parsed.createElement(tagName)
-      parent.appendChild(node)
-    }
-  }
+  const node = parsed.querySelector(selector)
   if (!node) return
   node.textContent = String(value)
   state.xmlText = new XMLSerializer().serializeToString(parsed)
@@ -293,8 +259,8 @@ function setRunning(running) {
 // Three.js 场景
 const viewport = $('#viewport')
 const scene = new THREE.Scene()
-scene.background = new THREE.Color(0xf3f6fa)
-scene.fog = new THREE.FogExp2(0xf3f6fa, 0.012)
+scene.background = new THREE.Color(0x091310)
+scene.fog = new THREE.FogExp2(0x091310, 0.012)
 const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 1200)
 camera.position.set(25, 22, 28)
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' })
@@ -311,8 +277,8 @@ controls.dampingFactor = 0.075
 controls.maxPolarAngle = Math.PI * 0.48
 controls.minDistance = 4
 controls.maxDistance = 320
-scene.add(new THREE.HemisphereLight(0xe8f1fb, 0xb8c8d8, 1.65))
-const sun = new THREE.DirectionalLight(0xfff7e8, 3.2)
+scene.add(new THREE.HemisphereLight(0xb7ddd0, 0x172118, 1.65))
+const sun = new THREE.DirectionalLight(0xfff0c6, 3.2)
 sun.castShadow = true
 sun.shadow.mapSize.set(2048, 2048)
 sun.shadow.camera.left = sun.shadow.camera.bottom = -70
@@ -375,12 +341,12 @@ function generateWorld(config = defaultConfig()) {
     positions.setZ(i, height)
   }
   groundGeo.computeVertexNormals()
-  const ground = new THREE.Mesh(groundGeo, material(0xcbd8e6, .96))
+  const ground = new THREE.Mesh(groundGeo, material(0x34493b, .96))
   ground.rotation.x = -Math.PI / 2
   ground.receiveShadow = true
   ground.userData.kind = 'ground'
   world.add(ground)
-  grid = new THREE.GridHelper(Math.max(width, depth), Math.max(8, Math.round(Math.max(width, depth) / 1.5)), 0x7895b5, 0xb8c6d6)
+  grid = new THREE.GridHelper(Math.max(width, depth), Math.max(8, Math.round(Math.max(width, depth) / 1.5)), 0x5c8876, 0x274438)
   grid.position.y = .012
   grid.material.opacity = .23
   grid.material.transparent = true
@@ -447,7 +413,7 @@ function animate(now) {
 requestAnimationFrame(animate)
 
 // 属性面板
-const panelTitles = { scene: '场景', light: '太阳与天空', sensor: '传感器', objects: '场景对象', materials: '材质属性', meteorology: '气象驱动', simulation: '仿真模拟' }
+const panelTitles = { scene: '场景', light: '太阳与天空', sensor: '传感器', objects: '场景对象', materials: '材质属性', meteorology: '气象驱动' }
 function inputUnit(id, value, unit, attrs = '') { return `<div class="input-with-unit"><input class="input" id="${id}" value="${escapeHtml(value)}" ${attrs}><span>${unit}</span></div>` }
 function field(label, content) { return `<div class="field"><label>${label}</label>${content}</div>` }
 function switchRow(label, id, on) { return `<div class="switch-row"><span>${label}</span><button class="switch ${on ? 'on' : ''}" id="${id}" role="switch" aria-checked="${on}"></button></div>` }
@@ -487,22 +453,18 @@ function renderInspector() {
   const voxelMode = state.mode === 'eVoxelRT' || state.mode === 'eVoxelEB'
   const voxelTarget = state.mode === 'eFacetEB' ? 'eVoxelEB' : 'eVoxelRT'
   const voxelTargetLabel = voxelTarget === 'eVoxelEB' ? '体元能量平衡' : '体元辐射传输'
-  const background = c.scene.background || {}
-  const backgroundPanel = `<div class="property-group"><h3>背景属性（均质地表）</h3>${field('光谱属性', `<select class="select" id="backgroundSpectral">${bindingOptionList(c.spectra, background.spectralName, 'soil')}</select>`)}${field('温度属性', `<select class="select" id="backgroundThermal">${bindingOptionList(c.thermals, background.thermalName, 'soil_temperature')}</select>`)}${field('物化属性', `<select class="select" id="backgroundMaterial">${bindingOptionList(c.materials, background.materialName, 'soilset')}</select>`)}<div class="notice">土壤等均质背景的属性在此设置。</div></div>`
   const voxelChannel = `<div class="property-group"><h3>面元 → 体元通道</h3><div class="metric-grid"><div class="metric"><strong>${voxelShape.join(' × ')}</strong><small>体元网格</small></div><div class="metric"><strong>${voxelCount.toLocaleString('zh-CN')}</strong><small>包围盒体元数</small></div></div><div class="notice">保留 OBJ、材质和位置；当前按对象类型、包围盒尺寸与分布位置建立稀疏体元。</div><button class="button ghost" id="facetToVoxelAction" style="width:100%;justify-content:center;margin-top:9px" ${voxelMode ? 'disabled' : ''}>${voxelMode ? '体元通道已启用' : `转换到${voxelTargetLabel}`}</button></div>`
   let html = ''
   if (state.panel === 'scene') {
     const projectBlock = `<div class="property-group"><h3>当前工程</h3><div class="path-input"><span title="${escapeHtml(state.inputPath)}">${escapeHtml(state.inputPath || '未打开 Input.xml')}</span></div><button class="button ghost" id="openProjectAction" style="width:100%;justify-content:center;margin-top:9px">打开其他工程</button></div>`
-    html = `${projectBlock}<div class="property-group"><h3>空间范围</h3>${field('X 尺寸', inputUnit('sceneX', c.scene.x, 'm', 'type="number" min="1"'))}${field('Y 尺寸', inputUnit('sceneY', c.scene.y, 'm', 'type="number" min="1"'))}${field('最大高度', inputUnit('sceneHeight', c.scene.height, 'm', 'type="number" min="0.1"'))}${field('体元大小', inputUnit('voxelSize', c.scene.voxel, 'm', 'type="number" min="0.1" step="0.1"'))}${field('OBJ填充阈值', inputUnit('voxelFillThreshold', c.scene.voxelFillThreshold, '0–1', 'type="number" min="0" max="1" step="0.01"'))}${switchRow('启用 DEM 地形', 'terrainSwitch', c.scene.terrain)}</div>${backgroundPanel}${voxelChannel}${builtinNotice()}`
+    html = `${projectBlock}<div class="property-group"><h3>空间范围</h3>${field('X 尺寸', inputUnit('sceneX', c.scene.x, 'm', 'type="number" min="1"'))}${field('Y 尺寸', inputUnit('sceneY', c.scene.y, 'm', 'type="number" min="1"'))}${field('最大高度', inputUnit('sceneHeight', c.scene.height, 'm', 'type="number" min="0.1"'))}${field('体元大小', inputUnit('voxelSize', c.scene.voxel, 'm', 'type="number" min="0.1" step="0.1"'))}${switchRow('启用 DEM 地形', 'terrainSwitch', c.scene.terrain)}</div>${voxelChannel}
+      <div class="property-group"><h3>计算控制</h3>${field('追踪深度', `<input class="input" id="rayDepth" type="number" min="1" max="64" value="${c.control.depth}">`)}${field('GPU 序号', `<input class="input" id="gpuIndex" type="number" min="0" value="${c.control.gpu}">`)}</div>${builtinNotice()}`
   } else if (state.panel === 'light') {
     html = `<div class="property-group"><h3>太阳位置</h3>${field('太阳天顶角', inputUnit('sunZenith', c.light.zenith, '°', 'type="number" min="0" max="90"'))}${field('太阳方位角', inputUnit('sunAzimuth', c.light.azimuth, '°', 'type="number" min="0" max="360"'))}</div>
       <div class="property-group"><h3>辐照条件</h3>${field('直射比例', `<div class="range-wrap"><input class="range" id="directLight" type="range" min="0" max="1" step="0.01" value="${c.light.direct}"><span class="range-value" id="directValue">${c.light.direct.toFixed(2)}</span></div>`)}${field('漫射比例', `<div class="range-wrap"><input class="range" id="diffuseLight" type="range" min="0" max="1" step="0.01" value="${c.light.diffuse}"><span class="range-value" id="diffuseValue">${c.light.diffuse.toFixed(2)}</span></div>`)}${field('天空温度', inputUnit('skyTemperature', c.light.skyTemperature, 'K', 'type="number"'))}</div>${builtinNotice()}`
   } else if (state.panel === 'sensor') {
-    const perspective = c.sensor.projection === 'perspective'
-    const projectionFields = perspective
-      ? `${field('传感器 X', inputUnit('sensorPositionX', c.sensor.positionX, 'm', 'type="number"'))}${field('传感器 Y', inputUnit('sensorPositionY', c.sensor.positionY, 'm', 'type="number"'))}${field('传感器高度', inputUnit('sensorHeight', c.sensor.height, 'm', 'type="number" min="0.01"'))}`
-      : `${field('观测天顶角', inputUnit('viewZenith', c.sensor.vza, '°', 'type="number" min="0" max="90"'))}${field('观测方位角', inputUnit('viewAzimuth', c.sensor.vaa, '°', 'type="number" min="0" max="360"'))}`
-    html = `<div class="property-group"><h3>成像参数</h3>${field('图像分辨率', `<div class="input-row"><input class="input" id="sensorX" type="number" value="${c.sensor.x}"><input class="input" id="sensorY" type="number" value="${c.sensor.y}"></div>`)}${field('波段 [nm]', `<input class="input" id="sensorBands" value="${escapeHtml(c.sensor.bands)}">`)}${field('投影方式', `<select class="input" id="sensorProjection"><option value="parallel" ${perspective ? '' : 'selected'}>平行投影</option><option value="perspective" ${perspective ? 'selected' : ''}>中心投影</option></select>`)}${projectionFields}</div><div class="property-group"><div class="notice">平行投影由观测角度确定方向；中心投影从指定位置朝向场景中心，默认位于场景中心上方 3000 m。</div></div>${builtinNotice()}`
+    html = `<div class="property-group"><h3>成像参数</h3>${field('图像分辨率', `<div class="input-row"><input class="input" id="sensorX" type="number" value="${c.sensor.x}"><input class="input" id="sensorY" type="number" value="${c.sensor.y}"></div>`)}${field('波段 [nm]', `<input class="input" id="sensorBands" value="${escapeHtml(c.sensor.bands)}">`)}${field('观测天顶角', inputUnit('viewZenith', c.sensor.vza, '°', 'type="number"'))}${field('观测方位角', inputUnit('viewAzimuth', c.sensor.vaa, '°', 'type="number"'))}</div>
+      <div class="property-group"><h3>输出产品</h3>${switchRow('逐时保存影像', 'imageSwitch', c.sensor.image)}${switchRow('逐时保存能量过程', 'processSwitch', c.sensor.process)}${switchRow('亮温产品', 'temperatureSwitch', c.sensor.temperature)}${switchRow('反照率产品', 'albedoSwitch', c.sensor.albedo)}</div>${builtinNotice()}`
   } else if (state.panel === 'objects') {
     const objectCards = (c.objects.items || []).map((item, index) => {
       const meshBindings = (item.meshes || []).map((mesh) => `${mesh.name}: ${mesh.spectralName} / ${mesh.thermalName}`).join('；') || '无 Mesh 映射'
@@ -518,12 +480,9 @@ function renderInspector() {
       <div class="property-group"><div class="notice">每个 OBJ 同时保存一套计算属性绑定和一套独立实例分布；点击“属性”或“分布”分别查看。</div></div>`
   } else if (state.panel === 'materials') {
     html = materialLibraryHtml(c)
-  } else if (state.panel === 'meteorology') {
-    html = `<div class="property-group"><h3>时间范围</h3>${field('开始节点', `<input class="input" id="meteoStart" type="number" value="${c.meteo.start}">`)}${field('结束节点', `<input class="input" id="meteoEnd" type="number" value="${c.meteo.end}">`)}</div>
-      <div class="property-group"><h3>驱动文件</h3><div class="path-input"><span title="${escapeHtml(c.meteo.path)}">${escapeHtml(c.meteo.path)}</span></div><label class="button ghost" for="meteoFile" style="width:100%;justify-content:center;margin-top:9px"><svg><use href="#i-import"/></svg>导入本地 meteo 文件<input id="meteoFile" type="file" accept=".txt,.meteo,.dat,.csv,text/plain" hidden></label><div class="notice">文件将复制到当前工程的 meteorology 目录，并自动写入 Input.xml。</div></div>${builtinNotice()}`
   } else {
-    const coupling = state.mode === 'eFacetEB' ? `<div class="property-group"><h3>面元 RT–EB 耦合</h3>${field('最大耦合迭代', `<input class="input" id="couplingIterations" type="number" min="1" max="100" value="${c.control.couplingIterations}">`)}${field('温度收敛阈值', inputUnit('temperatureTolerance', c.control.temperatureTolerance, 'K', 'type="number" min="0.001" step="0.01"'))}${field('温度松弛系数', `<input class="input" id="temperatureRelaxation" type="number" min="0.05" max="1" step="0.05" value="${c.control.temperatureRelaxation}">`)}<div class="notice">场景几何和面元可见性图只初始化一次；每个气象节点在同一模型内进行辐射传输与能量平衡耦合迭代，温度由收敛解得到。</div></div>` : ''
-    html = `<div class="property-group"><h3>模拟产出</h3>${switchRow('逐时保存图像', 'imageSwitch', c.sensor.image)}${switchRow('逐时保存完整能量过程', 'processSwitch', c.sensor.process)}${switchRow('输出温度', 'temperatureSwitch', c.sensor.temperature)}${switchRow('输出反照率', 'albedoSwitch', c.sensor.albedo)}</div><div class="property-group"><h3>计算控制</h3>${field('追踪深度', `<input class="input" id="rayDepth" type="number" min="1" max="64" value="${c.control.depth}">`)}${field('GPU 序号', `<input class="input" id="gpuIndex" type="number" min="0" value="${c.control.gpu}">`)}</div>${coupling}${builtinNotice()}`
+    html = `<div class="property-group"><h3>时间范围</h3>${field('开始节点', `<input class="input" id="meteoStart" type="number" value="${c.meteo.start}">`)}${field('结束节点', `<input class="input" id="meteoEnd" type="number" value="${c.meteo.end}">`)}</div>
+      <div class="property-group"><h3>驱动文件</h3><div class="path-input"><span title="${escapeHtml(c.meteo.path)}">${escapeHtml(c.meteo.path)}</span></div></div>${builtinNotice()}`
   }
   $('#inspectorContent').innerHTML = html
   bindInspector()
@@ -547,26 +506,9 @@ function bindInspector() {
   const c = state.config
   if (!c) return
   bindValue('sceneX', (v) => c.scene.x = v, 'Scene sceneSizeX'); bindValue('sceneY', (v) => c.scene.y = v, 'Scene sceneSizeY')
-  bindValue('sceneHeight', (v) => c.scene.height = v, 'Scene Height'); bindValue('voxelSize', (v) => c.scene.voxel = v, 'Scene voxelSize'); bindValue('voxelFillThreshold', (v) => c.scene.voxelFillThreshold = Math.min(1, Math.max(0, v)), 'Scene voxelFillThreshold')
+  bindValue('sceneHeight', (v) => c.scene.height = v, 'Scene Height'); bindValue('voxelSize', (v) => c.scene.voxel = v, 'Scene voxelSize')
   bindValue('rayDepth', (v) => c.control.depth = v, 'Control rayTracingDepth'); bindValue('gpuIndex', (v) => c.control.gpu = v, 'Control GPU')
-  bindValue('couplingIterations', (v) => c.control.couplingIterations = v, 'Control couplingIterations')
-  bindValue('temperatureTolerance', (v) => c.control.temperatureTolerance = v, 'Control temperatureTolerance')
-  bindValue('temperatureRelaxation', (v) => c.control.temperatureRelaxation = v, 'Control temperatureRelaxation')
   bindSwitch('terrainSwitch', () => c.scene.terrain, (v) => c.scene.terrain = v, 'Control isDEM')
-  const background = c.scene.background || (c.scene.background = {})
-  const bindBackground = (id, key, selector) => $(`#${id}`)?.addEventListener('change', (event) => {
-    background[key] = event.target.value
-    updateXml(selector, event.target.value)
-    if (key === 'materialName') {
-      const material = c.materials.find((item) => item.name === event.target.value)
-      background.materialType = material?.type || background.materialType || 'Soil'
-      updateXml('Scene bgBioType', background.materialType)
-    }
-    refreshFromState(false)
-  })
-  bindBackground('backgroundSpectral', 'spectralName', 'Scene bgSpectral')
-  bindBackground('backgroundThermal', 'thermalName', 'Scene bgThermal')
-  bindBackground('backgroundMaterial', 'materialName', 'Scene bgBioName')
   const bindAngle = (id, key, index) => $(`#${id}`)?.addEventListener('change', (event) => { c.light[key] = Number(event.target.value); updatePair('Geometry Light light lightAngle lightAngle', index, event.target.value); refreshFromState() })
   bindAngle('sunZenith', 'zenith', 0); bindAngle('sunAzimuth', 'azimuth', 1)
   const bindRange = (id, key, valueId, selector) => {
@@ -578,26 +520,10 @@ function bindInspector() {
   bindValue('skyTemperature', (v) => c.light.skyTemperature = v, 'Geometry Light light skyTemperature')
   bindValue('sensorX', (v) => c.sensor.x = v, 'Geometry Sensor sensor pixelResolutionX'); bindValue('sensorY', (v) => c.sensor.y = v, 'Geometry Sensor sensor pixelResolutionY')
   bindValue('sensorBands', (v) => c.sensor.bands = v, 'Geometry Sensor sensor controlBand', String)
-  $('#sensorProjection')?.addEventListener('change', (event) => {
-    c.sensor.projection = event.target.value === 'perspective' ? 'perspective' : 'parallel'
-    if (!Number.isFinite(Number(c.sensor.positionX))) c.sensor.positionX = Number(c.scene.x) / 2
-    if (!Number.isFinite(Number(c.sensor.positionY))) c.sensor.positionY = Number(c.scene.y) / 2
-    if (!(Number(c.sensor.height) > 0)) c.sensor.height = 3000
-    updateXml('Geometry Sensor sensor projection', c.sensor.projection)
-    updateXml('Geometry Sensor sensor sensorPosition', `${c.sensor.positionX},${c.sensor.positionY},${c.sensor.height}`)
-    refreshFromState(false)
-  })
-  const bindSensorPosition = (id, key) => $(`#${id}`)?.addEventListener('change', (event) => {
-    c.sensor[key] = Number(event.target.value)
-    updateXml('Geometry Sensor sensor sensorPosition', `${c.sensor.positionX},${c.sensor.positionY},${c.sensor.height}`)
-    refreshFromState(false)
-  })
-  bindSensorPosition('sensorPositionX', 'positionX'); bindSensorPosition('sensorPositionY', 'positionY'); bindSensorPosition('sensorHeight', 'height')
   const bindView = (id, key, index) => $(`#${id}`)?.addEventListener('change', (event) => { c.sensor[key] = Number(event.target.value); updatePair('Geometry Sensor sensor viewAngle viewAngle[type="custom"] viewAngles', index, event.target.value); refreshFromState(false) })
   bindView('viewZenith', 'vza', 0); bindView('viewAzimuth', 'vaa', 1)
   bindSwitch('imageSwitch', () => c.sensor.image, (v) => c.sensor.image = v, 'Control isImage'); bindSwitch('processSwitch', () => c.sensor.process, (v) => c.sensor.process = v, 'Control isProcess'); bindSwitch('temperatureSwitch', () => c.sensor.temperature, (v) => c.sensor.temperature = v, 'Control isTemperature'); bindSwitch('albedoSwitch', () => c.sensor.albedo, (v) => c.sensor.albedo = v, 'Control isAlbedo')
   bindValue('meteoStart', (v) => c.meteo.start = v, 'Meteorology startTimeNode'); bindValue('meteoEnd', (v) => c.meteo.end = v, 'Meteorology endTimeNode')
-  $('#meteoFile')?.addEventListener('change', (event) => importMeteo(event.target.files?.[0]))
   $('#objectImportAction')?.addEventListener('click', importObj)
   $$('.object-card[data-index]').forEach((card) => {
     const showAttributes = () => showObjectAttributeDialog(Number(card.dataset.index))
@@ -647,25 +573,6 @@ function loadXml(result) {
 }
 
 async function chooseXml() { const result = await api.chooseXml(); if (result) loadXml(result) }
-
-async function importMeteo(file) {
-  if (!file) return
-  try {
-    if (state.running) throw new Error('模拟运行中，不能更换气象驱动文件')
-    const imported = await api.importMeteo({ name: file.name, content: await file.text() })
-    const project = ensureProjectState()
-    state.config.meteo.path = imported.relativePath || imported.path
-    project.configuration = state.config
-    updateXml('Meteorology filePath', imported.path)
-    if (!(await saveXml(true))) throw new Error('工程配置保存失败')
-    renderInspector()
-    toast('导入成功', imported.relativePath || file.name)
-    addLog(`已导入气象驱动：${imported.path}`, 'success')
-  } catch (error) {
-    toast('气象文件导入失败', error.message, 'error')
-    addLog(error.message, 'error')
-  }
-}
 async function saveXml(fromProject = false) {
   fromProject = fromProject === true
   if (!state.xmlText) { await chooseXml(); return false }
@@ -1475,7 +1382,7 @@ function handleSimulationEvent(event) {
     toast(success ? '模拟完成' : '模拟结束', success ? `${engineName} 已正常完成计算` : `退出码：${event.code}`, success ? '' : 'error'); setRunning(false)
     if (success) {
       state.outputDir = state.config?.outDir || state.outputDir
-      showResults(state.config?.sensor?.image ? 'image' : '3d').catch((error) => {
+      showResults().catch((error) => {
         $('#resultStatus').textContent = error.message
         toast('结果读取失败', error.message, 'error')
       })
@@ -1598,7 +1505,7 @@ async function drawImagePreview(result, file) {
   disposeResultViewer()
   state.resultRaster = null
   const imageUrl = `data:${result.mimeType};base64,${result.data}`
-  $('#resultPreview').innerHTML = `<div class="result-preview-card"><div class="result-image-stage"><img class="result-image" id="resultImage" alt="${escapeHtml(file.name)}"></div><div class="result-meta"><span>${escapeHtml(file.name)}</span><span>${escapeHtml(result.mimeType)}</span></div></div>`
+  $('#resultPreview').innerHTML = `<div class="result-preview-card"><div class="result-image-stage"><img class="result-image" id="resultImage" alt="${escapeHtml(file.name)}"></div>${resultViewActions()}<div class="result-meta"><span>${escapeHtml(file.name)}</span><span>${escapeHtml(result.mimeType)}</span></div></div>`
   const image = $('#resultImage')
   await new Promise((resolve, reject) => {
     image.onload = () => resolve()
@@ -1607,6 +1514,7 @@ async function drawImagePreview(result, file) {
   })
   const raster = rasterFromImage(image)
   state.resultRaster = raster
+  bindResultViewActions(result, file, raster, true)
 }
 
 function disposeResultViewer() {
@@ -1646,9 +1554,9 @@ function showResult3D(raster, file, sourceResult = null) {
   $('#resultPreview').innerHTML = `<div class="result-preview-card result-3d-card"><div class="result-3d-viewport" id="result3dViewport"></div>${resultViewActions()}${bandLayers}<div class="result-meta"><span>${raster.width} × ${raster.height}</span><span>整幅图像三维显示</span><span>高度按像素亮度映射</span></div></div>`
   const host = $('#result3dViewport')
   const resultScene = new THREE.Scene()
-  resultScene.background = new THREE.Color(0xf7f9fc)
-  resultScene.add(new THREE.HemisphereLight(0xe8f1fb, 0xb8c8d8, 1.8))
-  const resultSun = new THREE.DirectionalLight(0xfff7e8, 3)
+  resultScene.background = new THREE.Color(0x07100e)
+  resultScene.add(new THREE.HemisphereLight(0xc8e8dc, 0x14211b, 1.8))
+  const resultSun = new THREE.DirectionalLight(0xfff0d0, 3)
   resultSun.position.set(8, 14, 10)
   resultScene.add(resultSun)
   const camera3d = new THREE.PerspectiveCamera(42, 1, .1, 120)
@@ -1692,10 +1600,10 @@ function showResult3D(raster, file, sourceResult = null) {
   const surface = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ map: texture, roughness: .88, metalness: .02, side: THREE.DoubleSide }))
   surface.castShadow = surface.receiveShadow = true
   resultScene.add(surface)
-  const base = new THREE.Mesh(new THREE.PlaneGeometry(width, depth), new THREE.MeshBasicMaterial({ color: 0xe6edf5, transparent: true, opacity: .8, side: THREE.DoubleSide }))
+  const base = new THREE.Mesh(new THREE.PlaneGeometry(width, depth), new THREE.MeshBasicMaterial({ color: 0x13251f, transparent: true, opacity: .8, side: THREE.DoubleSide }))
   base.rotation.x = -Math.PI / 2; base.position.y = -.06
   resultScene.add(base)
-  const resultGrid = new THREE.GridHelper(Math.max(width, depth), 16, 0x7895b5, 0xb8c6d6)
+  const resultGrid = new THREE.GridHelper(Math.max(width, depth), 16, 0x5f9b83, 0x274638)
   resultGrid.position.y = -.04; resultGrid.material.opacity = .25; resultGrid.material.transparent = true
   resultScene.add(resultGrid)
   resultViewer = { host, scene: resultScene, camera: camera3d, controls: controls3d, renderer: new THREE.WebGLRenderer({ antialias: true, alpha: true }), texture }
@@ -1807,9 +1715,9 @@ function showFacet3D(result, file, metric = 'radiosity', side = 'both') {
   $('#resultPreview').innerHTML = `<div class="result-preview-card result-3d-card"><div class="result-3d-viewport" id="result3dViewport"></div>${facetControls(result, selected.id, side)}${facetViewActions()}<div class="result-meta"><span>${escapeHtml(samplingLabel)} · ${valueCount.toLocaleString('zh-CN')} 个面值</span><span>颜色：${escapeHtml(selected.label)}</span><span>${sideDescription}</span><span>MIN ${Number(stats.minimum).toPrecision(6)} · MAX ${Number(stats.maximum).toPrecision(6)}</span>${hasGeometry ? '<span>真实 OBJ 面元空间位置</span>' : '<span>旧结果无几何坐标，使用面元序号排列</span>'}</div></div>`
   const host = $('#result3dViewport')
   const resultScene = new THREE.Scene()
-  resultScene.background = new THREE.Color(0xf7f9fc)
-  resultScene.add(new THREE.HemisphereLight(0xe8f1fb, 0xb8c8d8, 1.8))
-  const resultSun = new THREE.DirectionalLight(0xfff7e8, 3)
+  resultScene.background = new THREE.Color(0x07100e)
+  resultScene.add(new THREE.HemisphereLight(0xc8e8dc, 0x14211b, 1.8))
+  const resultSun = new THREE.DirectionalLight(0xfff0d0, 3)
   resultSun.position.set(8, 14, 10); resultScene.add(resultSun)
   const camera3d = new THREE.PerspectiveCamera(42, 1, .01, 300)
   const controls3d = new OrbitControls(camera3d, host)
@@ -1858,9 +1766,9 @@ function showFacet3D(result, file, metric = 'radiosity', side = 'both') {
     surface.castShadow = surface.receiveShadow = true
     resultScene.add(surface)
     const groundWidth = Math.max(.5, spanX * modelScale), groundDepth = Math.max(.5, spanZ * modelScale)
-    const base = new THREE.Mesh(new THREE.PlaneGeometry(groundWidth * 1.08, groundDepth * 1.08), new THREE.MeshBasicMaterial({ color: 0xe6edf5, transparent: true, opacity: .8, side: THREE.DoubleSide }))
+    const base = new THREE.Mesh(new THREE.PlaneGeometry(groundWidth * 1.08, groundDepth * 1.08), new THREE.MeshBasicMaterial({ color: 0x13251f, transparent: true, opacity: .8, side: THREE.DoubleSide }))
     base.rotation.x = -Math.PI / 2; base.position.y = -.04; resultScene.add(base)
-    const resultGrid = new THREE.GridHelper(Math.max(groundWidth, groundDepth) * 1.08, 22, 0x7895b5, 0xb8c6d6)
+    const resultGrid = new THREE.GridHelper(Math.max(groundWidth, groundDepth) * 1.08, 22, 0x5f9b83, 0x274638)
     resultGrid.position.y = -.02; resultGrid.scale.z = groundDepth / Math.max(groundWidth, groundDepth); resultGrid.scale.x = groundWidth / Math.max(groundWidth, groundDepth); resultGrid.material.opacity = .25; resultGrid.material.transparent = true; resultScene.add(resultGrid)
     camera3d.position.set(Math.max(16, groundWidth * 1.25), Math.max(12, spanY * modelScale * .85 + 8), Math.max(16, groundDepth * 1.25))
     controls3d.target.set(0, Math.max(.5, spanY * modelScale * .35), 0)
@@ -1881,9 +1789,9 @@ function showFacet3D(result, file, metric = 'radiosity', side = 'both') {
     })
     bars.instanceMatrix.needsUpdate = true; if (bars.instanceColor) bars.instanceColor.needsUpdate = true
     resultScene.add(bars)
-    const base = new THREE.Mesh(new THREE.PlaneGeometry(sideLength, sideLength), new THREE.MeshBasicMaterial({ color: 0xe6edf5, transparent: true, opacity: .8, side: THREE.DoubleSide }))
+    const base = new THREE.Mesh(new THREE.PlaneGeometry(sideLength, sideLength), new THREE.MeshBasicMaterial({ color: 0x13251f, transparent: true, opacity: .8, side: THREE.DoubleSide }))
     base.rotation.x = -Math.PI / 2; base.position.y = -.04; resultScene.add(base)
-    const resultGrid = new THREE.GridHelper(sideLength, 22, 0x7895b5, 0xb8c6d6)
+    const resultGrid = new THREE.GridHelper(sideLength, 22, 0x5f9b83, 0x274638)
     resultGrid.position.y = -.02; resultGrid.material.opacity = .25; resultGrid.material.transparent = true; resultScene.add(resultGrid)
     camera3d.position.set(sideLength * .8, sideLength * .75, sideLength * .9); controls3d.target.set(0, 1.8, 0)
   }
@@ -1929,40 +1837,13 @@ async function openResultFile(file, band = 0) {
   }
 }
 
-function resultFilesForView() {
-  return state.resultFiles.filter((file) => state.resultView === '3d'
-    ? file.kind === 'facet'
-    : ['tiff', 'envi', 'image'].includes(file.kind))
-}
-
-function updateResultViewHeader() {
-  const is3d = state.resultView === '3d'
-  $('#resultDialogTitle').textContent = is3d ? '三维展示' : '图像结果'
-  $('#resultImageTab').classList.toggle('active', !is3d)
-  $('#result3dTab').classList.toggle('active', is3d)
-}
-
-async function setResultView(view, openFirst = true) {
-  disposeResultViewer()
-  state.resultRaster = null
-  state.resultView = view === '3d' ? '3d' : 'image'
-  state.selectedResult = null
-  updateResultViewHeader()
-  renderResultFiles()
-  const first = resultFilesForView()[0]
-  if (openFirst && first) await openResultFile(first)
-}
-
 function renderResultFiles() {
-  const visibleFiles = resultFilesForView()
-  if (!visibleFiles.length) {
-    const is3d = state.resultView === '3d'
-    $('#resultFiles').innerHTML = `<div class="result-empty-list">${is3d ? '尚无面元三维结果。' : '尚无图像结果。'}<br>请先运行模拟，然后点击“刷新”。</div>`
-    emptyResultPreview(is3d ? '尚无三维结果' : '尚无图像结果', is3d ? '面元计算完成后可在这里查看温度、辐射度和能量通量。' : '逐时 TIFF 会按实际时间和观测角度显示在这里。')
+  if (!state.resultFiles.length) {
+    $('#resultFiles').innerHTML = '<div class="result-empty-list">输出目录中尚无结果文件。<br>请先运行模拟，然后点击“刷新”。</div>'
+    emptyResultPreview('尚无模拟结果', 'HiStream 完成计算后，结果会显示在这里。')
     return
   }
-  $('#resultFiles').innerHTML = visibleFiles.map((file) => {
-    const index = state.resultFiles.indexOf(file)
+  $('#resultFiles').innerHTML = state.resultFiles.map((file, index) => {
     const extension = file.kind === 'envi' ? 'ENVI' : file.kind === 'tiff' ? 'TIFF' : file.kind === 'facet' ? 'FACET' : file.name.split('.').pop()
     const time = new Date(file.modifiedAt).toLocaleString('zh-CN', { hour12: false })
     return `<button class="result-file" data-index="${index}"><span class="result-file-icon">${escapeHtml(extension)}</span><span><strong title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</strong><small>${file.observationLabel ? escapeHtml(file.observationLabel.replaceAll('_to_', ' → ').replaceAll('_', ' ')) + ' · ' : ''}${formatBytes(file.size)} · ${time}</small></span></button>`
@@ -1977,18 +1858,14 @@ async function refreshResults(openFirst = false) {
   state.resultFiles = result.files
   $('#resultDirectory').textContent = result.directory
   renderResultFiles()
-  const visibleFiles = resultFilesForView()
-  const selected = state.selectedResult && visibleFiles.find((file) => file.path === state.selectedResult.path)
+  const selected = state.selectedResult && state.resultFiles.find((file) => file.path === state.selectedResult.path)
   if (selected) await openResultFile(selected)
-  else if (openFirst && visibleFiles.length) await openResultFile(visibleFiles[0])
+  else if (openFirst && state.resultFiles.length) await openResultFile(state.resultFiles[0])
 }
 
-async function showResults(view = 'image') {
+async function showResults() {
   if (!state.inputPath) { toast('无法查看结果', '请先新建或打开工程', 'error'); return }
   $('#resultDialog').hidden = false
-  state.resultView = view === '3d' ? '3d' : 'image'
-  state.selectedResult = null
-  updateResultViewHeader()
   try {
     await refreshResults(true)
   } catch (error) {
@@ -2105,11 +1982,8 @@ $('#presetForm').addEventListener('submit', savePreset)
 
 
 $('#engineBtn').addEventListener('click', async () => { if (state.mode === 'eFacetRT' || state.mode === 'eFacetEB') { toast('HiStream Facet 引擎', state.executable); return } const path = await api.chooseExecutable(); if (path) { state.executable = path; state.executableExists = true; setRunning(false); addLog(`HiStream 引擎：${path}`, 'success') } })
-$('#openOutputBtn').addEventListener('click', () => showResults('image'))
-$('#openImageResultsTopBtn').addEventListener('click', () => showResults('image'))
-$('#open3dResultsTopBtn').addEventListener('click', () => showResults('3d'))
-$('#resultImageTab').addEventListener('click', () => setResultView('image'))
-$('#result3dTab').addEventListener('click', () => setResultView('3d'))
+$('#openOutputBtn').addEventListener('click', showResults)
+$('#openOutputTopBtn').addEventListener('click', showResults)
 $('#closeResultBtn').addEventListener('click', hideResults)
 $('#resultDialog').addEventListener('click', (event) => { if (event.target === $('#resultDialog')) hideResults() })
 $('#resultRefreshBtn').addEventListener('click', async () => { try { await refreshResults(true) } catch (error) { toast('刷新结果失败', error.message, 'error') } })

@@ -3,6 +3,8 @@
 //
 
 #include "geometry.h"
+#include <algorithm>
+#include <cmath>
 
 
 LightSet Geometry::createLight(float sza, float saa, float direct, float diffuse,float solarT,float skyT)
@@ -76,7 +78,7 @@ SensorMatrix Geometry::createSensor(glm::vec3 size, glm::vec3 origen, float vza,
     glm::mat4 view = CameraManip.getMatrix();
     nvmath::mat4f projj = nvmath::perspectiveVK(CameraManip.getFov(), aspectRatio, 0.0001f, 10000.0f);
     // glm::mat4 proj = projglm::perspective(glm::radians(CameraManip.getFov()), aspectRatio, 0.01f, 1000.0f);
-    glm::mat4 proj = glm::perspectiveRH_ZO(glm::radians(CameraManip.getFov()), aspectRatio, 0.1f, 1000.0f);
+    glm::mat4 proj = glm::perspectiveRH_ZO(glm::radians(CameraManip.getFov()), aspectRatio, 0.01f, 10000.0f);
     proj[1][1] *= -1;
     sensor.viewInverse = glm::inverse(view);
     sensor.projInverse = glm::inverse(proj);
@@ -98,16 +100,20 @@ SensorMatrix Geometry::createSensor(glm::vec3 size, glm::vec3 origen, float vza,
     return sensor;
 }
 
-SensorMatrix Geometry::createSensor(glm::vec3 sensorPos_XZY, glm::vec3 center_XZY) {
+SensorMatrix Geometry::createSensor(glm::vec3 sensorPos_XZY, glm::vec3 center_XZY,
+                                    glm::vec3 sceneSize_XZY) {
 
     // auto & sceneio = modelio->m_sceneio;
 
     SensorMatrix sensor;
 
-    float r = SENSOR_HEIGHT;
-    float rd = DEG2RAD;
-    glm::vec3 origin = glm::vec3(0, 0, 0);
-//    CameraManip.setFov(SENSOR_FOV);
+    const float distance = std::max(0.01f, glm::length(sensorPos_XZY - center_XZY));
+    const float aspect = std::max(0.01f, CameraManip.getWidth() /
+                                           static_cast<float>(CameraManip.getHeight()));
+    const float radius = std::max(0.01f, 0.5f * glm::length(sceneSize_XZY));
+    const float requiredHalfHeight = radius / std::min(1.0f, aspect);
+    const float fittedFov = glm::degrees(2.0f * std::atan(requiredHalfHeight / distance)) * 1.02f;
+    CameraManip.setFov(std::clamp(fittedFov, 0.1f, 120.0f));
     CameraManip.setLookat(sensorPos_XZY, center_XZY, glm::vec3(0, 1, 0));
     float fovv = CameraManip.getFov();
 
@@ -122,7 +128,8 @@ SensorMatrix Geometry::createSensor(glm::vec3 sensorPos_XZY, glm::vec3 center_XZ
     glm::mat4 view = CameraManip.getMatrix();
     nvmath::mat4f projj = nvmath::perspectiveVK(CameraManip.getFov(), aspectRatio, 0.0001f, 10000.0f);
     //glm::mat4 proj = glm::perspective(CameraManip.getFov(), aspectRatio, 0.0001f, 10000.0f);
-    glm::mat4 proj = glm::perspectiveRH_ZO(glm::radians(CameraManip.getFov()), aspectRatio, 0.1f, 1000.0f);
+    const float farPlane = std::max(10000.0f, distance + radius * 4.0f);
+    glm::mat4 proj = glm::perspectiveRH_ZO(glm::radians(CameraManip.getFov()), aspectRatio, 0.01f, farPlane);
     proj[1][1] *= -1;
     sensor.viewInverse = glm::inverse(view);
     sensor.projInverse = glm::inverse(proj);
@@ -144,6 +151,25 @@ SensorMatrix Geometry::createSensor(glm::vec3 sensorPos_XZY, glm::vec3 center_XZ
     return sensor;
 }
 
+void Geometry::configureSensor(const SensorXml& sensor, glm::vec3 sceneSize_XYZ,
+                               float metresPerUnit) {
+    const float scale = std::max(0.0001f, metresPerUnit);
+    m_sensorProjection = sensor.projection;
+    m_sensorSceneSize_XZY = {sceneSize_XYZ.x / scale, sceneSize_XYZ.z / scale,
+                             sceneSize_XYZ.y / scale};
+    m_sensorPosition_XZY = {(sensor.position.x - sceneSize_XYZ.x * 0.5f) / scale,
+                            sensor.position.z / scale,
+                            (sensor.position.y - sceneSize_XYZ.y * 0.5f) / scale};
+    m_sensorTarget_XZY = {0.0f, sceneSize_XYZ.z * 0.5f / scale, 0.0f};
+}
+
+SensorMatrix Geometry::createConfiguredSensor(glm::vec3 size_XZY, glm::vec3 origin_XZY,
+                                              float vza, float vaa, float ratio) {
+    if (m_sensorProjection == Projection::PERSPECTIVE) {
+        return createSensor(m_sensorPosition_XZY, m_sensorTarget_XZY, m_sensorSceneSize_XZY);
+    }
+    return createSensor(size_XZY, origin_XZY, vza, vaa, ratio);
+}
 
 
 bool Geometry::createGeometry(std::shared_ptr<FileIO> &fileio, std::shared_ptr<RaytracingIO> &modelio){
@@ -162,6 +188,7 @@ bool Geometry::createGeometry(std::shared_ptr<FileIO> &fileio, std::shared_ptr<R
     float vza, vaa, sza, saa;
     LightXml lightxml = fileio->m_pRaytracingXml->lightxml;
     SensorXml sensorxml = fileio->m_pRaytracingXml->sensorxml;
+    configureSensor(sensorxml, fileio->m_pRaytracingXml->scenexml.background.sceneSize, 1.0f);
 
 
     sza = lightxml.solarAngle[0];
@@ -185,7 +212,7 @@ bool Geometry::createGeometry(std::shared_ptr<FileIO> &fileio, std::shared_ptr<R
     vaa = modelio->angles[0].vaa;
     sza = modelio->angles[0].sza;
     saa = modelio->angles[0].saa;
-    modelio->sensor = createSensor(modelio->voxelSize,modelio->voxelOrigin, vza, vaa, 1.0);
+    modelio->sensor = createConfiguredSensor(modelio->voxelSize, modelio->voxelOrigin, vza, vaa, 1.0f);
 
 
     modelio->light = createLight(sza, saa, fileio->m_pRaytracingXml->lightxml.direct, fileio->m_pRaytracingXml->lightxml.diffuse,
@@ -207,8 +234,8 @@ void Geometry::updateAngle(std::shared_ptr<RaytracingIO> &modelio, int kangle){
 
     float ratio = 1.0;
     // ratio = 0.707;
-    SensorMatrix sensorMatrix = createSensor(modelio->voxelSize,modelio->voxelOrigin,
-                                             angle.vza, angle.vaa, ratio);
+    SensorMatrix sensorMatrix = createConfiguredSensor(modelio->voxelSize, modelio->voxelOrigin,
+                                                       angle.vza, angle.vaa, ratio);
     updateSensor(modelio, sensorMatrix);
 
     LightSet lightSet = createLight(angle.sza, angle.saa,modelio->light.direct,
@@ -393,6 +420,8 @@ bool Geometry::createGeometry(std::shared_ptr<FileIO> &fileio, std::shared_ptr<V
     float vza, vaa, sza, saa;
     LightXml lightxml = fileio->m_pVoxelebXml->lightxml;
     SensorXml sensorxml = fileio->m_pVoxelebXml->sensorxml;
+    configureSensor(sensorxml, fileio->m_pVoxelebXml->scenexml.background.sceneSize,
+                    fileio->m_pVoxelebXml->scenexml.background.stepsize_surface);
 
 
 
@@ -418,7 +447,7 @@ bool Geometry::createGeometry(std::shared_ptr<FileIO> &fileio, std::shared_ptr<V
     vaa = modelio->angles[0].vaa;
     sza = modelio->angles[0].sza;
     saa = modelio->angles[0].saa;
-    modelio->sensor = createSensor(modelio->voxelSize_XZY, modelio->voxelOrigin_XZY, vza, vaa, 1.0);
+    modelio->sensor = createConfiguredSensor(modelio->voxelSize_XZY, modelio->voxelOrigin_XZY, vza, vaa, 1.0f);
     modelio->light = createLight(sza, saa, fileio->m_pVoxelebXml->lightxml.direct, fileio->m_pVoxelebXml->lightxml.diffuse,
                                  fileio->m_pVoxelebXml->lightxml.solarTemperature,
                                  fileio->m_pVoxelebXml->lightxml.skyTemperature);
@@ -440,8 +469,8 @@ void Geometry::updateAngle(std::shared_ptr<VoxelebIO> &modelio, int kangle){
 
     float ratio = 1.0;
     //ratio = 0.707;
-    SensorMatrix sensorMatrix = createSensor(modelio->voxelSize_XZY, modelio->voxelOrigin_XZY,
-                                             angle.vza, angle.vaa, ratio);
+    SensorMatrix sensorMatrix = createConfiguredSensor(modelio->voxelSize_XZY, modelio->voxelOrigin_XZY,
+                                                       angle.vza, angle.vaa, ratio);
     updateSensor(modelio, sensorMatrix);
 
     // if (angle.sza >= 85) angle.sza = 85;
@@ -660,6 +689,8 @@ bool Geometry::createGeometry(std::shared_ptr<FileIO> &fileio, std::shared_ptr<V
     float vza, vaa, sza, saa;
     LightXml lightxml = fileio->m_pVoxelrtXml->lightxml;
     SensorXml sensorxml = fileio->m_pVoxelrtXml->sensorxml;
+    configureSensor(sensorxml, fileio->m_pVoxelrtXml->scenexml.background.sceneSize,
+                    fileio->m_pVoxelrtXml->scenexml.background.stepsize_surface);
 
 
 
@@ -695,7 +726,7 @@ bool Geometry::createGeometry(std::shared_ptr<FileIO> &fileio, std::shared_ptr<V
 //    else {
 //        modelio->sensor = createSensor(modelio->voxelSize_XZY, modelio->voxelOrigin_XZY, vza, vaa, 1.0);
 //    }
-    modelio->sensor = createSensor(modelio->voxelSize_XZY, modelio->voxelOrigin_XZY, vza, vaa, 1.0f);
+    modelio->sensor = createConfiguredSensor(modelio->voxelSize_XZY, modelio->voxelOrigin_XZY, vza, vaa, 1.0f);
     modelio->light = createLight(sza, saa, fileio->m_pVoxelrtXml->lightxml.direct,
                                  fileio->m_pVoxelrtXml->lightxml.diffuse,
                                  fileio->m_pVoxelrtXml->lightxml.solarTemperature,
@@ -719,10 +750,10 @@ void Geometry::updateAngle(std::shared_ptr<VoxelrtIO> &modelio, int kangle){
     SensorMatrix sensorMatrix;
     if(modelio->isUAVTrave == false) {
 
-        sensorMatrix = createSensor(modelio->voxelSize_XZY, modelio->voxelOrigin_XZY,
-                                                 angle.vza, angle.vaa, ratio);
+        sensorMatrix = createConfiguredSensor(modelio->voxelSize_XZY, modelio->voxelOrigin_XZY,
+                                                   angle.vza, angle.vaa, ratio);
     }else {
-        sensorMatrix = createSensor(glm::vec3(0, 1000, 1), glm::vec3(0, 900, 0));
+        sensorMatrix = createSensor(glm::vec3(0, 1000, 1), glm::vec3(0, 900, 0), m_sensorSceneSize_XZY);
     }
     updateSensor(modelio, sensorMatrix);
 
@@ -753,7 +784,7 @@ void Geometry::updateSensorPos(std::shared_ptr<VoxelrtIO> &modelio, int kpos){
                                     r * std::cos(angle.vza * rd), r * std::sin(angle.vza * rd) * std::sin(angle.vaa * rd));
 
 
-    sensorMatrix = createSensor(sensorpos, sensorpos-sensortarget);
+    sensorMatrix = createSensor(sensorpos, sensorpos-sensortarget, m_sensorSceneSize_XZY);
 
     updateSensor(modelio, sensorMatrix);
 

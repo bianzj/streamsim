@@ -381,17 +381,30 @@ uint32_t FacetrtVulkan::nextPowerOfTwo(uint32_t value) const
 
 uint32_t FacetrtVulkan::chooseHashCapacity() const
 {
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(m_physicalDevice, &properties);
+    const uint64_t descriptorEntries =
+        uint64_t(properties.limits.maxStorageBufferRange) / sizeof(uint64_t);
+    if (descriptorEntries < 65536ULL) {
+        throw std::runtime_error("GPU maxStorageBufferRange is too small for FacetRT");
+    }
+    uint32_t maximumCapacity = 1U;
+    while (maximumCapacity <= (std::numeric_limits<uint32_t>::max() >> 1U) &&
+           uint64_t(maximumCapacity << 1U) <= descriptorEntries) {
+        maximumCapacity <<= 1U;
+    }
     if (m_config.edgeHashCapacity != 0U) {
         const uint32_t capacity = nextPowerOfTwo(m_config.edgeHashCapacity);
-        if (capacity < m_config.edgeHashCapacity) {
-            throw std::overflow_error("edgeHashCapacity is too large");
+        if (capacity < m_config.edgeHashCapacity || capacity > maximumCapacity) {
+            throw std::overflow_error(
+                "edgeHashCapacity exceeds GPU maxStorageBufferRange");
         }
         return capacity;
     }
     const uint64_t requested = std::max<uint64_t>(65536ULL,
                                                    uint64_t(surfaceCount()) * 64ULL);
-    if (requested > (1ULL << 30U)) {
-        throw std::overflow_error("Automatic visibility edge hash is too large");
+    if (requested >= uint64_t(maximumCapacity)) {
+        return maximumCapacity;
     }
     return nextPowerOfTwo(static_cast<uint32_t>(requested));
 }
@@ -489,6 +502,22 @@ void FacetrtVulkan::createVisibilityResources()
     if (fragmentCount > std::numeric_limits<VkDeviceSize>::max() / 8ULL) {
         throw std::overflow_error("Visibility A-buffer size overflow");
     }
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(m_physicalDevice, &properties);
+    const auto requireStorageRange = [&](VkDeviceSize size, const char* name) {
+        if (size > properties.limits.maxStorageBufferRange) {
+            std::ostringstream stream;
+            stream << name << " requires " << size
+                   << " bytes, exceeding GPU maxStorageBufferRange "
+                   << properties.limits.maxStorageBufferRange;
+            throw std::runtime_error(stream.str());
+        }
+    };
+    requireStorageRange(fragmentCount * 8ULL, "Visibility fragment buffer");
+    requireStorageRange(VkDeviceSize(m_hashCapacity) * sizeof(uint64_t),
+                        "Visibility edge-key buffer");
+    requireStorageRange(VkDeviceSize(m_hashCapacity) * sizeof(uint32_t),
+                        "Visibility edge-count buffer");
 
     m_vertices = createBuffer(VkDeviceSize(m_facetCount) * 3U * sizeof(Vertex),
                               VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
@@ -838,6 +867,7 @@ GraphDiagnostics FacetrtVulkan::buildVisibilityGraph(
                          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          0, 1, &transferToShader, 0, nullptr, 0, nullptr);
+    endCommands(commandBuffer);
 
     const VkDeviceSize vertexOffset = 0;
     vkCmdBindVertexBuffers(commandBuffer, 0, 1, &m_vertices.buffer, &vertexOffset);
@@ -853,6 +883,7 @@ GraphDiagnostics FacetrtVulkan::buildVisibilityGraph(
                                              nullptr};
 
     for (const Direction& inputDirection : directions) {
+        commandBuffer = beginCommands();
         const std::array<float, 3> direction =
             normalize3({inputDirection.x, inputDirection.y, inputDirection.z});
         const std::array<float, 16> projection = makeProjection(inputDirection);
@@ -909,8 +940,8 @@ GraphDiagnostics FacetrtVulkan::buildVisibilityGraph(
                                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                              0, 1, &resolveToNext, 0, nullptr, 0, nullptr);
+        endCommands(commandBuffer);
     }
-    endCommands(commandBuffer);
 
     std::vector<uint64_t> edgeKeys(m_hashCapacity);
     std::vector<uint32_t> edgeCounts(m_hashCapacity);
@@ -940,7 +971,7 @@ GraphDiagnostics FacetrtVulkan::buildVisibilityGraph(
     }
 
     std::vector<std::pair<uint64_t, uint32_t>> undirectedEdges;
-    undirectedEdges.reserve(m_hashCapacity / 2U);
+    undirectedEdges.reserve(std::min<uint32_t>(m_hashCapacity / 16U, 1U << 20U));
     for (uint32_t slot = 0; slot < m_hashCapacity; ++slot) {
         if (edgeKeys[slot] == kEmptyEdgeKey || edgeCounts[slot] == 0U) {
             continue;

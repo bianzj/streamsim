@@ -13,8 +13,6 @@ const modes = new Set(PROJECT_MODES)
 const modelRoot = join(root, 'models')
 const defaultSceneAsset = join(root, 'assets', 'obj-library', 'house_a.obj')
 const histreamCandidates = [
-  join(modelRoot, 'bin_x64', 'Release', 'histream.exe'),
-  join(modelRoot, 'bin_x64', 'Debug', 'histream.exe'),
   join(modelRoot, 'histream', 'bin', 'Debug', 'histream.exe'),
   join(modelRoot, 'histream', 'bin', 'Release', 'histream.exe')
 ]
@@ -55,17 +53,8 @@ function sanitizeObjContent(value) {
   return content ? content + '\n' : ''
 }
 
-function normalizeHostPath(value) {
-  const source = String(value || "").trim()
-  const windowsPath = source.match(/^([A-Za-z]):(.*)$/)
-  if (process.platform === "linux" && windowsPath) return "/mnt/" + windowsPath[1].toLowerCase() + "/" + windowsPath[2].replaceAll("\\", "/")
-  const wslPath = source.match(/^\/mnt\/([A-Za-z])\/(.*)$/)
-  if (process.platform === "win32" && wslPath) return wslPath[1].toUpperCase() + ":" + String.fromCharCode(92) + wslPath[2].replaceAll("/", String.fromCharCode(92))
-  return source
-}
-
 function resolveProjectFile(value) {
-  let path = normalizeHostPath(value).replace(/^"|"$/g, '')
+  let path = String(value || '').trim().replace(/^"|"$/g, '')
   if (!path) throw new Error('请输入已有工程目录、project.json 或 Input.xml 完整路径')
   path = resolve(path)
   if (!existsSync(path)) throw new Error(`找不到已有工程：${path}`)
@@ -168,20 +157,12 @@ function readRadiosityResult(jsonPath) {
   try { result = JSON.parse(readFileSync(jsonPath, 'utf8')) } catch (error) { throw new Error(`面元结果格式错误：${error.message}`) }
   const facetCount = Number(result.facetCount)
   if (!Number.isInteger(facetCount) || facetCount < 1) throw new Error('面元结果缺少有效的 facetCount')
-  const metricSources = [
-    ['radiosity', '辐射度', result.radiosity, true],
-    ['lightEnhancement', '光照增强', result.lightEnhancement, true],
-    ['sunlit', '光照比例', result.sunlit, true],
-    ['temperature', '温度 [K]', result.temperature],
-    ['netRadiation', '净辐射 [W m⁻²]', result.netRadiation],
-    ['sensibleHeat', '显热 [W m⁻²]', result.sensibleHeat],
-    ['latentHeat', '潜热 [W m⁻²]', result.latentHeat],
-    ['storageHeat', '储热 [W m⁻²]', result.storageHeat]
+  const metrics = [
+    ['radiosity', 'Radiosity', result.radiosity],
+    ['lightEnhancement', 'Light enhancement', result.lightEnhancement],
+    ['sunlit', 'Sunlit fraction', result.sunlit]
   ]
-  for (const [, name, values, required] of metricSources) {
-    if (required && (!Array.isArray(values) || values.length < facetCount * 2)) throw new Error(`${name} 数据不完整`)
-  }
-  const metrics = metricSources.filter(([, , values]) => Array.isArray(values) && values.length >= facetCount * 2).map(([id, name, values]) => [id, name, values])
+  for (const [, name, values] of metrics) if (!Array.isArray(values) || values.length < facetCount * 2) throw new Error(`${name} 数据不完整`)
   return { facetCount, metrics, vertexPositions: Array.isArray(result.vertexPositions) ? result.vertexPositions : [], backend: result.backend, iterations: result.iterations, maxDelta: result.maxDelta }
 }
 
@@ -243,21 +224,11 @@ function sampleRadiosityResult(jsonPath, maximumFacets = 750000) {
   }
   const backend = header.match(/"backend"\s*:\s*"([^"]*)"/)?.[1]
   const vertexPositions = sampleArray('vertexPositions', 9)
-  const metricDefinitions = [
-    ['radiosity', '辐射度', true],
-    ['lightEnhancement', '光照增强', true],
-    ['sunlit', '光照比例', true],
-    ['temperature', '温度 [K]'],
-    ['netRadiation', '净辐射 [W m⁻²]'],
-    ['sensibleHeat', '显热 [W m⁻²]'],
-    ['latentHeat', '潜热 [W m⁻²]'],
-    ['storageHeat', '储热 [W m⁻²]']
+  const metrics = [
+    { id: 'radiosity', label: 'Radiosity', values: sampleArray('radiosity', 2) },
+    { id: 'lightEnhancement', label: 'Light enhancement', values: sampleArray('lightEnhancement', 2) },
+    { id: 'sunlit', label: 'Sunlit fraction', values: sampleArray('sunlit', 2) }
   ]
-  const metrics = metricDefinitions.filter(([key, , required]) => {
-    const exists = source.indexOf('"' + key + '"') >= 0
-    if (required && !exists) throw new Error('面元结果缺少 ' + key + ' 数组')
-    return exists
-  }).map(([id, label]) => ({ id, label, values: sampleArray(id, 2) }))
 
   return {
     kind: 'facet',
@@ -291,7 +262,7 @@ function isRadiosityResultFile(path) {
 }
 
 function writeRadiosityTiff(jsonPath, inputPath) {
-  const { facetCount, metrics, vertexPositions, backend } = readRadiosityResult(jsonPath)
+  const { facetCount, metrics, vertexPositions } = readRadiosityResult(jsonPath)
   if (!Array.isArray(vertexPositions) || vertexPositions.length < facetCount * 9) throw new Error('面元结果缺少完整的三角形坐标')
   if (!inputPath || !existsSync(inputPath)) throw new Error('找不到生成影像所需的 Input.xml')
   const xml = readFileSync(inputPath, 'utf8')
@@ -306,59 +277,23 @@ function writeRadiosityTiff(jsonPath, inputPath) {
   if (!wavelengths.length) wavelengths.push(1)
   const bandNames = wavelengths.map((wavelength, index) => controlBand ? String(wavelength) + ' nm' : 'Band ' + (index + 1))
   const viewAngles = String(firstXmlTag(xml, 'viewAngles') || '0,0').split(/[,\s]+/).map(Number)
+  const zenith = (Number.isFinite(viewAngles[0]) ? viewAngles[0] : 0) * Math.PI / 180
+  const azimuth = (Number.isFinite(viewAngles[1]) ? viewAngles[1] : 0) * Math.PI / 180
+  const cameraOut = [Math.sin(zenith) * Math.sin(azimuth), Math.cos(zenith), Math.sin(zenith) * Math.cos(azimuth)]
+  const cameraRight = [Math.cos(azimuth), 0, -Math.sin(azimuth)]
+  const cameraUp = [-Math.cos(zenith) * Math.sin(azimuth), Math.sin(zenith), -Math.cos(zenith) * Math.cos(azimuth)]
   const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
   const subtract3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
   const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
-  const length3 = (value) => Math.hypot(value[0], value[1], value[2])
-  const normalize3 = (value, fallback) => {
-    const length = length3(value)
-    return length > 1e-9 ? value.map((component) => component / length) : fallback
-  }
-  const projection = String(firstXmlTag(xml, 'projection') || 'parallel').trim().toLowerCase()
-  const perspective = ['perspective', 'central', 'center'].includes(projection)
-  const sceneWidth = Math.max(1e-6, Number(firstXmlTag(xml, 'sceneSizeX')) || 1)
-  const sceneDepth = Math.max(1e-6, Number(firstXmlTag(xml, 'sceneSizeY')) || 1)
-  const sceneHeight = Math.max(0, Number(firstXmlTag(xml, 'Height')) || 0)
-  const positionValues = String(firstXmlTag(xml, 'sensorPosition') || '').split(/[,\s]+/).map(Number)
-  const sensorWorld = positionValues.length >= 3 && positionValues.slice(0, 3).every(Number.isFinite)
-    ? positionValues.slice(0, 3)
-    : [sceneWidth / 2, sceneDepth / 2, 3000]
-  const cameraPosition = [sensorWorld[0] - sceneWidth / 2, Math.max(0.01, sensorWorld[2]), sensorWorld[1] - sceneDepth / 2]
-  const cameraTarget = [0, sceneHeight / 2, 0]
-  let cameraOut, cameraForward, cameraRight, cameraUp, perspectiveTanHalfFov = 1
-  if (perspective) {
-    cameraForward = normalize3(subtract3(cameraTarget, cameraPosition), [0, -1, 0])
-    cameraOut = cameraForward.map((component) => -component)
-    cameraRight = normalize3(cross3(cameraForward, [0, 0, -1]), [1, 0, 0])
-    cameraUp = normalize3(cross3(cameraRight, cameraForward), [0, 0, -1])
-    const distance = Math.max(0.01, length3(subtract3(cameraPosition, cameraTarget)))
-    const radius = Math.max(0.01, Math.hypot(sceneWidth, sceneHeight, sceneDepth) / 2)
-    perspectiveTanHalfFov = radius / Math.min(1, width / height) / distance * 1.02
-  } else {
-    const zenith = (Number.isFinite(viewAngles[0]) ? viewAngles[0] : 0) * Math.PI / 180
-    const azimuth = (Number.isFinite(viewAngles[1]) ? viewAngles[1] : 0) * Math.PI / 180
-    cameraOut = [Math.sin(zenith) * Math.sin(azimuth), Math.cos(zenith), Math.sin(zenith) * Math.cos(azimuth)]
-    cameraForward = cameraOut.map((component) => -component)
-    cameraRight = [Math.cos(azimuth), 0, -Math.sin(azimuth)]
-    cameraUp = [-Math.cos(zenith) * Math.sin(azimuth), Math.sin(zenith), -Math.cos(zenith) * Math.cos(azimuth)]
-  }
-  const horizontalViewLength = Math.hypot(cameraOut[0], cameraOut[2])
-  const namingViewAngles = perspective
-    ? [Math.acos(Math.max(-1, Math.min(1, cameraOut[1]))) * 180 / Math.PI,
-      horizontalViewLength < 1e-9 ? 0 : (Math.atan2(cameraOut[0], cameraOut[2]) * 180 / Math.PI + 360) % 360]
-    : viewAngles
   const point = (offset) => [Number(vertexPositions[offset]), Number(vertexPositions[offset + 1]), Number(vertexPositions[offset + 2])]
-  let minimumX = perspective ? -1 : Infinity, maximumX = perspective ? 1 : -Infinity
-  let minimumY = perspective ? -1 : Infinity, maximumY = perspective ? 1 : -Infinity
+  let minimumX = Infinity, maximumX = -Infinity, minimumY = Infinity, maximumY = -Infinity
   for (let vertex = 0; vertex < facetCount * 3; vertex += 1) {
     const position = point(vertex * 3)
     if (!position.every(Number.isFinite)) throw new Error('第 ' + (Math.floor(vertex / 3) + 1) + ' 个面元包含无效坐标')
-    if (!perspective) {
-      const projectedX = dot3(position, cameraRight)
-      const projectedY = dot3(position, cameraUp)
-      minimumX = Math.min(minimumX, projectedX); maximumX = Math.max(maximumX, projectedX)
-      minimumY = Math.min(minimumY, projectedY); maximumY = Math.max(maximumY, projectedY)
-    }
+    const projectedX = dot3(position, cameraRight)
+    const projectedY = dot3(position, cameraUp)
+    minimumX = Math.min(minimumX, projectedX); maximumX = Math.max(maximumX, projectedX)
+    minimumY = Math.min(minimumY, projectedY); maximumY = Math.max(maximumY, projectedY)
   }
   let rangeX = Math.max(1e-6, maximumX - minimumX)
   let rangeY = Math.max(1e-6, maximumY - minimumY)
@@ -374,34 +309,21 @@ function writeRadiosityTiff(jsonPath, inputPath) {
   const pixelCount = width * height
   const depthBuffer = new Float64Array(pixelCount)
   depthBuffer.fill(-Infinity)
-  const surfaceIndexImage = new Int32Array(pixelCount)
-  surfaceIndexImage.fill(-1)
-  const screenVertex = (position) => {
-    if (!perspective) return {
-      x: (dot3(position, cameraRight) - minimumX) / rangeX * width,
-      y: (maximumY - dot3(position, cameraUp)) / rangeY * height,
-      depth: dot3(position, cameraOut), valid: true
-    }
-    const relative = subtract3(position, cameraPosition)
-    const cameraDepth = dot3(relative, cameraForward)
-    const halfWidth = perspectiveTanHalfFov * width / height
-    return {
-      x: (0.5 + dot3(relative, cameraRight) / (2 * cameraDepth * halfWidth)) * width,
-      y: (0.5 - dot3(relative, cameraUp) / (2 * cameraDepth * perspectiveTanHalfFov)) * height,
-      depth: -cameraDepth, valid: cameraDepth > 1e-6
-    }
-  }
+  const radiosityImage = new Float32Array(pixelCount)
+  radiosityImage.fill(Number.NaN)
+  const screenVertex = (position) => ({
+    x: (dot3(position, cameraRight) - minimumX) / rangeX * width,
+    y: (maximumY - dot3(position, cameraUp)) / rangeY * height,
+    depth: dot3(position, cameraOut)
+  })
   const edge = (a, b, x, y) => (x - a.x) * (b.y - a.y) - (y - a.y) * (b.x - a.x)
   let visiblePixels = 0
   for (let facet = 0; facet < facetCount; facet += 1) {
     const a3 = point(facet * 9), b3 = point(facet * 9 + 3), c3 = point(facet * 9 + 6)
     const normal = cross3(subtract3(b3, a3), subtract3(c3, a3))
-    const centroid = [(a3[0] + b3[0] + c3[0]) / 3, (a3[1] + b3[1] + c3[1]) / 3, (a3[2] + b3[2] + c3[2]) / 3]
-    const sideDirection = perspective ? subtract3(cameraPosition, centroid) : cameraOut
-    const localSide = dot3(normal, sideDirection) >= 0 ? 0 : 1
+    const localSide = dot3(normal, cameraOut) >= 0 ? 0 : 1
     const valueIndex = facet * 2 + localSide
     const a = screenVertex(a3), b = screenVertex(b3), c = screenVertex(c3)
-    if (!a.valid || !b.valid || !c.valid) continue
     const area = edge(a, b, c.x, c.y)
     if (Math.abs(area) < 1e-10) continue
     const minPixelX = Math.max(0, Math.floor(Math.min(a.x, b.x, c.x)))
@@ -420,7 +342,7 @@ function writeRadiosityTiff(jsonPath, inputPath) {
         if (depth <= depthBuffer[pixel]) continue
         if (!Number.isFinite(depthBuffer[pixel])) visiblePixels += 1
         depthBuffer[pixel] = depth
-        surfaceIndexImage[pixel] = valueIndex
+        radiosityImage[pixel] = Number(metrics[0][2][valueIndex])
       }
     }
   }
@@ -439,109 +361,44 @@ function writeRadiosityTiff(jsonPath, inputPath) {
     const minute = String(totalMinutes % 60).padStart(2, '0')
     return (day == null ? '' : 'DOY' + day + '_') + hour + '-' + minute
   }
+  const timeFromNode = (node) => clockToken(node * dTime)
+  let startTime = timeFromNode(startNode)
+  let endTime = timeFromNode(endNode - 1)
   const meteoFile = firstXmlTag(xml, 'filePath')
-  const meteoRows = meteoFile && existsSync(meteoFile)
-    ? readFileSync(meteoFile, 'utf8').split(/\r?\n/).slice(1).filter((line) => line.trim())
-    : []
-  const timeForNode = (node) => {
-    const julianTime = Number(String(meteoRows[node] || '').trim().split(/\s+/)[0])
-    if (Number.isFinite(julianTime)) {
+  if (meteoFile && existsSync(meteoFile)) {
+    const rows = readFileSync(meteoFile, 'utf8').split(/\r?\n/).slice(1).filter((line) => line.trim())
+    const meteoTime = (node) => {
+      const julianTime = Number(String(rows[node] || '').trim().split(/\s+/)[0])
+      if (!Number.isFinite(julianTime)) return ''
       const day = Math.floor(julianTime)
-      return { token: clockToken((julianTime - day) * 86400, day), julianTime }
+      return clockToken((julianTime - day) * 86400, day)
     }
-    return { token: clockToken(node * dTime), julianTime: node * dTime / 86400 }
+    startTime = meteoTime(startNode) || startTime
+    endTime = meteoTime(endNode - 1) || endTime
   }
+  const timeToken = startTime === endTime ? startTime : startTime + '_to_' + endTime
   const angleToken = (value) => {
     const number = Number(value)
     return Number.isFinite(number) ? number.toFixed(2) : '0.00'
   }
-  const vza = angleToken(namingViewAngles[0])
-  const vaa = angleToken(namingViewAngles[1])
-  const staticRadiosity = metrics.find(([id]) => id === 'radiosity')?.[2]
-  const coupledFacetEb = String(backend || '').includes('RT-EB coupled')
-  const stepValues = (time) => {
-    if (!coupledFacetEb) return staticRadiosity
-    const stepPath = join(dirname(jsonPath), '.facet_steps', 'energy_T=' + time.token + '.bin')
-    if (!existsSync(stepPath)) throw new Error('缺少 FacetEB 耦合节点结果：' + basename(stepPath))
-    const buffer = readFileSync(stepPath)
-    const recordBytes = 7 * 4
-    if (buffer.length < facetCount * 2 * recordBytes) throw new Error('FacetEB 节点结果不完整：' + basename(stepPath))
-    const values = new Float32Array(facetCount * 2)
-    for (let side = 0; side < values.length; side += 1) values[side] = buffer.readFloatLE(side * recordBytes + 4)
-    return values
-  }
-  const rasterizeValues = (values) => {
-    const image = new Float32Array(pixelCount)
-    image.fill(Number.NaN)
-    for (let pixel = 0; pixel < pixelCount; pixel += 1) {
-      const side = surfaceIndexImage[pixel]
-      if (side >= 0) image[pixel] = Number(values[side])
-    }
-    return image
-  }
-
-  const tifPaths = []
-  if (firstXmlTag(xml, 'isImage') !== '0') {
-    for (let node = startNode; node < endNode; node += 1) {
-      const time = timeForNode(node)
-      const radiosityImage = rasterizeValues(stepValues(time))
-      const imageValues = new Float32Array(pixelCount * wavelengths.length)
-      for (let band = 0; band < wavelengths.length; band += 1) imageValues.set(radiosityImage, band * pixelCount)
-      const tifPath = join(dirname(jsonPath), 'T=' + time.token + '_VZA=' + vza + '_VAA=' + vaa + '.tif')
-      writeFloatTiff(tifPath, width, height, wavelengths.length, imageValues, bandNames)
-      tifPaths.push(tifPath)
-    }
-  }
-
-  const processPaths = []
-  if (firstXmlTag(xml, 'isProcess') === '1') {
-    const processDirectory = join(dirname(jsonPath), 'process')
-    mkdirSync(processDirectory, { recursive: true })
-    if (coupledFacetEb) {
-      for (let node = startNode; node < endNode; node += 1) {
-        const metadataPath = join(processDirectory, 'energy_T=' + timeForNode(node).token + '.json')
-        if (existsSync(metadataPath)) processPaths.push(metadataPath)
-      }
-    } else {
-      const startTime = timeForNode(startNode).token
-      const endTime = timeForNode(endNode - 1).token
-      const processDataPath = join(processDirectory, 'facet_energy_T=' + (startTime === endTime ? startTime : startTime + '_to_' + endTime) + '.json')
-      copyFileSync(jsonPath, processDataPath)
-      for (let node = startNode; node < endNode; node += 1) {
-        const time = timeForNode(node)
-        const metadataPath = join(processDirectory, 'energy_T=' + time.token + '.meta.json')
-        writeFileSync(metadataPath, JSON.stringify({
-          kind: 'facet-energy-process',
-          node,
-          julianTime: time.julianTime,
-          time: time.token,
-          facetCount,
-          dataFile: basename(processDataPath),
-          fields: metrics.map(([id]) => id),
-          note: 'FacetRT is a static radiosity solve; requested times reference the same solved field.'
-        }, null, 2) + '\n', 'utf8')
-        processPaths.push(metadataPath)
-      }
-    }
-  }
-  return { tifPath: tifPaths[0] || '', tifPaths, processPaths, width, height, bands: wavelengths.length, bandNames, visiblePixels }
+  const tifPath = join(dirname(jsonPath), 'T=' + timeToken + '_VZA=' + angleToken(viewAngles[0]) + '_VAA=' + angleToken(viewAngles[1]) + '.tif')
+  const imageValues = new Float32Array(pixelCount * wavelengths.length)
+  // 当前 FacetRT 输出一套标量辐射度；按传感器波段建立图层，其他面元指标仅用于三维显示。
+  for (let band = 0; band < wavelengths.length; band += 1) imageValues.set(radiosityImage, band * pixelCount)
+  writeFloatTiff(tifPath, width, height, wavelengths.length, imageValues, bandNames)
+  return { tifPath, width, height, bands: wavelengths.length, bandNames, visiblePixels }
 }
 
 function projectJsonPath(inputPath) {
   return join(dirname(inputPath), 'project.json')
 }
 
-function runtimePaths(baseDir, project = null) {
-  const sourceRoot = process.env.HISTREAM_ROOT || join(modelRoot, "histream")
-  const configuredMeteoRaw = String(project?.configuration?.meteo?.path || "").trim()
-  const configuredMeteo = /\/[A-Za-z]:/.test(configuredMeteoRaw) ? "" : normalizeHostPath(configuredMeteoRaw)
-  const projectMeteoPath = configuredMeteo && configuredMeteo !== "defined/meteo.txt" && configuredMeteo !== "HiStream 内置气象数据"
-    ? (isAbsolute(configuredMeteo) ? resolve(configuredMeteo) : resolve(baseDir, configuredMeteo))
-    : ""
+function runtimePaths(baseDir) {
+  const sourceRoot = process.env.HISTREAM_ROOT || join(modelRoot, 'histream')
   return {
-    outputDir: join(baseDir, "output"),
-    definedDir: join(sourceRoot, "defined"),
-    meteoPath: projectMeteoPath || join(sourceRoot, "defined", "meteo.txt")
+    outputDir: join(baseDir, 'output'),
+    definedDir: join(sourceRoot, 'defined'),
+    meteoPath: join(sourceRoot, 'defined', 'meteo.txt')
   }
 }
 
@@ -575,15 +432,11 @@ function ensureDefaultSceneAsset(project, baseDir) {
   if (!existsSync(destination)) copyFileSync(defaultSceneAsset, destination)
   return true
 }
+
 function migrateProject(inputPath, project) {
-  if (!project) return project
-  const meteoPath = String(project.configuration?.meteo?.path || "")
-  const meteoPathRepaired = /\/[A-Za-z]:/.test(meteoPath)
-  const sceneMigrated = ensureDefaultSceneAsset(project, dirname(inputPath))
-  if (!sceneMigrated && !meteoPathRepaired) return project
-  if (meteoPathRepaired) project.configuration.meteo.path = "defined/meteo.txt"
+  if (!project || !ensureDefaultSceneAsset(project, dirname(inputPath))) return project
   const saved = writeProject(projectJsonPath(inputPath), project)
-  writeFileSync(inputPath, projectToXml(saved, runtimePaths(dirname(inputPath), saved)), "utf8")
+  writeFileSync(inputPath, projectToXml(saved, runtimePaths(dirname(inputPath))), 'utf8')
   return saved
 }
 
@@ -602,7 +455,7 @@ function openProject(value) {
 }
 
 function chooseProjectFile() {
-  if (process.platform !== 'win32' && !existsSync('/mnt/c/WINDOWS/System32/WindowsPowerShell/v1.0/powershell.exe')) throw new Error('找不到 Windows 文件选择器')
+  if (process.platform !== 'win32') throw new Error('工程文件选择器仅支持 Windows')
   return new Promise((resolveChoice, reject) => {
     const script = [
       "$ErrorActionPreference = 'Stop'",
@@ -650,13 +503,13 @@ function createProject(data) {
   const jsonPath = join(target, 'project.json')
   const inputPath = join(target, 'Input.xml')
   const saved = writeProject(jsonPath, project)
-  const content = projectToXml(saved, runtimePaths(target, saved))
+  const content = projectToXml(saved, runtimePaths(target))
   writeFileSync(inputPath, content, 'utf8')
   return { path: inputPath, projectDir: target, projectPath: jsonPath, project: saved, content }
 }
 
 function resolveAsset(value) {
-  const source = normalizeHostPath(value).replace(/^"|"$/g, '')
+  const source = String(value || '').trim().replace(/^"|"$/g, '')
   if (!source) throw new Error('资源路径为空')
   return isAbsolute(source) ? resolve(source) : resolve(projectDir, source)
 }
@@ -735,22 +588,7 @@ function convertEnviToTiff(headerPath) {
   const values = new Float32Array(width * height * bands)
   for (let index = 0; index < values.length; index += 1) values[index] = source.readFloatLE(index * 4)
   const names = String(metadata['band names'] || '').replace(/[{}]/g, '').split(',').map((value) => value.trim()).filter(Boolean)
-  const stem = basename(headerPath, extname(headerPath))
-  const julianTime = Number(stem.match(/(?:^|_)t=(-?\d+(?:\.\d+)?)/i)?.[1])
-  const vza = stem.match(/(?:^|_)VZA=(-?\d+(?:\.\d+)?)/i)?.[1]
-  const vaa = stem.match(/(?:^|_)VAA=(-?\d+(?:\.\d+)?)/i)?.[1]
-  let standardName = ''
-  if (Number.isFinite(julianTime) && vza != null && vaa != null) {
-    let day = Math.floor(julianTime)
-    let minutes = Math.round((julianTime - day) * 1440)
-    if (minutes >= 1440) { day += Math.floor(minutes / 1440); minutes %= 1440 }
-    const hour = String(Math.floor(minutes / 60)).padStart(2, '0')
-    const minute = String(minutes % 60).padStart(2, '0')
-    const angle = (value) => Number(value).toFixed(2)
-    standardName = 'T=DOY' + day + '_' + hour + '-' + minute +
-      '_VZA=' + angle(vza) + '_VAA=' + angle(vaa) + '.tif'
-  }
-  const tiffPath = standardName ? join(dirname(headerPath), standardName) : headerPath.slice(0, -extname(headerPath).length) + '.tif'
+  const tiffPath = headerPath.slice(0, -extname(headerPath).length) + '.tif'
   writeFloatTiff(tiffPath, width, height, bands, values, names)
   return tiffPath
 }
@@ -762,7 +600,7 @@ function convertEnviResults(directory) {
 
 function tiffObservation(name) {
   const stem = basename(name, extname(name))
-  const time = stem.match(/(?:^|_)T=(.+?)(?=_VZA=|$)/i)?.[1] || stem.match(/(?:^|_)TIME=(.+?)(?=_VZA=|$)/i)?.[1] || ''
+  const time = stem.match(/(?:^|_)T=([^_]+)/i)?.[1] || stem.match(/(?:^|_)TIME=([^_]+)/i)?.[1] || ''
   const vza = stem.match(/(?:^|_)VZA=(-?\d+(?:\.\d+)?)/i)?.[1] || ''
   const vaa = stem.match(/(?:^|_)VAA=(-?\d+(?:\.\d+)?)/i)?.[1] || ''
   const parts = [time && 'T=' + time, vza && 'VZA=' + vza + '°', vaa && 'VAA=' + vaa + '°'].filter(Boolean)
@@ -771,39 +609,22 @@ function tiffObservation(name) {
 
 function listResults(value) {
   const directory = resolveAsset(value)
-  if (!existsSync(directory) || !statSync(directory).isDirectory()) throw new Error('找不到模拟结果目录：' + directory)
-  const processDirectory = join(directory, 'process')
-  const directories = [directory, ...(existsSync(processDirectory) && statSync(processDirectory).isDirectory() ? [processDirectory] : [])]
-  const files = directories.flatMap((currentDirectory) => readdirSync(currentDirectory, { withFileTypes: true })
+  if (!existsSync(directory) || !statSync(directory).isDirectory()) throw new Error(`找不到模拟结果目录：${directory}`)
+  const files = readdirSync(directory, { withFileTypes: true })
     .filter((entry) => entry.isFile())
     .filter((entry) => ['.tif', '.tiff', '.json'].includes(extname(entry.name).toLowerCase()))
     .map((entry) => {
-      const path = join(currentDirectory, entry.name)
+      const path = join(directory, entry.name)
       const info = statSync(path)
       const extension = extname(entry.name).toLowerCase()
-      let kind = ['.tif', '.tiff'].includes(extension) ? 'tiff' : extension === '.json' && isRadiosityResultFile(path) ? 'facet' : 'file'
-      let process = {}
-      if (extension === '.json' && /^energy_T=.*(?:\.meta)?\.json$/i.test(entry.name) && info.size < 1024 * 1024) {
-        try {
-          process = JSON.parse(readFileSync(path, 'utf8'))
-          if (String(process.kind || '').includes('energy-process')) kind = 'process'
-        } catch {}
-      }
+      const kind = ['.tif', '.tiff'].includes(extension) ? 'tiff' : extension === '.json' && isRadiosityResultFile(path) ? 'facet' : 'file'
       const observation = kind === 'tiff' ? tiffObservation(entry.name) : {}
-      const displayName = kind === 'facet' ? '面元三维' : kind === 'process' ? '能量过程 · ' + String(process.time || entry.name) : entry.name
-      return { name: displayName, path, size: info.size, modifiedAt: info.mtime.toISOString(), kind, ...observation, processTime: process.time, node: process.node }
-    }))
+      return { name: kind === 'facet' ? '面元三维' : entry.name, path, size: info.size, modifiedAt: info.mtime.toISOString(), kind, ...observation }
+    })
     .filter((entry) => entry.kind !== 'file')
     .sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt))
   const latestFacet = files.find((entry) => entry.kind === 'facet')
-  return {
-    directory,
-    files: [
-      ...files.filter((entry) => entry.kind === 'tiff'),
-      ...files.filter((entry) => entry.kind === 'process'),
-      ...(latestFacet ? [latestFacet] : [])
-    ].sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt))
-  }
+  return { directory, files: [...files.filter((entry) => entry.kind === 'tiff'), ...(latestFacet ? [latestFacet] : [])].sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt)) }
 }
 
 function enviMetadata(content) {
@@ -1134,23 +955,6 @@ async function api(request, response, url) {
       return json(response, 201, { path, name, positionPath, relativePath: join('models', name) })
     } catch (error) { return json(response, 400, { error: error.message }) }
   }
-  if (request.method === 'POST' && url.pathname === '/api/project/import-meteo') {
-    try {
-      const data = await body(request)
-      if (!projectDir || !projectFile) throw new Error('请先新建或打开工程')
-      const name = basename(String(data.name || '').trim())
-      const allowedExtensions = new Set(['.txt', '.meteo', '.dat', '.csv'])
-      if (!name || !allowedExtensions.has(extname(name).toLowerCase())) throw new Error('只能导入 TXT、METEO、DAT 或 CSV 气象文件')
-      const content = String(data.content || '')
-      if (!content.trim()) throw new Error('气象驱动文件为空')
-      if (Buffer.byteLength(content, 'utf8') > 20 * 1024 * 1024) throw new Error('气象驱动文件超过 20MB')
-      const meteorologyDir = join(projectDir, 'meteorology')
-      mkdirSync(meteorologyDir, { recursive: true })
-      const path = join(meteorologyDir, name)
-      writeFileSync(path, content, 'utf8')
-      return json(response, 201, { path, name, relativePath: join('meteorology', name) })
-    } catch (error) { return json(response, 400, { error: error.message }) }
-  }
   if (request.method === 'POST' && url.pathname === '/api/project/distribution') {
     try {
       const data = await body(request)
@@ -1196,7 +1000,7 @@ async function api(request, response, url) {
         project = writeProject(savedProjectPath, data.project)
         ensureDefaultSceneAsset(project, dirname(path))
         project = writeProject(savedProjectPath, project)
-        content = projectToXml(project, runtimePaths(dirname(path), project))
+        content = projectToXml(project, runtimePaths(dirname(path)))
       }
       writeFileSync(path, content, 'utf8')
       projectFile = path
@@ -1242,8 +1046,7 @@ async function api(request, response, url) {
         if (code === 0 && radiosityJsonPath) {
           try {
             const tif = writeRadiosityTiff(radiosityJsonPath, input)
-            if (tif.tifPaths.length) emit({ type: 'stdout', text: '已生成 ' + tif.tifPaths.length + ' 个逐时 TIFF（' + tif.width + ' × ' + tif.height + '，' + tif.bands + ' 波段）' })
-            if (tif.processPaths.length) emit({ type: 'stdout', text: '已保留 ' + tif.processPaths.length + ' 个逐时面元能量过程索引' })
+            emit({ type: 'stdout', text: '已生成 ' + tif.width + ' × ' + tif.height + '、' + tif.bands + ' 波段传感器投影 TIFF：' + tif.tifPath })
           } catch (error) {
             finalCode = 1
             emit({ type: 'error', text: `结果影像生成失败：${error.message}` })
@@ -1301,7 +1104,7 @@ async function api(request, response, url) {
   }
   if (request.method === 'POST' && url.pathname === '/api/open') {
     const data = await body(request)
-    const path = resolve(normalizeHostPath(data.path || projectDir || root))
+    const path = resolve(String(data.path || projectDir || root))
     if (!existsSync(path)) return json(response, 400, { error: `找不到路径：${path}` })
     if (process.platform === 'win32') spawn('explorer.exe', statSync(path).isFile() ? ['/select,', path] : [path], { detached: true, windowsHide: true })
     return json(response, 200, { ok: true, path })

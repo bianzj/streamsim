@@ -109,6 +109,50 @@ std::vector<glm::ivec3> VoxelDesigner::createCube(float length, float width, flo
     return discreteCoord;
 }
 
+PrimMesh VoxelDesigner::createTriVoxels(const std::vector<glm::ivec3>& voxelIds)
+{
+    PrimMesh mesh{};
+    mesh.meshId = 0;
+
+    auto appendQuad = [&mesh](const glm::vec3& p0, const glm::vec3& p1,
+                              const glm::vec3& p2, const glm::vec3& p3) {
+        const glm::vec3 points[4] = {p0, p1, p2, p3};
+        const uint32_t order[6] = {0, 1, 2, 0, 2, 3};
+        for (uint32_t index : order) {
+            VertexAttribute vertex{};
+            vertex.pos = points[index];
+            mesh.indices.emplace_back(static_cast<uint32_t>(mesh.vertices.size()));
+            mesh.vertices.emplace_back(vertex);
+        }
+    };
+
+    glm::vec3 centerSum(0.0f);
+    for (const glm::ivec3& id : voxelIds) {
+        const glm::vec3 base(id);
+        const float x = base.x;
+        const float y = base.y;
+        const float z = base.z;
+
+        appendQuad({x, y, z + 0.5f}, {x + 1.0f, y, z + 0.5f},
+                   {x + 1.0f, y + 1.0f, z + 0.5f}, {x, y + 1.0f, z + 0.5f});
+        appendQuad({x + 0.5f, y, z}, {x + 0.5f, y + 1.0f, z},
+                   {x + 0.5f, y + 1.0f, z + 1.0f}, {x + 0.5f, y, z + 1.0f});
+        appendQuad({x, y + 0.5f, z}, {x, y + 0.5f, z + 1.0f},
+                   {x + 1.0f, y + 0.5f, z + 1.0f}, {x + 1.0f, y + 0.5f, z});
+
+        mesh.voxelIds.emplace_back(id);
+        mesh.isValids.emplace_back(int5{1, 1, 1, 1, 1});
+        mesh.faceIds.emplace_back(0);
+        centerSum += base + glm::vec3(0.5f);
+    }
+
+    mesh.nVertices = static_cast<uint32_t>(mesh.vertices.size());
+    mesh.nIndices = static_cast<uint32_t>(mesh.indices.size());
+    mesh.meshcenter = voxelIds.empty() ? glm::vec3(0.0f)
+                                      : centerSum / static_cast<float>(voxelIds.size());
+    return mesh;
+}
+
 PrimMesh VoxelDesigner::createTriCube(Shape shape, float stepSize)
 {
     PrimMesh voxelTriModel;

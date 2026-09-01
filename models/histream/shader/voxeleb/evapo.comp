@@ -133,7 +133,7 @@ void main()
         {
             LE = 0;
         }
-        else if (typeId == TYPE_SOIL && soilSets[bioId].SMC < 0.03)
+        else if (typeId == TYPE_SOIL && ((soilSets[bioId].SMC > 1.0 ? soilSets[bioId].SMC * 0.01 : soilSets[bioId].SMC) < 0.03))
         {
             LE = 0;
         }

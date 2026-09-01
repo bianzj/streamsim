@@ -145,7 +145,7 @@ void main()
     float ei_shaded = es_fun(TshadedOld);
     float s_shaded = s_fun(ei_shaded, TshadedOld);
     float innovation1 = 0,innovation2 = 0;
-    float raa = voxelRaas[bufferId].raa ;
+    float raa = max(voxelRaas[bufferId].raa, 1.0);
     float rss_sunlit = voxelRsss[bufferId].sunlit;
     float rss_shaded = voxelRsss[bufferId].shaded;
     float diffSunlitRad, diffShadedRad;
@@ -169,10 +169,10 @@ void main()
     // Tshaded = TshadedOld + diffShadedRad * wc / ((RHOA*CP)/raa + 4*SIGMASB*pow(TshadedOld,3));
     if(typeId == TYPE_VEGETATION)
     { 
-        diffSunlitRad = netSunlitRad - (voxelHeatFlux[bufferId].LEsunlit + voxelHeatFlux[bufferId].Hsunlit);
-        diffShadedRad = netShadedRad - (voxelHeatFlux[bufferId].LEshaded + voxelHeatFlux[bufferId].Hshaded);
-        Tsunlit = TsunlitOld + diffSunlitRad * wc / ((RHOA*CP)/raa + 4*SIGMASB*pow(TsunlitOld,3));
-        Tshaded = TshadedOld + diffShadedRad * wc / ((RHOA*CP)/raa + 4*SIGMASB*pow(TshadedOld,3));
+        diffSunlitRad = netSunlitRad - (voxelHeatFlux[bufferId].LEsunlit + voxelHeatFlux[bufferId].Gsunlit + voxelHeatFlux[bufferId].Hsunlit);
+        diffShadedRad = netShadedRad - (voxelHeatFlux[bufferId].LEshaded + voxelHeatFlux[bufferId].Gshaded + voxelHeatFlux[bufferId].Hshaded);
+        Tsunlit = TsunlitOld + diffSunlitRad * wc / ((RHOA*CP)/raa + (RHOA*CP)/raa + 4*SIGMASB*pow(TsunlitOld,3));
+        Tshaded = TshadedOld + diffShadedRad * wc / ((RHOA*CP)/raa + (RHOA*CP)/raa + 4*SIGMASB*pow(TshadedOld,3));
     }else if(typeId == TYPE_WATER)
     {
         float sunlitFraction = clamp(voxelDirs[bufferId].solar, 0.0, 1.0);

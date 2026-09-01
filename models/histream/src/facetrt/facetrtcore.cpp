@@ -1,10 +1,13 @@
 #include "facetrtcore.h"
 #include "facetrt_vulkan.h"
+#include "../base/utils.h"
+#include "../thirdparty/spa.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -43,6 +46,8 @@ struct Scene {
     uint32_t leafFacetCount{};
     Vec3 minimum{};
     Vec3 maximum{};
+    float sunZenith{30.0f};
+    float sunAzimuth{135.0f};
 
     uint32_t facetCount() const { return static_cast<uint32_t>(vertices.size() / 3U); }
 };
@@ -266,10 +271,10 @@ std::vector<facetvk::Direction> makeHemisphereDirections()
     return directions;
 }
 
-facetvk::Direction sunDirection()
+facetvk::Direction sunDirection(const Scene& scene)
 {
-    constexpr float zenith = 30.0f * kPi / 180.0f;
-    constexpr float azimuth = 135.0f * kPi / 180.0f;
+    const float zenith = scene.sunZenith * kPi / 180.0f;
+    const float azimuth = scene.sunAzimuth * kPi / 180.0f;
     return {std::sin(zenith) * std::cos(azimuth), std::cos(zenith),
             std::sin(zenith) * std::sin(azimuth)};
 }
@@ -277,7 +282,7 @@ facetvk::Direction sunDirection()
 std::vector<facetvk::SurfaceOptics> makeOptics(const Scene& scene,
                                                 const std::vector<float>& sunlit)
 {
-    const facetvk::Direction direction = sunDirection();
+    const facetvk::Direction direction = sunDirection(scene);
     const Vec3 sun{direction.x, direction.y, direction.z};
     std::vector<facetvk::SurfaceOptics> optics(scene.facetCount() * 2U);
     for (uint32_t facet = 0; facet < scene.facetCount(); ++facet) {
@@ -512,7 +517,7 @@ CpuGraph buildCpuGraph(const Scene& scene, const Progress& progress)
 std::vector<float> computeCpuSunlit(const Scene& scene)
 {
     CpuRasterizer raster(scene, kRasterSize, kRasterSize, kRasterLayers);
-    if (raster.rasterize(sunDirection()) != 0U) {
+    if (raster.rasterize(sunDirection(scene)) != 0U) {
         throw std::runtime_error("CPU sunlight A-buffer overflow");
     }
     std::vector<uint32_t> total(scene.facetCount() * 2U, 0U);
@@ -665,7 +670,7 @@ RunResult runGpu(const Scene& scene,
     config.rasterWidth = kRasterSize;
     config.rasterHeight = kRasterSize;
     config.maxFragmentsPerPixel = kRasterLayers;
-    config.enableValidation = true;
+    config.enableValidation = false;
 
     facetvk::FacetrtVulkan model;
     model.initialize(config, shaderDirectory);
@@ -679,7 +684,7 @@ RunResult runGpu(const Scene& scene,
 
     progress(72, "GPU sunlight visibility raster");
     const auto sunlightBegin = Clock::now();
-    result.sunlit = model.computeSunlitFraction(sunDirection());
+    result.sunlit = model.computeSunlitFraction(sunDirection(scene));
     const auto sunlightEnd = Clock::now();
     result.sunlightMs = milliseconds(sunlightBegin, sunlightEnd);
 
@@ -801,6 +806,288 @@ std::string firstXmlTag(const std::string& xml, const char* tag)
     return decodeXmlText(xml.substr(contentBegin + 1U, contentEnd - contentBegin - 1U));
 }
 
+std::string trim(std::string value)
+{
+    const auto whitespace = [](unsigned char character) { return std::isspace(character) != 0; };
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(),
+                                            [&](char character) { return !whitespace(character); }));
+    value.erase(std::find_if(value.rbegin(), value.rend(),
+                             [&](char character) { return !whitespace(character); }).base(),
+                value.end());
+    return value;
+}
+
+float xmlFloat(const std::string& xml, const char* tag, float fallback)
+{
+    const std::string value = trim(firstXmlTag(xml, tag));
+    if (value.empty()) {
+        return fallback;
+    }
+    try {
+        const float parsed = std::stof(value);
+        return std::isfinite(parsed) ? parsed : fallback;
+    } catch (...) {
+        return fallback;
+    }
+}
+
+std::vector<std::string> xmlObjectBlocks(const std::string& xml)
+{
+    std::vector<std::string> blocks;
+    const std::string open = "<object";
+    const std::string close = "</object>";
+    size_t position = 0;
+    while ((position = xml.find(open, position)) != std::string::npos) {
+        const size_t suffix = position + open.size();
+        if (suffix >= xml.size() ||
+            !(xml[suffix] == '>' || std::isspace(static_cast<unsigned char>(xml[suffix])))) {
+            position = suffix;
+            continue;
+        }
+        const size_t end = xml.find(close, suffix);
+        if (end == std::string::npos) {
+            break;
+        }
+        blocks.push_back(xml.substr(position, end + close.size() - position));
+        position = end + close.size();
+    }
+    return blocks;
+}
+
+std::filesystem::path resolveProjectAsset(const std::filesystem::path& inputPath,
+                                          const std::string& value)
+{
+    const std::filesystem::path path(trim(value));
+    return path.is_absolute() ? path : (inputPath.parent_path() / path).lexically_normal();
+}
+
+struct ObjGeometry {
+    std::vector<Vec3> positions;
+    std::vector<std::array<int, 3>> triangles;
+};
+
+ObjGeometry readObjGeometry(const std::filesystem::path& path)
+{
+    std::ifstream input(path);
+    if (!input) {
+        throw std::runtime_error("Cannot open scene OBJ: " + path.string());
+    }
+    ObjGeometry geometry;
+    std::string line;
+    while (std::getline(input, line)) {
+        std::istringstream stream(line);
+        std::string record;
+        stream >> record;
+        if (record == "v") {
+            Vec3 position{};
+            if (!(stream >> position[0] >> position[1] >> position[2])) {
+                throw std::runtime_error("Invalid OBJ vertex in " + path.string());
+            }
+            geometry.positions.push_back(position);
+        } else if (record == "f") {
+            std::vector<int> face;
+            std::string token;
+            while (stream >> token) {
+                face.push_back(parsePositionIndex(token, geometry.positions.size()));
+            }
+            for (size_t index = 1; index + 1 < face.size(); ++index) {
+                geometry.triangles.push_back({face[0], face[index], face[index + 1]});
+            }
+        }
+    }
+    if (geometry.positions.empty() || geometry.triangles.empty()) {
+        throw std::runtime_error("Scene OBJ contains no usable geometry: " + path.string());
+    }
+    float minimumY = std::numeric_limits<float>::max();
+    for (const Vec3& position : geometry.positions) {
+        minimumY = std::min(minimumY, position[1]);
+    }
+    for (Vec3& position : geometry.positions) {
+        position[1] -= minimumY;
+    }
+    return geometry;
+}
+
+struct Placement {
+    float x{};
+    float y{};
+    float z{};
+    float scale{1.0f};
+    float rotation{};
+};
+
+std::vector<Placement> readPlacements(const std::filesystem::path& inputPath,
+                                      const std::string& objectXml,
+                                      float sceneWidth,
+                                      float sceneDepth)
+{
+    std::vector<Placement> placements;
+    const std::string positionFile = trim(firstXmlTag(objectXml, "objectPosition"));
+    if (!positionFile.empty()) {
+        const std::filesystem::path path = resolveProjectAsset(inputPath, positionFile);
+        std::ifstream input(path);
+        if (!input) {
+            throw std::runtime_error("Cannot open object positions: " + path.string());
+        }
+        std::string line;
+        while (std::getline(input, line)) {
+            std::istringstream stream(line);
+            Placement placement;
+            if (!(stream >> placement.x >> placement.y >> placement.z)) {
+                continue;
+            }
+            if (!(stream >> placement.scale)) {
+                placement.scale = 1.0f;
+                stream.clear();
+            }
+            if (!(stream >> placement.rotation)) {
+                placement.rotation = 0.0f;
+            }
+            if (std::isfinite(placement.x) && std::isfinite(placement.y) &&
+                std::isfinite(placement.z) && std::isfinite(placement.scale) &&
+                std::isfinite(placement.rotation) && placement.scale > 0.0f) {
+                placements.push_back(placement);
+            }
+        }
+    }
+    if (placements.empty()) {
+        placements.push_back({sceneWidth * 0.5f, sceneDepth * 0.5f, 0.0f, 1.0f, 0.0f});
+    }
+    return placements;
+}
+
+Vec3 transformPosition(const Vec3& position,
+                       const Placement& placement,
+                       float sceneWidth,
+                       float sceneDepth)
+{
+    const float radians = placement.rotation * kPi / 180.0f;
+    const float cosine = std::cos(radians);
+    const float sine = std::sin(radians);
+    const float x = position[0] * placement.scale;
+    const float y = position[1] * placement.scale;
+    const float z = position[2] * placement.scale;
+    return {
+        cosine * x + sine * z + placement.x - sceneWidth * 0.5f,
+        y + placement.z,
+        -sine * x + cosine * z + placement.y - sceneDepth * 0.5f
+    };
+}
+
+void appendGeometry(Scene& scene,
+                    const ObjGeometry& geometry,
+                    const Placement& placement,
+                    float sceneWidth,
+                    float sceneDepth)
+{
+    for (const auto& triangle : geometry.triangles) {
+        appendTriangle(scene,
+                       transformPosition(geometry.positions[triangle[0]], placement,
+                                         sceneWidth, sceneDepth),
+                       transformPosition(geometry.positions[triangle[1]], placement,
+                                         sceneWidth, sceneDepth),
+                       transformPosition(geometry.positions[triangle[2]], placement,
+                                         sceneWidth, sceneDepth));
+    }
+}
+
+ObjGeometry cubeGeometry(const std::string& objectXml)
+{
+    float length = 1.0f;
+    float width = 1.0f;
+    float height = 1.0f;
+    std::istringstream values(firstXmlTag(objectXml, "shapes"));
+    char separator = 0;
+    values >> length >> separator >> width >> separator >> height;
+    if (!(length > 0.0f) || !(width > 0.0f) || !(height > 0.0f)) {
+        length = width = height = 1.0f;
+    }
+    const float halfX = length * 0.5f;
+    const float halfZ = width * 0.5f;
+    ObjGeometry geometry;
+    geometry.positions = {
+        {-halfX, 0.0f, -halfZ}, {halfX, 0.0f, -halfZ},
+        {halfX, 0.0f, halfZ}, {-halfX, 0.0f, halfZ},
+        {-halfX, height, -halfZ}, {halfX, height, -halfZ},
+        {halfX, height, halfZ}, {-halfX, height, halfZ}
+    };
+    geometry.triangles = {
+        {0, 2, 1}, {0, 3, 2}, {4, 5, 6}, {4, 6, 7},
+        {0, 1, 5}, {0, 5, 4}, {1, 2, 6}, {1, 6, 5},
+        {2, 3, 7}, {2, 7, 6}, {3, 0, 4}, {3, 4, 7}
+    };
+    return geometry;
+}
+
+void appendProjectGround(Scene& scene, float sceneWidth, float sceneDepth)
+{
+    const float x0 = -sceneWidth * 0.5f;
+    const float z0 = -sceneDepth * 0.5f;
+    for (uint32_t row = 0; row < kSoilGridResolution; ++row) {
+        const float za = z0 + sceneDepth * static_cast<float>(row) /
+                                 static_cast<float>(kSoilGridResolution);
+        const float zb = z0 + sceneDepth * static_cast<float>(row + 1U) /
+                                 static_cast<float>(kSoilGridResolution);
+        for (uint32_t column = 0; column < kSoilGridResolution; ++column) {
+            const float xa = x0 + sceneWidth * static_cast<float>(column) /
+                                     static_cast<float>(kSoilGridResolution);
+            const float xb = x0 + sceneWidth * static_cast<float>(column + 1U) /
+                                     static_cast<float>(kSoilGridResolution);
+            appendTriangle(scene, {xa, -0.01f, za}, {xb, -0.01f, zb}, {xb, -0.01f, za});
+            appendTriangle(scene, {xa, -0.01f, za}, {xa, -0.01f, zb}, {xb, -0.01f, zb});
+        }
+    }
+}
+
+Scene loadProjectScene(const std::string& inputFile)
+{
+    const std::filesystem::path inputPath(inputFile);
+    const std::string xml = readTextFile(inputFile);
+    const float sceneWidth = std::max(0.01f, xmlFloat(xml, "sceneSizeX", 8.0f));
+    const float sceneDepth = std::max(0.01f, xmlFloat(xml, "sceneSizeY", 8.0f));
+    Scene scene;
+
+    std::string lightAngles = firstXmlTag(xml, "lightAngle");
+    const size_t nestedTagEnd = lightAngles.find('>');
+    if (nestedTagEnd != std::string::npos) {
+        lightAngles = lightAngles.substr(nestedTagEnd + 1U);
+    }
+    std::istringstream angleValues(lightAngles);
+    char separator = 0;
+    if (!(angleValues >> scene.sunZenith >> separator >> scene.sunAzimuth)) {
+        scene.sunZenith = 30.0f;
+        scene.sunAzimuth = 135.0f;
+    }
+
+    for (const std::string& objectXml : xmlObjectBlocks(xml)) {
+        std::string modelFile = trim(firstXmlTag(objectXml, "fileName"));
+        if (modelFile.empty()) {
+            modelFile = trim(firstXmlTag(objectXml, "objectfile"));
+        }
+        const ObjGeometry geometry = modelFile.empty()
+            ? cubeGeometry(objectXml)
+            : readObjGeometry(resolveProjectAsset(inputPath, modelFile));
+        for (const Placement& placement :
+             readPlacements(inputPath, objectXml, sceneWidth, sceneDepth)) {
+            appendGeometry(scene, geometry, placement, sceneWidth, sceneDepth);
+        }
+    }
+
+    scene.leafFacetCount = scene.facetCount();
+    appendProjectGround(scene, sceneWidth, sceneDepth);
+    scene.minimum = {std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
+                     std::numeric_limits<float>::max()};
+    scene.maximum = {std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(),
+                     std::numeric_limits<float>::lowest()};
+    for (const facetvk::Vertex& vertex : scene.vertices) {
+        for (size_t axis = 0; axis < 3; ++axis) {
+            scene.minimum[axis] = std::min(scene.minimum[axis], vertex.position[axis]);
+            scene.maximum[axis] = std::max(scene.maximum[axis], vertex.position[axis]);
+        }
+    }
+    return scene;
+}
+
 std::string generatedCubeFromInput(const std::string& inputPath, const std::string& xml)
 {
     float length = 1.0f;
@@ -887,9 +1174,11 @@ try {
     if (inputPath.empty()) {
         throw std::invalid_argument("FacetRT requires Input.xml");
     }
-    const std::string sceneFile = sceneFileFromInput(inputPath);
     const std::string resultFile = outputFileFromInput(inputPath, outputFile, "radiosity_gpu.json");
-    const Scene scene = loadTreeWithSoil(sceneFile);
+    const std::filesystem::path input(inputPath);
+    const Scene scene = input.extension() == ".obj" || input.extension() == ".OBJ"
+        ? loadTreeWithSoil(inputPath)
+        : loadProjectScene(inputPath);
     const Progress progress = [](int value, const std::string& stage) {
         std::cout << "PROGRESS\t" << value << '\t' << stage << std::endl;
     };
@@ -900,5 +1189,408 @@ try {
     return 0;
 } catch (const std::exception& error) {
     std::cerr << "facetrt: " << error.what() << '\n';
+    return 1;
+}
+
+
+int runFacetEBCore(const std::string& inputPath,
+                   const std::string& shaderDirectory,
+                   const std::string& outputFile)
+try {
+    if (inputPath.empty()) {
+        throw std::invalid_argument("FacetEB requires Input.xml");
+    }
+
+    struct MeteoStep {
+        int node{};
+        float julianTime{};
+        float airTemperature{25.0f};
+        float vaporPressure{15.0f};
+        float pressure{839.0f};
+        float windSpeed{1.0f};
+        float shortwave{};
+        float longwave{320.0f};
+    };
+
+    const std::filesystem::path input(inputPath);
+    const std::string xml = readTextFile(inputPath);
+    Scene scene = input.extension() == ".obj" || input.extension() == ".OBJ"
+        ? loadTreeWithSoil(inputPath)
+        : loadProjectScene(inputPath);
+    const std::string resultFile =
+        outputFileFromInput(inputPath, outputFile, "faceteb.json");
+    const std::filesystem::path outputDirectory =
+        std::filesystem::path(resultFile).parent_path();
+    std::filesystem::create_directories(outputDirectory);
+
+    const int startNode = std::max(0, static_cast<int>(
+        std::lround(xmlFloat(xml, "startTimeNode", 0.0f))));
+    const int endNode = std::max(startNode + 1, static_cast<int>(
+        std::lround(xmlFloat(xml, "endTimeNode", static_cast<float>(startNode + 1)))));
+    const float dTime = std::max(1.0f, xmlFloat(xml, "dTime", 1800.0f));
+    const bool saveProcess = trim(firstXmlTag(xml, "isProcess")) == "1";
+    const uint32_t maximumCouplingIterations = static_cast<uint32_t>(std::clamp(
+        static_cast<int>(std::lround(xmlFloat(xml, "couplingIterations", 20.0f))),
+        1, 100));
+    const float temperatureTolerance = std::clamp(
+        xmlFloat(xml, "temperatureTolerance", 0.05f), 0.001f, 10.0f);
+    const float temperatureRelaxation = std::clamp(
+        xmlFloat(xml, "temperatureRelaxation", 0.5f), 0.05f, 1.0f);
+    const float latitude = xmlFloat(xml, "Latitude", 40.0f);
+    const float longitude = xmlFloat(xml, "Longitude", 116.0f);
+    const float skyTemperature = std::clamp(
+        xmlFloat(xml, "skyTemperature", 250.0f), 150.0f, 350.0f);
+
+    std::vector<MeteoStep> meteorology;
+    const std::string meteoName = trim(firstXmlTag(xml, "filePath"));
+    if (!meteoName.empty()) {
+        std::ifstream meteo(resolveProjectAsset(input, meteoName));
+        if (!meteo) {
+            throw std::runtime_error("FacetEB cannot open meteorology: " + meteoName);
+        }
+        std::string line;
+        std::getline(meteo, line);
+        int row = 0;
+        while (std::getline(meteo, line)) {
+            std::istringstream values(line);
+            MeteoStep step;
+            step.node = row++;
+            if (!(values >> step.julianTime >> step.airTemperature >>
+                  step.vaporPressure >> step.pressure >> step.windSpeed >>
+                  step.shortwave >> step.longwave)) {
+                continue;
+            }
+            meteorology.push_back(step);
+        }
+    }
+    if (meteorology.empty()) {
+        meteorology.resize(static_cast<size_t>(endNode));
+        for (int node = 0; node < endNode; ++node) {
+            meteorology[static_cast<size_t>(node)].node = node;
+            meteorology[static_cast<size_t>(node)].julianTime =
+                1.0f + static_cast<float>(node) * dTime / 86400.0f;
+        }
+    }
+    if (endNode > static_cast<int>(meteorology.size())) {
+        throw std::runtime_error("FacetEB time range exceeds meteorology rows");
+    }
+
+    const auto timeToken = [](float julianTime) {
+        int day = static_cast<int>(std::floor(julianTime));
+        int minutes = static_cast<int>(std::lround(
+            (static_cast<double>(julianTime) - day) * 1440.0));
+        if (minutes >= 1440) {
+            day += minutes / 1440;
+            minutes %= 1440;
+        }
+        std::ostringstream token;
+        token << "DOY" << day << '_' << std::setw(2) << std::setfill('0')
+              << minutes / 60 << '-' << std::setw(2) << std::setfill('0')
+              << minutes % 60;
+        return token.str();
+    };
+
+    const auto updateSolarPosition = [&](const MeteoStep& step) {
+        int month = 1;
+        int day = 1;
+        const int dayOfYear = static_cast<int>(std::floor(step.julianTime));
+        Utils::calculateMonthAndDay(2019, dayOfYear, &month, &day);
+        const double fractionalDay =
+            static_cast<double>(step.julianTime) - dayOfYear;
+        const int totalSeconds =
+            static_cast<int>(std::lround(fractionalDay * 86400.0));
+        spa_data data{};
+        data.year = 2019;
+        data.month = month;
+        data.day = day;
+        data.hour = std::clamp(totalSeconds / 3600, 0, 23);
+        data.minute = std::clamp((totalSeconds % 3600) / 60, 0, 59);
+        data.second = std::clamp(totalSeconds % 60, 0, 59);
+        data.timezone = 8.0;
+        data.delta_t = Utils::calculateDeltaT(data.year, data.month);
+        data.longitude = longitude;
+        data.latitude = latitude;
+        data.elevation = 100.0;
+        data.pressure = std::max(100.0f, step.pressure);
+        data.temperature = step.airTemperature;
+        data.slope = 0.0;
+        data.azm_rotation = 0.0;
+        data.atmos_refract = 0.5667;
+        data.function = SPA_ZA;
+        SPACalc calculator;
+        const int error = calculator.spa_calculate(&data);
+        if (error != 0) {
+            throw std::runtime_error("FacetEB solar-position calculation failed");
+        }
+        scene.sunZenith = static_cast<float>(data.zenith);
+        scene.sunAzimuth = static_cast<float>(data.azimuth);
+    };
+
+    facetvk::Config config{};
+    config.rasterWidth = kRasterSize;
+    config.rasterHeight = kRasterSize;
+    config.maxFragmentsPerPixel = kRasterLayers;
+    config.gpuIndex = static_cast<uint32_t>(std::max(
+        0, static_cast<int>(std::lround(xmlFloat(xml, "GPU", 0.0f)))));
+
+    std::cout << "PROGRESS\t3\tFacetEB initializes geometry and Vulkan once" << std::endl;
+    facetvk::FacetrtVulkan model;
+    model.initialize(config, shaderDirectory);
+    model.setGeometry(scene.vertices);
+    std::cout << "PROGRESS\t10\tFacetEB builds the shared visibility graph once" << std::endl;
+    const facetvk::GraphDiagnostics graph =
+        model.buildVisibilityGraph(makeHemisphereDirections());
+
+    const size_t surfaceCount = static_cast<size_t>(scene.facetCount()) * 2U;
+    const float initialSunlitTemperature = std::clamp(
+        xmlFloat(xml, "sunlitTemperature", 300.0f), 220.0f, 360.0f);
+    const float initialShadedTemperature = std::clamp(
+        xmlFloat(xml, "shadedTemperature", 296.0f), 220.0f, 360.0f);
+    std::vector<float> temperature(surfaceCount, initialShadedTemperature);
+    for (size_t side = 0; side < surfaceCount; side += 2U) {
+        temperature[side] = initialSunlitTemperature;
+    }
+
+    RunResult latest;
+    latest.backend = "Vulkan GPU Facet RT-EB coupled";
+    latest.graph = graph;
+    std::vector<float> latestNetRadiation(surfaceCount);
+    std::vector<float> latestSensibleHeat(surfaceCount);
+    std::vector<float> latestLatentHeat(surfaceCount);
+    std::vector<float> latestStorageHeat(surfaceCount);
+    uint32_t latestCouplingIterations = 0;
+    float latestTemperatureDelta = 0.0f;
+    std::string latestTime;
+
+    constexpr float stefanBoltzmann = 5.670374419e-8f;
+    const std::filesystem::path stepDirectory = outputDirectory / ".facet_steps";
+    std::filesystem::create_directories(stepDirectory);
+    if (saveProcess) {
+        std::filesystem::create_directories(outputDirectory / "process");
+    }
+
+    const auto totalBegin = Clock::now();
+    for (int node = startNode; node < endNode; ++node) {
+        const MeteoStep& meteo = meteorology[static_cast<size_t>(node)];
+        updateSolarPosition(meteo);
+        const std::string token = timeToken(meteo.julianTime);
+        const std::vector<float> previousTemperature = temperature;
+        const std::vector<float> sunlit =
+            model.computeSunlitFraction(sunDirection(scene));
+        std::vector<float> netRadiation(surfaceCount);
+        std::vector<float> sensibleHeat(surfaceCount);
+        std::vector<float> latentHeat(surfaceCount);
+        std::vector<float> storageHeat(surfaceCount);
+        facetvk::SolveResult radiativeSolution;
+        uint32_t couplingIterations = 0;
+        float maximumTemperatureDelta = 0.0f;
+
+        for (uint32_t coupling = 0;
+             coupling < maximumCouplingIterations; ++coupling) {
+            std::vector<facetvk::SurfaceOptics> optics =
+                makeOptics(scene, sunlit);
+            const float shortwaveScale =
+                std::max(0.0f, meteo.shortwave) / kBeamNormalIrradiance;
+            for (size_t side = 0; side < surfaceCount; ++side) {
+                const float emissivity = std::clamp(
+                    1.0f - optics[side].reflectance -
+                    optics[side].transmittance, 0.01f, 1.0f);
+                optics[side].directIrradiance *= shortwaveScale;
+                optics[side].emission = emissivity * stefanBoltzmann *
+                    std::pow(temperature[side], 4.0f);
+            }
+
+            const float skyRadiosity =
+                std::max(0.0f, meteo.longwave) +
+                0.15f * std::max(0.0f, meteo.shortwave);
+            radiativeSolution =
+                model.solve(optics, skyRadiosity, kIterations, 1.0f);
+
+            maximumTemperatureDelta = 0.0f;
+            const float airTemperature =
+                std::clamp(meteo.airTemperature + 273.15f, 220.0f, 340.0f);
+            const float aerodynamicConductance =
+                5.8f + 4.1f * std::sqrt(std::max(0.1f, meteo.windSpeed));
+            for (size_t side = 0; side < surfaceCount; ++side) {
+                const bool leaf = side / 2U < scene.leafFacetCount;
+                const float emissivity = std::clamp(
+                    1.0f - optics[side].reflectance -
+                    optics[side].transmittance, 0.01f, 1.0f);
+                const float emittedLongwave = emissivity * stefanBoltzmann *
+                    std::pow(temperature[side], 4.0f);
+                const float absorbedRadiation = std::max(
+                    0.0f, radiativeSolution.radiosity[side] -
+                    emittedLongwave + emissivity * std::max(0.0f, meteo.longwave));
+                netRadiation[side] = absorbedRadiation - emittedLongwave;
+                sensibleHeat[side] = aerodynamicConductance *
+                    (temperature[side] - airTemperature);
+                const float available = std::max(
+                    0.0f, netRadiation[side] - sensibleHeat[side]);
+                latentHeat[side] = (leaf ? 0.42f : 0.08f) * available;
+                const float heatCapacity = leaf ? 60000.0f : 1800000.0f;
+                storageHeat[side] = heatCapacity *
+                    (temperature[side] - previousTemperature[side]) / dTime;
+                const float residual = netRadiation[side] -
+                    sensibleHeat[side] - latentHeat[side] -
+                    storageHeat[side];
+                const float derivative =
+                    4.0f * emissivity * stefanBoltzmann *
+                    std::pow(temperature[side], 3.0f) +
+                    aerodynamicConductance + heatCapacity / dTime;
+                const float candidate = std::clamp(
+                    temperature[side] + residual / std::max(1.0f, derivative),
+                    220.0f, 360.0f);
+                const float updated = temperature[side] +
+                    temperatureRelaxation * (candidate - temperature[side]);
+                maximumTemperatureDelta = std::max(
+                    maximumTemperatureDelta,
+                    std::abs(updated - temperature[side]));
+                temperature[side] = updated;
+            }
+            couplingIterations = coupling + 1U;
+            if (maximumTemperatureDelta <= temperatureTolerance) {
+                break;
+            }
+        }
+
+        std::vector<facetvk::SurfaceOptics> finalOptics =
+            makeOptics(scene, sunlit);
+        const float shortwaveScale =
+            std::max(0.0f, meteo.shortwave) / kBeamNormalIrradiance;
+        for (size_t side = 0; side < surfaceCount; ++side) {
+            const float emissivity = std::clamp(
+                1.0f - finalOptics[side].reflectance -
+                finalOptics[side].transmittance, 0.01f, 1.0f);
+            finalOptics[side].directIrradiance *= shortwaveScale;
+            finalOptics[side].emission = emissivity * stefanBoltzmann *
+                std::pow(temperature[side], 4.0f);
+        }
+        const float skyRadiosity =
+            std::max(0.0f, meteo.longwave) +
+            0.15f * std::max(0.0f, meteo.shortwave);
+        radiativeSolution =
+            model.solve(finalOptics, skyRadiosity, kIterations, 1.0f);
+        const facetvk::SolveResult diffuseSolution =
+            model.solve(withoutDirectLight(finalOptics), skyRadiosity,
+                        kIterations, 1.0f);
+
+        const std::filesystem::path binaryPath =
+            stepDirectory / ("energy_T=" + token + ".bin");
+        std::ofstream binary(binaryPath, std::ios::binary | std::ios::trunc);
+        if (!binary) {
+            throw std::runtime_error(
+                "FacetEB cannot write time-step energy file");
+        }
+        for (size_t side = 0; side < surfaceCount; ++side) {
+            const float values[7] = {
+                temperature[side],
+                radiativeSolution.radiosity[side],
+                netRadiation[side],
+                sensibleHeat[side],
+                latentHeat[side],
+                storageHeat[side],
+                sunlit[side]
+            };
+            binary.write(reinterpret_cast<const char*>(values), sizeof(values));
+        }
+
+        if (saveProcess) {
+            const std::filesystem::path metadataPath =
+                outputDirectory / "process" / ("energy_T=" + token + ".json");
+            std::ofstream metadata(metadataPath, std::ios::trunc);
+            metadata << std::setprecision(9)
+                     << "{\n  \"kind\": \"facet-energy-process\",\n"
+                     << "  \"node\": " << node << ",\n"
+                     << "  \"julianTime\": " << meteo.julianTime << ",\n"
+                     << "  \"time\": \"" << token << "\",\n"
+                     << "  \"facetCount\": " << scene.facetCount() << ",\n"
+                     << "  \"surfaceCount\": " << surfaceCount << ",\n"
+                     << "  \"dataFile\": \"../.facet_steps/"
+                     << binaryPath.filename().string() << "\",\n"
+                     << "  \"dataType\": \"float32-little-endian\",\n"
+                     << "  \"layout\": \"surface-interleaved\",\n"
+                     << "  \"couplingIterations\": " << couplingIterations << ",\n"
+                     << "  \"temperatureDelta\": "
+                     << maximumTemperatureDelta << ",\n"
+                     << "  \"fields\": [\"temperature\", \"radiosity\", "
+                        "\"netRadiation\", \"sensibleHeat\", \"latentHeat\", "
+                        "\"storageHeat\", \"sunlit\"]\n}\n";
+        }
+
+        latest.sunlit = sunlit;
+        latest.solution = radiativeSolution;
+        latest.lightEnhancement = lightEnhancement(
+            radiativeSolution.radiosity, diffuseSolution.radiosity);
+        latestNetRadiation = netRadiation;
+        latestSensibleHeat = sensibleHeat;
+        latestLatentHeat = latentHeat;
+        latestStorageHeat = storageHeat;
+        latestCouplingIterations = couplingIterations;
+        latestTemperatureDelta = maximumTemperatureDelta;
+        latestTime = token;
+
+        const int progress = 10 + static_cast<int>(
+            86.0 * (node - startNode + 1) / (endNode - startNode));
+        std::cout << "PROGRESS\t" << progress
+                  << "\tFacetEB coupled node " << node << " " << token
+                  << " iterations=" << couplingIterations
+                  << " deltaT=" << maximumTemperatureDelta << "K"
+                  << std::endl;
+    }
+
+    latest.totalMs = milliseconds(totalBegin, Clock::now());
+    latest.solveMs = latest.totalMs;
+
+    std::ofstream output(resultFile, std::ios::binary | std::ios::trunc);
+    if (!output) {
+        throw std::runtime_error("FacetEB cannot write result: " + resultFile);
+    }
+    output << std::setprecision(9)
+           << "{\n  \"backend\": \"" << latest.backend << "\",\n"
+           << "  \"facetCount\": " << scene.facetCount() << ",\n"
+           << "  \"leafFacetCount\": " << scene.leafFacetCount << ",\n"
+           << "  \"time\": \"" << latestTime << "\",\n"
+           << "  \"vertexPositions\": [";
+    for (size_t index = 0; index < scene.vertices.size(); ++index) {
+        if (index != 0U) output << ',';
+        const auto& vertex = scene.vertices[index];
+        output << vertex.position[0] << ',' << vertex.position[1] << ','
+               << vertex.position[2];
+    }
+    output << "],\n"
+           << "  \"graph\": {\"directedEdges\":"
+           << latest.graph.directedEdgeCount
+           << ",\"closureError\":" << latest.graph.maxClosureError
+           << ",\"fragmentOverflow\":" << latest.graph.fragmentOverflow
+           << ",\"hashOverflow\":" << latest.graph.hashOverflow << "},\n"
+           << "  \"iterations\": " << latest.solution.iterations << ",\n"
+           << "  \"maxDelta\": " << latest.solution.maxDelta << ",\n"
+           << "  \"couplingIterations\": " << latestCouplingIterations << ",\n"
+           << "  \"temperatureDelta\": " << latestTemperatureDelta << ",\n";
+
+    const auto writeArray = [&output](
+        const char* name, const std::vector<float>& values, bool comma) {
+        output << "  \"" << name << "\": [";
+        for (size_t index = 0; index < values.size(); ++index) {
+            if (index != 0U) output << ',';
+            output << values[index];
+        }
+        output << ']' << (comma ? "," : "") << '\n';
+    };
+    writeArray("sunlit", latest.sunlit, true);
+    writeArray("radiosity", latest.solution.radiosity, true);
+    writeArray("lightEnhancement", latest.lightEnhancement, true);
+    writeArray("temperature", temperature, true);
+    writeArray("netRadiation", latestNetRadiation, true);
+    writeArray("sensibleHeat", latestSensibleHeat, true);
+    writeArray("latentHeat", latestLatentHeat, true);
+    writeArray("storageHeat", latestStorageHeat, false);
+    output << "}\n";
+
+    std::cout << "PROGRESS\t100\tFacetEB RT-EB coupling complete" << std::endl;
+    std::cout << "RESULT\t" << resultFile << std::endl;
+    return 0;
+} catch (const std::exception& error) {
+    std::cerr << "faceteb: " << error.what() << '\n';
     return 1;
 }

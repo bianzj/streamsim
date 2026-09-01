@@ -65,20 +65,11 @@ export function createDefaultProject(options = {}) {
         y: number(options.sceneY, 45),
         height: number(options.sceneHeight, 15),
         voxel: number(options.voxelSize, 1),
-        voxelFillThreshold: number(options.voxelFillThreshold, 0.05),
-        terrain: false,
-        background: { spectralName: 'soil', thermalName: 'soil_temperature', materialType: 'Soil', materialName: 'soilset' }
+        terrain: false
       },
       light: { zenith: 30, azimuth: 135, direct: 0.8, diffuse: 0.2, skyTemperature: 250 },
-      sensor: {
-        x: 16, y: 16, bands: '10500', projection: 'parallel',
-        vza: 0, vaa: 0,
-        positionX: number(options.sceneX, 60) / 2,
-        positionY: number(options.sceneY, 45) / 2,
-        height: 3000,
-        image: true, process: false, temperature: true, albedo: false
-      },
-      control: { depth: 4, gpu: 0, couplingIterations: 20, temperatureTolerance: 0.05, temperatureRelaxation: 0.5 },
+      sensor: { x: 16, y: 16, bands: '10500', vza: 0, vaa: 0, image: true, temperature: true, albedo: false },
+      control: { depth: 4, gpu: 0 },
       objects: { count: 0, names: [], items: [] },
       spectra: presets.spectra,
       canopies: presets.canopies,
@@ -185,21 +176,14 @@ export function projectToXml(value, paths = {}) {
   const canopies = c.canopies.map(canopyXml).join('\n      ')
   const thermals = c.thermals.map(thermalXml).join('\n      ')
   const materials = c.materials.map(materialXml).join('\n      ')
-  const background = c.scene.background || {}
-  const backgroundMaterial = c.materials.find((item) => item.name === background.materialName)
-  const backgroundType = backgroundMaterial?.type || background.materialType || 'Soil'
   return `<?xml version="1.0" encoding="UTF-8"?>
 <HiStreamProject schemaVersion="${PROJECT_SCHEMA_VERSION}" mode="${xmlEscape(project.mode)}">
   <Control>
     <outDir>${xmlEscape(outputDir)}</outDir>
     <rayTracingDepth>${number(c.control.depth, 4)}</rayTracingDepth>
     <GPU>${number(c.control.gpu, 0)}</GPU>
-    <couplingIterations>${number(c.control.couplingIterations, 20)}</couplingIterations>
-    <temperatureTolerance>${number(c.control.temperatureTolerance, 0.05)}</temperatureTolerance>
-    <temperatureRelaxation>${number(c.control.temperatureRelaxation, 0.5)}</temperatureRelaxation>
     <isDEM>${c.scene.terrain ? 1 : 0}</isDEM>
     <isImage>${c.sensor.image ? 1 : 0}</isImage>
-    <isProcess>${c.sensor.process ? 1 : 0}</isProcess>
     <isTemperature>${c.sensor.temperature ? 1 : 0}</isTemperature>
     <isAlbedo>${c.sensor.albedo ? 1 : 0}</isAlbedo>
     <isDisplay>0</isDisplay>
@@ -221,8 +205,6 @@ export function projectToXml(value, paths = {}) {
         <pixelResolutionX>${number(c.sensor.x, 16)}</pixelResolutionX>
         <pixelResolutionY>${number(c.sensor.y, 16)}</pixelResolutionY>
         <controlBand>${xmlEscape(c.sensor.bands || '10500')}</controlBand>
-        <projection>${c.sensor.projection === 'perspective' ? 'perspective' : 'parallel'}</projection>
-        <sensorPosition>${number(c.sensor.positionX, number(c.scene.x, 60) / 2)},${number(c.sensor.positionY, number(c.scene.y, 45) / 2)},${number(c.sensor.height, 3000)}</sensorPosition>
         <viewAngle><viewAngle type="custom"><viewAngles>${number(c.sensor.vza, 0)},${number(c.sensor.vaa, 0)}</viewAngles></viewAngle></viewAngle>
       </sensor>
     </Sensor>
@@ -232,11 +214,10 @@ export function projectToXml(value, paths = {}) {
     <sceneSizeY>${number(c.scene.y, 8)}</sceneSizeY>
     <Height>${number(c.scene.height, 4)}</Height>
     <voxelSize>${number(c.scene.voxel, 1)}</voxelSize>
-    <voxelFillThreshold>${number(c.scene.voxelFillThreshold, 0.05)}</voxelFillThreshold>
-    <bgSpectral>${xmlEscape(background.spectralName || 'soil')}</bgSpectral>
-    <bgThermal>${xmlEscape(background.thermalName || 'soil_temperature')}</bgThermal>
-    <bgBioType>${xmlEscape(backgroundType)}</bgBioType>
-    <bgBioName>${xmlEscape(background.materialName || 'soilset')}</bgBioName>
+    <bgSpectral>soil</bgSpectral>
+    <bgThermal>soil_temperature</bgThermal>
+    <bgBioType>Soil</bgBioType>
+    <bgBioName>soilset</bgBioName>
     <Object>
 ${objects}
     </Object>

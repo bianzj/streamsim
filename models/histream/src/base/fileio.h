@@ -58,6 +58,7 @@ public:
     TiXmlElement *RootElement;
     Mode m_mode;
     float SAA;
+    std::string m_inputDirectory;
 
     std::vector<float> outImage1;
     std::vector<std::vector<float>> outImage;

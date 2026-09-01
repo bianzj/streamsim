@@ -4,6 +4,342 @@
 
 #include "scene.h"
 
+#include <algorithm>
+#include <cmath>
+#include <filesystem>
+#include <limits>
+#include <stdexcept>
+#include <unordered_map>
+
+
+namespace {
+
+struct ObjVoxelCoord {
+    int x;
+    int y;
+    int z;
+
+    bool operator==(const ObjVoxelCoord& other) const {
+        return x == other.x && y == other.y && z == other.z;
+    }
+};
+
+struct ObjVoxelCoordHash {
+    size_t operator()(const ObjVoxelCoord& value) const noexcept {
+        size_t seed = std::hash<int>{}(value.x);
+        seed ^= std::hash<int>{}(value.y) + 0x9e3779b9U + (seed << 6U) + (seed >> 2U);
+        seed ^= std::hash<int>{}(value.z) + 0x9e3779b9U + (seed << 6U) + (seed >> 2U);
+        return seed;
+    }
+};
+
+std::vector<glm::vec3> clipVoxelPolygon(const std::vector<glm::vec3>& source,
+                                        int axis, float plane, bool keepGreater)
+{
+    std::vector<glm::vec3> result;
+    if (source.empty()) return result;
+
+    auto inside = [axis, plane, keepGreater](const glm::vec3& point) {
+        return keepGreater ? point[axis] >= plane - 1.0e-6f
+                           : point[axis] <= plane + 1.0e-6f;
+    };
+
+    glm::vec3 previous = source.back();
+    bool previousInside = inside(previous);
+    for (const glm::vec3& current : source) {
+        const bool currentInside = inside(current);
+        if (currentInside != previousInside) {
+            const float denominator = current[axis] - previous[axis];
+            if (std::abs(denominator) > 1.0e-8f) {
+                const float t = std::clamp((plane - previous[axis]) / denominator,
+                                           0.0f, 1.0f);
+                result.emplace_back(previous + t * (current - previous));
+            }
+        }
+        if (currentInside) result.emplace_back(current);
+        previous = current;
+        previousInside = currentInside;
+    }
+    return result;
+}
+
+float triangleAreaInsideVoxel(const glm::vec3& a, const glm::vec3& b,
+                              const glm::vec3& c, const ObjVoxelCoord& voxel)
+{
+    std::vector<glm::vec3> polygon{a, b, c};
+    const int lower[3] = {voxel.x, voxel.y, voxel.z};
+    for (int axis = 0; axis < 3 && polygon.size() >= 3; ++axis) {
+        polygon = clipVoxelPolygon(polygon, axis, static_cast<float>(lower[axis]), true);
+        polygon = clipVoxelPolygon(polygon, axis,
+                                   static_cast<float>(lower[axis] + 1), false);
+    }
+    if (polygon.size() < 3) return 0.0f;
+
+    float area = 0.0f;
+    for (size_t index = 1; index + 1 < polygon.size(); ++index) {
+        area += 0.5f * glm::length(glm::cross(
+            polygon[index] - polygon[0], polygon[index + 1] - polygon[0]));
+    }
+    return area;
+}
+
+std::vector<glm::ivec3> voxelizeObjSurface(const ObjMesh& mesh, float voxelSize,
+                                           float fillThreshold,
+                                           size_t& rejectedVoxelCount)
+{
+    if (!(voxelSize > 0.0f)) {
+        throw std::runtime_error("OBJ voxelization requires voxelSize > 0");
+    }
+
+    std::unordered_map<ObjVoxelCoord, float, ObjVoxelCoordHash> coveredArea;
+    const float inverseVoxelSize = 1.0f / voxelSize;
+    const size_t triangleCount = mesh.indices.size() / 3;
+
+    for (size_t triangle = 0; triangle < triangleCount; ++triangle) {
+        const uint32_t ia = mesh.indices[triangle * 3 + 0];
+        const uint32_t ib = mesh.indices[triangle * 3 + 1];
+        const uint32_t ic = mesh.indices[triangle * 3 + 2];
+        if (ia >= mesh.vertices.size() || ib >= mesh.vertices.size() ||
+            ic >= mesh.vertices.size()) {
+            continue;
+        }
+
+        const glm::vec3 a = mesh.vertices[ia].pos * inverseVoxelSize;
+        const glm::vec3 b = mesh.vertices[ib].pos * inverseVoxelSize;
+        const glm::vec3 c = mesh.vertices[ic].pos * inverseVoxelSize;
+        if (glm::length(glm::cross(b - a, c - a)) <= 1.0e-10f) continue;
+
+        const glm::vec3 minimum = glm::min(a, glm::min(b, c));
+        const glm::vec3 maximum = glm::max(a, glm::max(b, c));
+        const int minX = static_cast<int>(std::floor(minimum.x));
+        const int minY = static_cast<int>(std::floor(minimum.y));
+        const int minZ = static_cast<int>(std::floor(minimum.z));
+        const int maxX = static_cast<int>(std::floor(maximum.x));
+        const int maxY = static_cast<int>(std::floor(maximum.y));
+        const int maxZ = static_cast<int>(std::floor(maximum.z));
+
+        for (int x = minX; x <= maxX; ++x) {
+            for (int y = minY; y <= maxY; ++y) {
+                for (int z = minZ; z <= maxZ; ++z) {
+                    const ObjVoxelCoord key{x, y, z};
+                    const float area = triangleAreaInsideVoxel(a, b, c, key);
+                    if (area > 1.0e-8f) coveredArea[key] += area;
+                }
+            }
+        }
+    }
+
+    std::vector<glm::ivec3> activeVoxels;
+    activeVoxels.reserve(coveredArea.size());
+    rejectedVoxelCount = 0;
+    const float threshold = std::clamp(fillThreshold, 0.0f, 1.0f);
+    for (const auto& entry : coveredArea) {
+        const float fillRatio = std::min(1.0f, entry.second);
+        if (fillRatio + 1.0e-6f < threshold) {
+            ++rejectedVoxelCount;
+            continue;
+        }
+        activeVoxels.emplace_back(entry.first.x, entry.first.y, entry.first.z);
+    }
+
+    std::sort(activeVoxels.begin(), activeVoxels.end(),
+              [](const glm::ivec3& left, const glm::ivec3& right) {
+                  if (left.x != right.x) return left.x < right.x;
+                  if (left.y != right.y) return left.y < right.y;
+                  return left.z < right.z;
+              });
+    return activeVoxels;
+}
+
+template <typename MapType>
+int mappedId(const MapType& values, const std::vector<std::string>& names,
+             size_t index)
+{
+    if (names.empty() || values.empty()) return 0;
+    const std::string& name = names[std::min(index, names.size() - 1)];
+    const auto found = values.find(name);
+    return found == values.end() ? 0 : found->second;
+}
+
+template <typename ModelIO>
+bool createObjFilledVoxels(Scene* scene, PrimEntity& entity,
+                           nanovdb::GridBuilder<int32_t>& nanoBuilder,
+                           std::shared_ptr<ModelIO>& modelio)
+{
+    if (!std::filesystem::exists(entity.objFile)) {
+        throw std::runtime_error("Cannot open OBJ for voxelization: " + entity.objFile);
+    }
+
+    ObjLoader objLoader;
+    objLoader.loadModel(entity.objFile);
+    if (objLoader.m_objmesh.indices.empty()) {
+        throw std::runtime_error("OBJ has no triangles for voxelization: " + entity.objFile);
+    }
+
+    size_t rejectedVoxelCount = 0;
+    const std::vector<glm::ivec3> activeXYZ = voxelizeObjSurface(
+        objLoader.m_objmesh, modelio->stepsize_surface,
+        entity.voxelFillThreshold, rejectedVoxelCount);
+
+    std::cout << "OBJ voxelization: " << entity.objFile
+              << " triangles=" << objLoader.m_objmesh.indices.size() / 3
+              << " active=" << activeXYZ.size()
+              << " rejected=" << rejectedVoxelCount
+              << " threshold=" << entity.voxelFillThreshold << std::endl;
+
+    if (activeXYZ.empty()) return true;
+
+    auto accessor = nanoBuilder.getAccessor();
+    auto& meshio = modelio->m_meshio;
+    auto& instanceio = modelio->m_instanceio;
+    auto& voxelio = modelio->m_voxelio;
+    int& modelMeshCount = modelio->n_modelmesh;
+    int& instanceCount = modelio->n_instance;
+    int& voxelCount = modelio->n_voxel;
+
+    VoxelDesigner designer;
+    // OBJ 坐标已经由 ObjLoader 统一为 X/Y/Z，Y 是竖直方向。
+    // 传统的 createTriEntity 使用 X/Z/Y（Z 为高度），不能再调用
+    // XYZ2XZY，否则会把 OBJ 的高度轴 Y 换到水平轴 Z。
+    PrimMesh activeMesh = designer.createTriVoxels(activeXYZ);
+    const bool building = entity.type == Type::BUILDING;
+    const size_t propertyMeshCount = building ? 2U : 1U;
+
+    for (size_t meshIndex = 0; meshIndex < propertyMeshCount; ++meshIndex) {
+        PrimMesh mesh = activeMesh;
+        mesh.meshId = modelMeshCount + static_cast<int>(meshIndex);
+        meshio->primMeshes.emplace_back(std::move(mesh));
+
+        MeshLink link{};
+        link.spectralId = mappedId(meshio->spectralNames,
+                                   entity.spectralNames, meshIndex);
+        link.thermalId = mappedId(meshio->thermalNames,
+                                  entity.thermalNames, meshIndex);
+        link.canopyId = entity.type == Type::WATER ? 0 :
+            mappedId(meshio->canopyNames, entity.canopyNames, meshIndex);
+        if (entity.type == Type::VEGETATION) {
+            link.bioId = mappedId(meshio->leafbioNames, entity.propNames, meshIndex);
+        } else if (entity.type == Type::WATER) {
+            link.bioId = mappedId(meshio->watersetNames, entity.propNames, meshIndex);
+        } else {
+            link.bioId = mappedId(meshio->soilsetNames, entity.propNames, meshIndex);
+        }
+        link.type = static_cast<int>(entity.type);
+        meshio->meshLinks.emplace_back(link);
+    }
+
+    if (entity.isdisFromFile) {
+        int distributionCount = 0;
+        float* x = Utils::readascfile(entity.distributefile, 0, 0, distributionCount);
+        float* y = Utils::readascfile(entity.distributefile, 0, 1, distributionCount);
+        float* z = Utils::readascfile(entity.distributefile, 0, 2, distributionCount);
+        float* scales = Utils::readascfileWithDefault(
+            entity.distributefile, 0, 3, distributionCount, 1.0f);
+        float* rotations = Utils::readascfileWithDefault(
+            entity.distributefile, 0, 4, distributionCount, 0.0f);
+
+        entity.primDistributions.resize(distributionCount);
+        entity.scales.resize(distributionCount);
+        entity.rotations.resize(distributionCount);
+        for (int index = 0; index < distributionCount; ++index) {
+            entity.primDistributions[index] = glm::vec3(x[index], y[index], z[index]);
+            entity.scales[index] = scales[index];
+            entity.rotations[index] = rotations[index];
+        }
+    }
+
+    const glm::ivec3 sceneHalf{
+        static_cast<int>(std::floor(modelio->voxelSize_XZY.x / 2.0f + 0.5f)),
+        0,
+        static_cast<int>(std::floor(modelio->voxelSize_XZY.z / 2.0f + 0.5f))};
+
+    for (size_t placementIndex = 0;
+         placementIndex < entity.primDistributions.size(); ++placementIndex) {
+        const glm::vec3 placement = entity.primDistributions[placementIndex];
+        const float scaleValue = placementIndex < entity.scales.size()
+            ? entity.scales[placementIndex] : 1.0f;
+        const float rotationValue = placementIndex < entity.rotations.size()
+            ? entity.rotations[placementIndex] : 0.0f;
+        const glm::ivec3 gridShift{
+            static_cast<int>(std::floor(placement.x / modelio->stepsize_surface)),
+            static_cast<int>(std::floor(placement.z / modelio->stepsize_surface)),
+            static_cast<int>(std::floor(placement.y / modelio->stepsize_surface))};
+
+        const glm::mat4 unit(1.0f);
+        const glm::mat4 rotation = glm::rotate(
+            unit, glm::radians(rotationValue), glm::vec3(0.0f, 1.0f, 0.0f));
+        const glm::mat4 scale = glm::scale(unit, glm::vec3(scaleValue));
+        const glm::mat4 objectTransform =
+            glm::translate(unit, glm::vec3(gridShift - sceneHalf)) *
+            rotation * scale;
+
+        const int firstInstance = instanceCount;
+        for (size_t meshIndex = 0; meshIndex < propertyMeshCount; ++meshIndex) {
+            Instance instance{};
+            instance.meshId =
+                static_cast<uint32_t>(modelMeshCount + meshIndex);
+            instance.object2worldMatrix = objectTransform;
+            instance.world2objectMatrix =
+                glm::transpose(glm::inverse(objectTransform));
+            instanceio->instances.emplace_back(instance);
+
+            InstanceLink instanceLink{};
+            instanceLink.meshId = instance.meshId;
+            instanceio->instanceLinks.emplace_back(instanceLink);
+        }
+
+        size_t insertedForPlacement = 0;
+        for (const glm::vec3& localVoxel : activeMesh.voxelIds) {
+            const glm::vec3 localCenter = localVoxel + glm::vec3(0.5f);
+            const glm::vec3 transformedCenter =
+                glm::vec3(rotation * scale * glm::vec4(localCenter, 1.0f));
+            const glm::ivec3 voxelId =
+                gridShift + glm::ivec3(glm::floor(transformedCenter));
+
+            if (voxelId.x < 0 || voxelId.z < 0 || voxelId.y < 0 ||
+                voxelId.x >= modelio->voxelSize_XZY.x ||
+                voxelId.z >= modelio->voxelSize_XZY.z) {
+                continue;
+            }
+
+            const nanovdb::Coord coord(voxelId.x, voxelId.y, voxelId.z);
+            if (accessor.getValue(coord) >= 0) continue;
+
+            accessor.setValue(coord, voxelCount);
+            if (building) {
+                for (int face = 1; face <= 5; ++face) {
+                    VoxelLink link{};
+                    link.voxelId = voxelId;
+                    link.instanceId = face == 5 ? firstInstance + 1 : firstInstance;
+                    link.aeroId = 0;
+                    link.faceId = face;
+                    link.isValid = 1;
+                    voxelio->voxellinks.emplace_back(link);
+                    ++voxelCount;
+                }
+            } else {
+                VoxelLink link{};
+                link.voxelId = voxelId;
+                link.instanceId = firstInstance;
+                link.aeroId = 0;
+                link.faceId = 0;
+                link.isValid = 1;
+                voxelio->voxellinks.emplace_back(link);
+                ++voxelCount;
+            }
+            ++insertedForPlacement;
+        }
+
+        instanceCount += static_cast<int>(propertyMeshCount);
+        std::cout << "OBJ placement " << placementIndex
+                  << " inserted=" << insertedForPlacement << std::endl;
+    }
+
+    modelMeshCount += static_cast<int>(propertyMeshCount);
+    return true;
+}
+
+} // namespace
 
 bool Scene::createObjScene(std::shared_ptr<FileIO> &fileio, std::shared_ptr<RaytracingIO> &raytracingio) {
 
@@ -256,6 +592,11 @@ bool Scene::createPrimObjScene(std::shared_ptr<FileIO> &fileio, std::shared_ptr<
     for (int kVoxelModel = 0; kVoxelModel < scenexml.primEntities.size(); kVoxelModel++)
     {
         auto &voxelEntity = scenexml.primEntities[kVoxelModel];
+
+        if (voxelEntity.voxelizeFromObj) {
+            createObjFilledVoxels(this, voxelEntity, nanoBuilder, voxellstio);
+            continue;
+        }
 
         if (voxelEntity.type == Type::VEGETATION)
         {
@@ -833,7 +1174,8 @@ bool Scene::createPrimObj_Background(Background & background,nanovdb::GridBuilde
 
     // background model link
     MeshLink bgMeshLink;
-    bgMeshLink.thermalId = 0;
+    const auto thermalIt = meshio->thermalNames.find(background.bgThermalName);
+    bgMeshLink.thermalId = thermalIt == meshio->thermalNames.end() ? 0 : thermalIt->second;
     bgMeshLink.canopyId = 0;
     std::string bgSpectralName = background.bgSpectralName;
     bgMeshLink.spectralId = meshio->spectralNames.find(bgSpectralName)->second;
@@ -957,6 +1299,11 @@ bool Scene::createPrimObjScene(std::shared_ptr<FileIO> &fileio, std::shared_ptr<
     for (int kVoxelModel = 0; kVoxelModel < scenexml.primEntities.size(); kVoxelModel++)
     {
         auto &voxelEntity = scenexml.primEntities[kVoxelModel];
+
+        if (voxelEntity.voxelizeFromObj) {
+            createObjFilledVoxels(this, voxelEntity, nanoBuilder, voxellstio);
+            continue;
+        }
 
 
         if (voxelEntity.type == Type::VEGETATION)

@@ -3,8 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="dark" />
-    <title>STREAMSIM Studio</title>
+    <meta name="color-scheme" content="light" />
+    <title>STREAM SIM · Simulation Studio</title>
   </head>
   <body>
     <svg class="svg-sprite" aria-hidden="true">
@@ -29,8 +29,11 @@
     <div id="app">
       <header class="topbar">
         <div class="brand">
-          <div class="brand-mark"><span></span><span></span><span></span></div>
-          <div><strong>STREAMSIM</strong><small>HiStream Simulation Studio</small></div>
+          <div class="brandLogo" aria-label="STREAM SIM">
+            <span class="logoStream">STREAM</span>
+            <span class="logoSlash" aria-hidden="true"></span>
+            <span class="logoSim">SIM</span>
+          </div>
         </div>
         <div class="project-title">
           <span class="status-dot"></span>
@@ -41,7 +44,8 @@
           <button class="button ghost" id="newProjectBtn"><svg><use href="#i-plus"/></svg>新建工程</button>
           <button class="button ghost" id="openXmlBtn"><svg><use href="#i-folder"/></svg>打开工程</button>
           <button class="button ghost" id="saveXmlBtn"><svg><use href="#i-save"/></svg>保存</button>
-          <button class="button ghost" id="openOutputTopBtn"><svg><use href="#i-layers"/></svg>模拟结果</button>
+          <button class="button ghost" id="openImageResultsTopBtn"><svg><use href="#i-layers"/></svg>图像结果</button>
+          <button class="button ghost" id="open3dResultsTopBtn"><svg><use href="#i-cube"/></svg>三维展示</button>
           <button class="button primary" id="runBtn"><svg><use href="#i-play"/></svg><span>运行模拟</span></button>
           <button class="button danger" id="stopBtn" disabled><svg><use href="#i-stop"/></svg>停止</button>
         </div>
@@ -69,6 +73,7 @@
               <button class="tree-item" data-panel="objects"><svg><use href="#i-layers"/></svg><span>场景对象</span><em id="objectBadge">24</em></button>
               <button class="tree-item" data-panel="materials"><svg><use href="#i-settings"/></svg><span>材质属性</span><em id="materialBadge">预设</em></button>
               <button class="tree-item" data-panel="meteorology"><svg><use href="#i-cloud"/></svg><span>气象驱动</span><em id="meteoBadge">内置</em></button>
+              <button class="tree-item simulation-item" data-panel="simulation"><svg><use href="#i-play"/></svg><span>仿真模拟</span><em id="simulationBadge">输出 / 控制</em></button>
             </nav>
           </div>
 
@@ -253,8 +258,8 @@
     <div class="drawer-backdrop" id="resultDialog" hidden>
       <section class="result-dialog">
         <header>
-          <div><span class="eyebrow">HiStream Output</span><h2>模拟结果</h2></div>
-          <div class="result-actions"><button class="button ghost" id="resultRefreshBtn" type="button">刷新</button><button class="button ghost" id="closeResultBtn" type="button">关闭</button></div>
+          <div><span class="eyebrow">HiStream Output</span><h2 id="resultDialogTitle">图像结果</h2></div>
+          <div class="result-actions"><div class="result-tabs"><button class="button ghost active" id="resultImageTab" type="button">图像结果</button><button class="button ghost" id="result3dTab" type="button">三维展示</button></div><button class="button ghost" id="resultRefreshBtn" type="button">刷新</button><button class="button ghost" id="closeResultBtn" type="button">关闭</button></div>
         </header>
         <div class="result-layout">
           <aside class="result-sidebar">
@@ -262,7 +267,7 @@
             <div class="result-files" id="resultFiles"></div>
           </aside>
           <main class="result-preview" id="resultPreview">
-            <div class="empty-editor"><svg><use href="#i-layers"/></svg><h3>尚无模拟结果</h3><p>完成模拟后刷新结果列表，可预览 TIFF、ENVI 影像、面元指标和统计文本，并查看面元三维效果。</p></div>
+            <div class="empty-editor"><svg><use href="#i-layers"/></svg><h3>尚无图像结果</h3><p>图像结果与面元三维结果分别浏览，互不混合。</p></div>
           </main>
         </div>
         <footer>

@@ -2,12 +2,6 @@
 // Created by admin on 2024/1/26.
 //
 
-#include <cmath>
-#include <cstring>
-#include <filesystem>
-#include <fstream>
-#include <sstream>
-#include <vector>
 #include "voxeleb.h"
 
 
@@ -86,7 +80,6 @@ bool Voxeleb::uploadSetting(std::shared_ptr<FileIO> &fileio, std::shared_ptr<Vox
     modelio->isDisplay = fileio->m_pVoxelebXml->sensorxml.isDisplay;
     modelio->isAlbedo = fileio->m_pVoxelebXml->sensorxml.isAlbedo;
     modelio->isImage = fileio->m_pVoxelebXml->sensorxml.isImage;
-    modelio->isProcess = fileio->m_pVoxelebXml->sensorxml.isProcess;
     modelio->imageSize = fileio->m_pVoxelebXml->sensorxml.resolution;
     modelio->maxDepth = fileio->m_pVoxelebXml->settingxml.maxDepth;
     modelio->n_sample = fileio->m_pVoxelebXml->settingxml.n_sample;
@@ -185,9 +178,7 @@ bool Voxeleb::run(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<FileIO> &
         m_pCommand->runEB(modelio);
 
         std::cout << "Time Info:" << "    t_" << std::to_string(modelio->meteo.t) << std::endl;
-        if (modelio->isProcess) {
-            outputVoxel(modelio,fileio);
-        }
+        outputVoxel(modelio,fileio);
     //
     //    if (knode == 73)
         // if (1)
@@ -388,83 +379,46 @@ void Voxeleb::outputTxt(std::shared_ptr<VoxelebIO>& modelio, std::shared_ptr<Fil
     }
 }
 void Voxeleb::outputVoxel(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<FileIO> &fileio) {
-    (void)fileio;
-    if (!modelio || modelio->n_voxel <= 0 || !modelio->m_voxelio ||
-        !modelio->m_voxelio->m_pTempeBuffer || !modelio->m_voxelio->m_pNetRadBuffer ||
-        !modelio->m_voxelio->m_pFluxBuffer) {
-        return;
-    }
 
-    const size_t voxelCount = static_cast<size_t>(modelio->n_voxel);
-    std::vector<VoxelTempe> temperatures(voxelCount);
-    std::vector<VoxelNetRad> netRadiation(voxelCount);
-    std::vector<VoxelHeatflux> heatFlux(voxelCount);
-    const auto download = [&](const nvvk::Buffer& source, void* destination, VkDeviceSize size) {
-        nvvk::Buffer staging = modelio->m_pAlloc->createBuffer(
-            size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        m_pVirtual->bufferToBuffer(modelio, source, size, staging);
-        void* mapped = modelio->m_pAlloc->map(staging);
-        std::memcpy(destination, mapped, static_cast<size_t>(size));
-        modelio->m_pAlloc->unmap(staging);
-        modelio->m_pAlloc->destroy(staging);
-    };
-    download(*modelio->m_voxelio->m_pTempeBuffer, temperatures.data(), voxelCount * sizeof(VoxelTempe));
-    download(*modelio->m_voxelio->m_pNetRadBuffer, netRadiation.data(), voxelCount * sizeof(VoxelNetRad));
-    download(*modelio->m_voxelio->m_pFluxBuffer, heatFlux.data(), voxelCount * sizeof(VoxelHeatflux));
 
-    const double julianTime = static_cast<double>(modelio->meteo.t);
-    int day = static_cast<int>(std::floor(julianTime));
-    int totalMinutes = static_cast<int>(std::llround((julianTime - day) * 1440.0));
-    if (totalMinutes >= 1440) {
-        day += totalMinutes / 1440;
-        totalMinutes %= 1440;
-    }
-    std::ostringstream time;
-    time << "DOY" << day << '_' << std::setw(2) << std::setfill('0') << totalMinutes / 60
-         << '-' << std::setw(2) << std::setfill('0') << totalMinutes % 60;
+//    VkBufferUsageFlags usage{VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+//    int num = modelio->n_voxel;
+//    VkDeviceSize bufferSize = num * sizeof(VoxelHeatflux);
+//    nvvk::Buffer pixelBuffer = modelio->m_pAlloc->createBuffer(bufferSize, usage,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+//    m_pVirtual->bufferToBuffer(modelio, *(modelio->m_voxelio->m_pFluxBuffer), bufferSize, pixelBuffer);
+//    // write the buffer to disk
+//    void *data = modelio->m_pAlloc->map(pixelBuffer);
+//    VoxelHeatflux *pData = reinterpret_cast<VoxelHeatflux *>(data);
+//    VoxelHeatflux test0 = pData[0];
+//    modelio->m_pAlloc->unmap(pixelBuffer);
+//    modelio->m_pAlloc->destroy(pixelBuffer);
 
-    const std::filesystem::path directory = std::filesystem::path(modelio->projectDir) / "process";
-    std::filesystem::create_directories(directory);
-    const std::string stem = "energy_T=" + time.str();
-    const std::filesystem::path binaryPath = directory / (stem + ".bin");
-    const std::filesystem::path metadataPath = directory / (stem + ".json");
-    std::ofstream binary(binaryPath, std::ios::binary | std::ios::trunc);
-    if (!binary) {
-        throw std::runtime_error("Cannot write process energy file: " + binaryPath.string());
-    }
-    for (size_t voxel = 0; voxel < voxelCount; ++voxel) {
-        const float record[12] = {
-            temperatures[voxel].sunlit, temperatures[voxel].shaded,
-            netRadiation[voxel].directVrad, netRadiation[voxel].diffuseVrad,
-            netRadiation[voxel].directTrad, netRadiation[voxel].diffuseTrad,
-            heatFlux[voxel].Hsunlit, heatFlux[voxel].Hshaded,
-            heatFlux[voxel].LEsunlit, heatFlux[voxel].LEshaded,
-            heatFlux[voxel].Gsunlit, heatFlux[voxel].Gshaded
-        };
-        binary.write(reinterpret_cast<const char*>(record), sizeof(record));
-    }
-    binary.close();
 
-    std::ofstream metadata(metadataPath, std::ios::trunc);
-    if (!metadata) {
-        throw std::runtime_error("Cannot write process metadata file: " + metadataPath.string());
-    }
-    metadata << std::setprecision(9)
-             << "{\n  \"kind\": \"voxel-energy-process\",\n"
-             << "  \"node\": " << modelio->k_node << ",\n"
-             << "  \"julianTime\": " << modelio->meteo.t << ",\n"
-             << "  \"time\": \"" << time.str() << "\",\n"
-             << "  \"voxelCount\": " << voxelCount << ",\n"
-             << "  \"dataFile\": \"" << binaryPath.filename().string() << "\",\n"
-             << "  \"dataType\": \"float32-little-endian\",\n"
-             << "  \"layout\": \"voxel-interleaved\",\n"
-             << "  \"fields\": [\"temperatureSunlit\", \"temperatureShaded\", "
-                "\"directVnir\", \"diffuseVnir\", \"directTir\", \"diffuseTir\", "
-                "\"sensibleHeatSunlit\", \"sensibleHeatShaded\", "
-                "\"latentHeatSunlit\", \"latentHeatShaded\", "
-                "\"storageHeatSunlit\", \"storageHeatShaded\"]\n}\n";
-    std::cout << "PROCESS\t" << metadataPath.string() << std::endl;
+//    VkBufferUsageFlags usage{VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+//    int num = modelio->n_voxel;
+//    VkDeviceSize bufferSize = num * sizeof(VoxelRss);
+//    nvvk::Buffer pixelBuffer = modelio->m_pAlloc->createBuffer(bufferSize, usage,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+//    m_pVirtual->bufferToBuffer(modelio, *(modelio->m_voxelio->m_pRssBuffer), bufferSize, pixelBuffer);
+//    // write the buffer to disk
+//    void *data = modelio->m_pAlloc->map(pixelBuffer);
+//    VoxelRss *pData = reinterpret_cast<VoxelRss *>(data);
+//    VoxelRss test0 = pData[0];
+//    modelio->m_pAlloc->unmap(pixelBuffer);
+//    modelio->m_pAlloc->destroy(pixelBuffer);
+
+
+//    VkBufferUsageFlags usage{VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+//    int num = modelio->n_voxel;
+//    VkDeviceSize bufferSize = num * sizeof(VoxelTempe);
+//    nvvk::Buffer pixelBuffer = modelio->m_pAlloc->createBuffer(bufferSize, usage,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+//    m_pVirtual->bufferToBuffer(modelio, *(modelio->m_voxelio->m_pTempeBuffer), bufferSize, pixelBuffer);
+//    // write the buffer to disk
+//    void *data = modelio->m_pAlloc->map(pixelBuffer);
+//    VoxelTempe *pData = reinterpret_cast<VoxelTempe *>(data);
+//    VoxelTempe test0 = pData[0];
+//    modelio->m_pAlloc->unmap(pixelBuffer);
+//    modelio->m_pAlloc->destroy(pixelBuffer);
+
 }
 
 

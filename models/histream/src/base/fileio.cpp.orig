@@ -951,8 +951,11 @@ SceneXml FileIO::readSceneXML(TiXmlNode *sceneNode, Mode mode) {
                 std::string name = node->FirstChildElement("types")->GetText();
 
                 if (name == "Building") {
+                    const auto spectra = myFunction::mySplitStr(node->FirstChildElement("spectralNames")->GetText(), ",");
+                    const std::string wallSpectrum = spectra.empty() ? "soil" : spectra.front();
+                    const std::string roofSpectrum = spectra.size() > 1 ? spectra[1] : wallSpectrum;
                     entity.meshNames = {"wall", "roof"};
-                    entity.spectralNames = {"wall", "roof"};
+                    entity.spectralNames = {wallSpectrum, roofSpectrum};
 //                    entity.thermalNames = {"wall", "roof"};
                     entity.canopyNames = {node->FirstChildElement("canopyNames")->GetText(),
                                           node->FirstChildElement("canopyNames")->GetText()};
@@ -961,8 +964,8 @@ SceneXml FileIO::readSceneXML(TiXmlNode *sceneNode, Mode mode) {
                     entity.type = Type::BUILDING;
                     entity.isshapeFromFile = false;
                     entity.shapefile = " ";
-                    entity.isheightFromFile = true;
-                    entity.heightfile = m_pVoxelebXml->projectDir + "\\height.tif";
+                    entity.isheightFromFile = false;
+                    entity.heightfile = "";
 //                entity.isdisFromFile = false;
 //                entity.distributefile = " ";
                 } else if (name == "Vegetation") {
@@ -1073,9 +1076,12 @@ SceneXml FileIO::readSceneXML(TiXmlNode *sceneNode, Mode mode) {
                 entity.meshNames = {node->FirstChildElement("canopyNames")->GetText()};
                 std::string name = node->FirstChildElement("types")->GetText();
 
-                if (name == "building") {
+                if (name == "building" || name == "Building") {
+                    const auto spectra = myFunction::mySplitStr(node->FirstChildElement("spectralNames")->GetText(), ",");
+                    const std::string wallSpectrum = spectra.empty() ? "soil" : spectra.front();
+                    const std::string roofSpectrum = spectra.size() > 1 ? spectra[1] : wallSpectrum;
                     entity.meshNames = {"wall", "roof"};
-                    entity.spectralNames = {"wall", "roof"};
+                    entity.spectralNames = {wallSpectrum, roofSpectrum};
 //                    entity.thermalNames = {"wall", "roof"};
                     entity.canopyNames = {node->FirstChildElement("canopyNames")->GetText(),
                                           node->FirstChildElement("canopyNames")->GetText()};
@@ -1084,11 +1090,11 @@ SceneXml FileIO::readSceneXML(TiXmlNode *sceneNode, Mode mode) {
                     entity.type = Type::BUILDING;
                     entity.isshapeFromFile = false;
                     entity.shapefile = " ";
-                    entity.isheightFromFile = true;
-                    entity.heightfile = m_pVoxelebXml->projectDir + "\\height.tif";
+                    entity.isheightFromFile = false;
+                    entity.heightfile = "";
 //                entity.isdisFromFile = false;
 //                entity.distributefile = " ";
-                } else if (name == "vegetation") {
+                } else if (name == "vegetation" || name == "Vegetation") {
                     entity.canopyNames = {node->FirstChildElement("canopyNames")->GetText()};
                     entity.propNames = {node->FirstChildElement("bioNames")->GetText()};
                     entity.spectralNames = {node->FirstChildElement("spectralNames")->GetText()};
@@ -1103,18 +1109,29 @@ SceneXml FileIO::readSceneXML(TiXmlNode *sceneNode, Mode mode) {
                     entity.heightfile = "";
                     entity.isdisFromFile = true;
                     entity.distributefile = node->FirstChildElement("objectPosition")->GetText();
+                } else if (name == "water" || name == "Water") {
+                    entity.canopyNames = {node->FirstChildElement("canopyNames")->GetText()};
+                    entity.propNames = {node->FirstChildElement("bioNames")->GetText()};
+                    entity.spectralNames = {node->FirstChildElement("spectralNames")->GetText()};
+                    entity.type = Type::WATER;
+                    entity.isshapeFromFile = false;
+                    entity.isheightFromFile = false;
+                    entity.isdisFromFile = sonExists("objectPosition", node);
+                    if (entity.isdisFromFile) {
+                        entity.distributefile = node->FirstChildElement("objectPosition")->GetText();
+                    }
                 }
 
 
                 std::string shapetype = node->FirstChildElement("shapeTypes")->GetText();
                 cout << shapetype << endl;
-                if (shapetype == "ellipsoid") {
+                if (shapetype == "ellipsoid" || shapetype == "Ellipsoid") {
                     entity.shape = {ShapeType::ELLIPSOID,
                                     myFunction::mySplitFloat(node->FirstChildElement("shapes")->GetText(), ",")[2],
                                     myFunction::mySplitFloat(node->FirstChildElement("shapes")->GetText(), ",")[1],
                                     myFunction::mySplitFloat(node->FirstChildElement("shapes")->GetText(), ",")[0],
                                     glm::vec3(0, 0, 0)};
-                } else if (shapetype == "cube") {
+                } else if (shapetype == "cube" || shapetype == "Cube") {
                     entity.shape = {ShapeType::CUBE,
                                     myFunction::mySplitFloat(node->FirstChildElement("shapes")->GetText(), ",")[2],
                                     myFunction::mySplitFloat(node->FirstChildElement("shapes")->GetText(), ",")[1],

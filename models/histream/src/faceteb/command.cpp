@@ -18,7 +18,7 @@ bool Command::runEB(std::shared_ptr<FacetebIO>& modelio)
     if (!modelio || !modelio->commandReady) {
         return false;
     }
-    return runFacetRTCore(modelio->inputPath, modelio->shaderDirectory,
+    return runFacetEBCore(modelio->inputPath, modelio->shaderDirectory,
                           modelio->outputPath) == 0;
 }
 

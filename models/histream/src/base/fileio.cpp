@@ -2,6 +2,9 @@
 // Created by admin on 2024/1/24.
 //
 #include <iomanip>
+#include <filesystem>
+#include <algorithm>
+#include <cctype>
 #include "fileio.h"
 #pragma once
 //#include "tinyxml.h"
@@ -16,6 +19,7 @@ using namespace std;
 
 bool FileIO::readXml(std::string Path, Mode mode) {
     m_mode = mode;
+    m_inputDirectory = Path.empty() ? std::string() : std::filesystem::path(Path).parent_path().string();
     if (Path.empty()) {
         if (m_mode == Mode::eRaytracing) {
             m_pRaytracingXml = xmlexamples.m_pRaytracingXml;
@@ -59,7 +63,7 @@ bool FileIO::readXml(std::string Path, Mode mode) {
         m_pVoxelebXml->sensorxml = readSensorXML(RootElement->FirstChild("Geometry"), m_mode);
         m_pVoxelebXml->scenexml = readSceneXML(RootElement->FirstChild("Scene"), m_mode);
         m_pVoxelebXml->spectralxmls = readSpectralXML(RootElement->FirstChild("Attribute"), m_mode);
-        // m_pVoxelebXml->thermalxmls = readThermalXML(RootElement->FirstChild("Attribute"), m_mode);
+        m_pVoxelebXml->thermalxmls = readThermalXML(RootElement->FirstChild("Attribute"), m_mode);
         m_pVoxelebXml->canopyxmls = readCanopyXML(RootElement->FirstChild("Attribute"), m_mode);
         m_pVoxelebXml->propxmls = readPropertyXML(RootElement->FirstChild("Attribute"), m_mode);
         // m_pVoxelebXml->atomcondxml = readAtomCondXML(RootElement->FirstChild("Geometry"), m_mode);
@@ -346,7 +350,9 @@ std::vector<SpectralXml> FileIO::readSpectralXML(TiXmlNode *node, Mode mode) {
 
 std::vector<ThermalXml> FileIO::readThermalXML(TiXmlNode *node, Mode mode) {
     std::vector<ThermalXml> thermalXmls;
+    if (node == nullptr) return thermalXmls;
     TiXmlElement* thermalNode = node->FirstChildElement("Thermal");
+    if (thermalNode == nullptr) return thermalXmls;
     for (TiXmlElement* Node = thermalNode->FirstChildElement("thermal"); Node != NULL; Node = Node->NextSiblingElement()){
         ThermalXml thermalxml;
         thermalxml = {
@@ -389,6 +395,8 @@ std::vector<CanopyXml> FileIO::readCanopyXML(TiXmlNode *node, Mode mode) {
 SensorXml FileIO::readSensorXML(TiXmlNode *node, Mode mode){
 
     SensorXml sensorxml;
+    sensorxml.projection = Projection::PARALLAL;
+    sensorxml.position = {0.0f, 0.0f, 3000.0f};
     TiXmlElement* sensorEle = node->FirstChildElement("Sensor");
 
 //赋值
@@ -408,11 +416,28 @@ SensorXml FileIO::readSensorXML(TiXmlNode *node, Mode mode){
         if (sensorType.empty() || sensorType == "Multispectral sensor")
         {
             sensorxml.name = pEle->Attribute("name");
-    //        sensorxml.projection = pEle->FirstChildElement("projWay")->GetText();
-            sensorxml.projection = Projection::PARALLAL;
+            if (sonExists("projection", pEle))
+            {
+                std::string projection = pEle->FirstChildElement("projection")->GetText();
+                std::transform(projection.begin(), projection.end(), projection.begin(),
+                               [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+                if (projection == "perspective" || projection == "central" || projection == "center")
+                {
+                    sensorxml.projection = Projection::PERSPECTIVE;
+                }
+            }
+            if (sonExists("sensorPosition", pEle))
+            {
+                const std::vector<float> position = myFunction::mySplitFloat(
+                        pEle->FirstChildElement("sensorPosition")->GetText(), ",");
+                if (position.size() >= 3)
+                {
+                    sensorxml.position = {position[0], position[1], std::max(0.01f, position[2])};
+                }
+            }
             if (sonExists("FOV", pEle))
             {
-    //            temp.FOV = std::stoi(pEle->FirstChildElement("FOV")->GetText());
+                sensorxml.sensorFov = std::clamp(std::stof(pEle->FirstChildElement("FOV")->GetText()), 0.1f, 120.0f);
             }
             else
             {
@@ -741,6 +766,10 @@ SensorXml FileIO::readSensorXML(TiXmlNode *node, Mode mode){
     {
         sensorxml.isImage = stoi(controlnode->FirstChildElement("isImage")->GetText());
     }
+    if (sonExists("isProcess", controlnode->ToElement()))
+    {
+        sensorxml.isProcess = stoi(controlnode->FirstChildElement("isProcess")->GetText());
+    }
     if (sonExists("isOrth", controlnode->ToElement()))
     {
         sensorxml.isOrth = stoi(controlnode->FirstChildElement("isOrth")->GetText());
@@ -881,6 +910,12 @@ SceneXml FileIO::readSceneXML(TiXmlNode *sceneNode, Mode mode) {
         sceneXml.background.stepsize_height = 1;
     }
 
+    if (sonExists("voxelFillThreshold", sceneNode->ToElement())) {
+        sceneXml.background.voxelFillThreshold = std::clamp(
+            stof(sceneNode->FirstChildElement("voxelFillThreshold")->GetText()),
+            0.0f, 1.0f);
+    }
+
     if (sonExists("bgBioType", sceneNode->ToElement())) {
 //        sceneXml.background.bgPropName = sceneNode->FirstChildElement("bgBioName")->GetText();
         sceneXml.background.bgPropName = sceneNode->FirstChildElement("bgBioName")->GetText();
@@ -946,6 +981,13 @@ SceneXml FileIO::readSceneXML(TiXmlNode *sceneNode, Mode mode) {
             TiXmlElement *obj = sceneNode->FirstChildElement("Object");
             for (TiXmlElement *node = obj->FirstChildElement(); node != NULL; node = node->NextSiblingElement()) {
                 PrimEntity entity;
+                const bool voxelizeFromObj =
+                    sonExists("fileName", node) || sonExists("objectfile", node);
+                const char* objFileText = voxelizeFromObj
+                    ? (sonExists("fileName", node)
+                        ? node->FirstChildElement("fileName")->GetText()
+                        : node->FirstChildElement("objectfile")->GetText())
+                    : nullptr;
                 entity.primitiveName = node->FirstChildElement("meshNames")->GetText();
                 entity.meshNames = {node->FirstChildElement("meshNames")->GetText()};
                 std::string name = node->FirstChildElement("types")->GetText();
@@ -1012,6 +1054,45 @@ SceneXml FileIO::readSceneXML(TiXmlNode *sceneNode, Mode mode) {
                                     myFunction::mySplitFloat(node->FirstChildElement("shapes")->GetText(), ",")[0],
                                     glm::vec3(0, 0, 0)};
                 }
+                if (voxelizeFromObj && objFileText && *objFileText) {
+                    entity.voxelizeFromObj = true;
+                    std::filesystem::path objPath(objFileText);
+                    if (objPath.is_relative() && !m_inputDirectory.empty()) {
+                        objPath = std::filesystem::path(m_inputDirectory) / objPath;
+                    }
+                    entity.objFile = objPath.lexically_normal().string();
+                    entity.voxelFillThreshold = sceneXml.background.voxelFillThreshold;
+
+                    entity.meshNames = myFunction::mySplitStr(
+                        node->FirstChildElement("meshNames")->GetText(), ",");
+                    entity.spectralNames = myFunction::mySplitStr(
+                        node->FirstChildElement("spectralNames")->GetText(), ",");
+                    if (sonExists("thermalNames", node)) {
+                        entity.thermalNames = myFunction::mySplitStr(
+                            node->FirstChildElement("thermalNames")->GetText(), ",");
+                    }
+
+                    const size_t bindingCount = std::max<size_t>(1, entity.meshNames.size());
+                    const std::string canopyName = sonExists("canopyNames", node)
+                        ? node->FirstChildElement("canopyNames")->GetText() : "";
+                    const std::string propertyName = sonExists("bioNames", node)
+                        ? node->FirstChildElement("bioNames")->GetText() : "";
+                    entity.canopyNames.assign(bindingCount, canopyName);
+                    entity.propNames.assign(bindingCount, propertyName);
+
+                    entity.isdisFromFile = sonExists("objectPosition", node);
+                    if (entity.isdisFromFile) {
+                        std::filesystem::path distributionPath(
+                            node->FirstChildElement("objectPosition")->GetText());
+                        if (distributionPath.is_relative() && !m_inputDirectory.empty()) {
+                            distributionPath =
+                                std::filesystem::path(m_inputDirectory) / distributionPath;
+                        }
+                        entity.distributefile =
+                            distributionPath.lexically_normal().string();
+                    }
+                }
+
                 PrimEntitys.push_back(entity);
             }
         }
@@ -1072,6 +1153,13 @@ SceneXml FileIO::readSceneXML(TiXmlNode *sceneNode, Mode mode) {
             TiXmlElement *obj = sceneNode->FirstChildElement("Object");
             for (TiXmlElement *node = obj->FirstChildElement(); node != NULL; node = node->NextSiblingElement()) {
                 PrimEntity entity;
+                const bool voxelizeFromObj =
+                    sonExists("fileName", node) || sonExists("objectfile", node);
+                const char* objFileText = voxelizeFromObj
+                    ? (sonExists("fileName", node)
+                        ? node->FirstChildElement("fileName")->GetText()
+                        : node->FirstChildElement("objectfile")->GetText())
+                    : nullptr;
                 entity.primitiveName = node->FirstChildElement("meshNames")->GetText();
                 entity.meshNames = {node->FirstChildElement("canopyNames")->GetText()};
                 std::string name = node->FirstChildElement("types")->GetText();
@@ -1138,6 +1226,45 @@ SceneXml FileIO::readSceneXML(TiXmlNode *sceneNode, Mode mode) {
                                     myFunction::mySplitFloat(node->FirstChildElement("shapes")->GetText(), ",")[0],
                                     glm::vec3(0, 0, 0)};
                 }
+                if (voxelizeFromObj && objFileText && *objFileText) {
+                    entity.voxelizeFromObj = true;
+                    std::filesystem::path objPath(objFileText);
+                    if (objPath.is_relative() && !m_inputDirectory.empty()) {
+                        objPath = std::filesystem::path(m_inputDirectory) / objPath;
+                    }
+                    entity.objFile = objPath.lexically_normal().string();
+                    entity.voxelFillThreshold = sceneXml.background.voxelFillThreshold;
+
+                    entity.meshNames = myFunction::mySplitStr(
+                        node->FirstChildElement("meshNames")->GetText(), ",");
+                    entity.spectralNames = myFunction::mySplitStr(
+                        node->FirstChildElement("spectralNames")->GetText(), ",");
+                    if (sonExists("thermalNames", node)) {
+                        entity.thermalNames = myFunction::mySplitStr(
+                            node->FirstChildElement("thermalNames")->GetText(), ",");
+                    }
+
+                    const size_t bindingCount = std::max<size_t>(1, entity.meshNames.size());
+                    const std::string canopyName = sonExists("canopyNames", node)
+                        ? node->FirstChildElement("canopyNames")->GetText() : "";
+                    const std::string propertyName = sonExists("bioNames", node)
+                        ? node->FirstChildElement("bioNames")->GetText() : "";
+                    entity.canopyNames.assign(bindingCount, canopyName);
+                    entity.propNames.assign(bindingCount, propertyName);
+
+                    entity.isdisFromFile = sonExists("objectPosition", node);
+                    if (entity.isdisFromFile) {
+                        std::filesystem::path distributionPath(
+                            node->FirstChildElement("objectPosition")->GetText());
+                        if (distributionPath.is_relative() && !m_inputDirectory.empty()) {
+                            distributionPath =
+                                std::filesystem::path(m_inputDirectory) / distributionPath;
+                        }
+                        entity.distributefile =
+                            distributionPath.lexically_normal().string();
+                    }
+                }
+
                 PrimEntitys.push_back(entity);
             }
         }
