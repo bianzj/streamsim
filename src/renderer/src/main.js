@@ -1,6 +1,7 @@
 import { webApi } from './web-api.js'
-import { loadXmlScene } from './scene-loader.js'
-import { createDefaultProject, createMaterialPresets } from './project-schema.js'
+import { getLocale, startLocalization, t } from './i18n.js'
+import { loadXmlScene, updateSceneDynamics } from './scene-loader.js'
+import { createDefaultProject, createMaterialPresets, MAX_SENSOR_BANDS, normalizeProject, parseProjectJson, sensorBandValues, sensorCruisePositions, sensorViewAngles, stringifyProject } from './project-schema.js'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js'
@@ -10,8 +11,15 @@ const $ = (selector) => document.querySelector(selector)
 const $$ = (selector) => [...document.querySelectorAll(selector)]
 const api = webApi
 
+const PHYSICAL_TEXTURE_PRESETS = [
+  ['assets/texture-library/concrete_variance.jpg', '混凝土 · Concrete034'],
+  ['assets/texture-library/brick_variance.jpg', '砖墙 · Bricks075A'],
+  ['assets/texture-library/asphalt_variance.jpg', '沥青 · Asphalt031'],
+  ['assets/texture-library/metal_variance.jpg', '金属 · Metal046B']
+]
+
 const state = {
-  mode: 'eFacetRT',
+  mode: 'eVoxelEB',
   executable: '',
   executableExists: true,
   radiosityExecutable: '',
@@ -20,10 +28,13 @@ const state = {
   outputDir: '',
   xmlText: '',
   xmlDirty: false,
+  lastSaveError: null,
   project: null,
   projectPath: '',
   running: false,
   startedAt: 0,
+  progress: 0,
+  progressStage: '待命',
   logCount: 0,
   panel: 'scene',
   config: null,
@@ -33,28 +44,66 @@ const state = {
   editingObjectIndex: -1,
   selectedObjectIndex: -1,
   editingAttributeIndex: -1,
+  editingPreset: null,
   presetPhysicalType: 'Vegetation',
   resultFiles: [],
   selectedResult: null,
   resultRaster: null,
-  resultView: 'image'
+  resultView: 'image',
+  analysisType: 'angle',
+  analysisRows: [],
+  analysisSelection: {},
+  changeAnalysisRequest: 0,
+  resultDisplay: {},
+  resultPreviewRequest: 0
 }
 
 function mergeNamedPresets(presets, values) {
   const merged = new Map(presets.map((item) => [item.name, item]))
   for (const item of values || []) {
     const preset = merged.get(item.name) || {}
-    merged.set(item.name, { ...preset, ...item, params: { ...(preset.params || {}), ...(item.params || {}) } })
+    merged.set(item.name, { ...preset, ...item, params: { ...(preset.params || {}), ...(item.params || {}) }, physicalTexture: { ...(preset.physicalTexture || {}), ...(item.physicalTexture || {}) } })
   }
   return [...merged.values()]
+}
+
+function structureLabel(value) {
+  return String(value || '')
+    .replace(/Canopy\s*冠层/gi, '混沌介质')
+    .replace(/Canopy/gi, '混沌介质')
+    .replace(/冠层/g, '混沌介质')
 }
 
 function ensureMaterialPresets(config) {
   const presets = createMaterialPresets()
   config.spectra = mergeNamedPresets(presets.spectra, config.spectra)
+    .filter((item) => !/(^|_)fog($|_)/i.test(String(item.name || '')) && !/大雾/.test(String(item.label || ''))).map((item) => {
+    item = { ...item, label: String(item.label || '').replaceAll('火焰/烟羽', '火焰') }
+    if (item.name === 'water_surface') item.label = '水体光谱'
+    if (item.model !== 'BSM') return item
+    const params = item.params || {}
+    const latitude = Number(params.BSMlat)
+    const longitude = Number(params.BSMlon)
+    if (Number.isFinite(latitude) && Number.isFinite(longitude)
+      && Math.abs(latitude) < 1e-9 && Math.abs(longitude) < 1e-9) {
+      return { ...item, params: { ...params, BSMlat: 25, BSMlon: 45 } }
+    }
+    return item
+  })
   config.canopies = mergeNamedPresets(presets.canopies, config.canopies)
+    .filter((item) => !/(^|_)fog($|_)/i.test(String(item.name || '')) && !/大雾/.test(String(item.label || '')) && !['3', 'fog'].includes(String(item.structureType ?? '').toLowerCase()))
+    .map((item) => ({ ...item, label: structureLabel(String(item.label || '').replaceAll('火焰/烟羽', '火焰')), structureType: ['canopy', 'rigid', 'fire'].includes(item.structureType) ? item.structureType : 'canopy' }))
   config.thermals = mergeNamedPresets(presets.thermals, config.thermals)
+    .filter((item) => !/(^|_)fog($|_)/i.test(String(item.name || '')) && !/大雾/.test(String(item.label || '')))
+    .map((item) => ({ ...item, label: item.name === 'water_temperature' ? '水体初始温度' : String(item.label || '').replaceAll('火焰/烟羽', '火焰') }))
+  config.objects.items = (config.objects.items || [])
+    .filter((item) => item.type !== 'Fog' && item.medium?.kind !== 'fog')
+  config.objects.count = config.objects.items.length
+  config.objects.names = config.objects.items.map((item) => item.name)
   config.materials = mergeNamedPresets(presets.materials, config.materials)
+    .map((item) => ({ ...item, label: item.name === 'water_set' ? '水体物化参数' : item.label }))
+  const soilMethod = Math.max(0, Math.min(2, Math.round(Number(config.control?.soilTemperatureMethod ?? 2))))
+  config.materials.filter((item) => item.type === 'Soil').forEach((item) => { item.params.method = soilMethod })
   return config
 }
 
@@ -82,6 +131,16 @@ function parseTriple(value, fallback) {
   return parts.length >= 3 && parts.slice(0, 3).every(Number.isFinite) ? parts.slice(0, 3) : fallback
 }
 
+function projectModeFromXml(content, fallback = state.mode) {
+  try {
+    const project = parseProjectJson(content)
+    return project.mode
+  } catch {}
+  const doc = new DOMParser().parseFromString(String(content || ''), 'application/xml')
+  const mode = doc.documentElement?.getAttribute('mode')
+  return ['eVoxelEB', 'eFacetEB', 'eFacetRT', 'eVoxelRT', 'eRaytracing'].includes(mode) ? mode : fallback
+}
+
 function parseMaterialNode(node) {
   const type = node.tagName === 'leafBio' ? 'Vegetation' : node.tagName === 'waterSet' ? 'Water' : 'Soil'
   let params
@@ -97,11 +156,14 @@ function parseMaterialNode(node) {
   } else if (type === 'Water') {
     params = {
       rss: Number(xmlValue(node, 'rss', 0)), heatCapacity: Number(xmlValue(node, 'heatCapacity', 4186000)),
-      mixingDepth: Number(xmlValue(node, 'mixingDepth', 0.5)), evaporationCoefficient: Number(xmlValue(node, 'evaporationCoefficient', 1))
+      mixingDepth: Number(xmlValue(node, 'mixingDepth', 0.5)), evaporationCoefficient: Number(xmlValue(node, 'evaporationCoefficient', 1)),
+      brdfModel: ['1', 'coxmunk', 'cox-munk'].includes(xmlValue(node, 'brdfModel', 'CoxMunk').toLowerCase()) ? 1 : 0,
+      refractiveIndex: Number(xmlValue(node, 'refractiveIndex', 1.333)), slopeVariance: Number(xmlValue(node, 'slopeVariance', 0)),
+      diffuseFraction: Number(xmlValue(node, 'diffuseFraction', 0.02))
     }
   } else {
     params = {
-      method: Number(xmlValue(node, 'method', 1)), rss: Number(xmlValue(node, 'rss', 2000)),
+      method: Number(xmlValue(node, 'method', 2)), rss: Number(xmlValue(node, 'rss', 2000)),
       cs: Number(xmlValue(node, 'cs', 1180)), rhos: Number(xmlValue(node, 'rhos', 1800)),
       lambdas: Number(xmlValue(node, 'lambdas', 1.55)), Tsoil: Number(xmlValue(node, 'Tsoil', 25)),
       SMC: Number(xmlValue(node, 'SMC', 25)), Satwater: Number(xmlValue(node, 'Satwater', 0.45))
@@ -110,12 +172,20 @@ function parseMaterialNode(node) {
   return { name: node.getAttribute('name') || 'material', type, params }
 }
 
-function parseXml(content) {
+function parseXml(content, mode = state.mode) {
+  if (String(content || '').trimStart().startsWith('{')) return parseProjectJson(content).configuration
   const doc = new DOMParser().parseFromString(content, 'application/xml')
   if (doc.querySelector('parsererror')) throw new Error('XML 格式错误，请检查标签是否闭合')
   const base = defaultConfig()
+  const energyMode = mode === 'eFacetEB' || mode === 'eVoxelEB'
   const lightPair = parsePair(xmlValue(doc, 'Geometry Light light lightAngle lightAngle', '30,135'), [30, 135])
-  const viewPair = parsePair(xmlValue(doc, 'Geometry Sensor sensor viewAngle viewAngle[type="custom"] viewAngles', '0,0'), [0, 0])
+  const samplingNode = doc.querySelector('Geometry Sensor sensor observationSampling')
+  const continuousNode = doc.querySelector('Geometry Sensor sensor continuousBand')
+  const generatedViewPair = parsePair(xmlValue(doc, 'Geometry Sensor sensor viewAngle viewAngle[type="custom"] viewAngles', '0,0'), [0, 0])
+  const viewPair = [
+    Number(samplingNode?.getAttribute('customVza') ?? generatedViewPair[0]),
+    Number(samplingNode?.getAttribute('customVaa') ?? generatedViewPair[1])
+  ]
   const sceneX = Number(xmlValue(doc, 'Scene sceneSizeX', base.scene.x))
   const sceneY = Number(xmlValue(doc, 'Scene sceneSizeY', base.scene.y))
   const projectionText = xmlValue(doc, 'Geometry Sensor sensor projection', 'parallel').toLowerCase()
@@ -123,28 +193,55 @@ function parseXml(content) {
     xmlValue(doc, 'Geometry Sensor sensor sensorPosition', ''),
     [sceneX / 2, sceneY / 2, 3000]
   )
+  const cruiseNode = doc.querySelector('Geometry Sensor sensor uavPositions')
+  const directFraction = Math.max(0, Math.min(1, finiteNumber(xmlValue(
+    doc, 'Geometry Light light directScatteringRatio',
+    xmlValue(doc, 'Geometry Light light direct', base.light.direct)
+  ), base.light.direct)))
+  const demFile = xmlValue(doc, 'Scene DEM', '')
+  const demSwitchNode = doc.querySelector('Control isDEM')
+  const terrainEnabled = demSwitchNode
+    ? String(demSwitchNode.textContent || '').trim() === '1'
+    : Boolean(demFile)
   const objectNodes = [...doc.querySelectorAll('Scene Object object')]
+    .filter((node) => xmlValue(node, 'mediumKind', '') !== 'fog')
   const names = objectNodes.map((node) => node.getAttribute('objName') || node.getAttribute('name') || `对象 ${node.getAttribute('id') || ''}`)
   const items = objectNodes.map((node) => {
-    const type = xmlValue(node, 'types', 'Other')
+    const mediumKind = xmlValue(node, 'mediumKind', '')
+    const type = mediumKind === 'fire' ? 'Fire' : mediumKind === 'fog' ? 'Fog' : xmlValue(node, 'types', 'Other')
     const meshNames = xmlValue(node, 'meshNames', node.getAttribute('objName') || 'object').split(',')
     const spectralNames = xmlValue(node, 'spectralNames', 'soil').split(',')
     const thermalNames = xmlValue(node, 'thermalNames', 'soil_temperature').split(',')
     const defaultMaterial = type === 'Vegetation' ? 'leaf_c3' : type === 'Water' ? 'water_set' : 'soilset'
+    const materialNames = xmlValue(node, 'bioNames', xmlValue(node, 'propNames', defaultMaterial)).split(',')
+    const canopyNames = xmlValue(node, 'canopyNames', type === 'Vegetation' ? 'canopy_default' : 'rigid_body').split(',')
     return {
       name: node.getAttribute('objName') || node.getAttribute('name') || 'object', type,
       shape: xmlValue(node, 'shapeTypes', ''), dimensions: xmlValue(node, 'shapes', '1,1,1').split(',').map(Number),
       fileName: xmlValue(node, 'fileName', xmlValue(node, 'objectfile', '')), positionFile: xmlValue(node, 'objectPosition', ''),
-      materialName: xmlValue(node, 'bioNames', xmlValue(node, 'propNames', defaultMaterial)),
-      canopyName: xmlValue(node, 'canopyNames', 'canopy_default'),
-      meshes: meshNames.map((name, index) => ({ name, spectralName: spectralNames[index] || spectralNames[0] || 'soil', thermalName: thermalNames[index] || thermalNames[0] || 'soil_temperature' }))
+      materialName: materialNames[0] || defaultMaterial,
+      canopyName: canopyNames[0] || 'canopy_default',
+      meshes: meshNames.map((name, index) => ({
+        name,
+        spectralName: spectralNames[index] || spectralNames[0] || 'soil',
+        thermalName: thermalNames[index] || thermalNames[0] || 'soil_temperature',
+        materialName: materialNames[index] || materialNames[0] || defaultMaterial,
+        canopyName: canopyNames[index] || canopyNames[0] || 'canopy_default'
+      })),
+      ...(mediumKind ? { medium: { kind: mediumKind, radiationOnly: true }, sourceKind: 'prim', generation: { type: '火焰', shape: xmlValue(node, 'shapeTypes', 'cube') } } : {})
     }
   })
   const spectra = [...doc.querySelectorAll('Attribute Spectral spectral')].map((node) => ({
     name: node.getAttribute('name') || 'spectral', model: node.getAttribute('type') || 'custom',
     reflectance: xmlValue(node, 'reflectance', '0.20'), transmittance: xmlValue(node, 'transmittance', '0.0'),
     refTir: Number(xmlValue(node, 'ref_TIR', 0.05)), tauTir: Number(xmlValue(node, 'tau_TIR', 0)), fileName: xmlValue(node, 'spectral_file', ''),
-    params: { Cab: Number(xmlValue(node, 'Cab', 40)), Cw: Number(xmlValue(node, 'Cw', 0.01)), Cdm: Number(xmlValue(node, 'Cdm', 0.01)), Cs: Number(xmlValue(node, 'Cs', 0)), N: Number(xmlValue(node, 'N', 1.5)), SMC: Number(xmlValue(node, 'SMC', 25)), BSMBrightness: Number(xmlValue(node, 'BSMBrightness', 0.5)), BSMlat: Number(xmlValue(node, 'BSMlat', 0)), BSMlon: Number(xmlValue(node, 'BSMlon', 0)) }
+    physicalTexture: {
+      enabled: ['1', 'true', 'yes', 'on'].includes(xmlValue(node, 'physicalTextureEnabled', '0').toLowerCase()),
+      fileName: xmlValue(node, 'physicalTextureFile', ''),
+      strength: Number(xmlValue(node, 'physicalTextureStrength', 0.2)),
+      repeatSize: Number(xmlValue(node, 'physicalTextureRepeatSize', 2))
+    },
+    params: { Cab: Number(xmlValue(node, 'Cab', 40)), Cw: Number(xmlValue(node, 'Cw', 0.01)), Cdm: Number(xmlValue(node, 'Cdm', 0.01)), Cs: Number(xmlValue(node, 'Cs', 0)), N: Number(xmlValue(node, 'N', 1.5)), SMC: Number(xmlValue(node, 'SMC', 25)), BSMBrightness: Number(xmlValue(node, 'BSMBrightness', 0.5)), BSMlat: Number(xmlValue(node, 'BSMlat', 25)), BSMlon: Number(xmlValue(node, 'BSMlon', 45)) }
   }))
   const thermals = [...doc.querySelectorAll('Attribute Thermal thermal')].map((node) => ({ name: node.getAttribute('name') || 'temperature', sunlitTemperature: Number(xmlValue(node, 'sunlitTemperature', 305)), shadedTemperature: Number(xmlValue(node, 'shadedTemperature', 295)) }))
   const materials = [...doc.querySelectorAll('Attribute Biochemistry leafBio, Attribute Biochemistry soilSet, Attribute Biochemistry waterSet')]
@@ -152,10 +249,17 @@ function parseXml(content) {
     .map(parseMaterialNode)
   const canopies = [...doc.querySelectorAll('Attribute Canopy canopy')].map((node) => ({
     name: node.getAttribute('name') || 'canopy_default',
+    structureType: (() => {
+      const value = xmlValue(node, 'structureType', 'canopy').toLowerCase()
+      return value === '1' || value === 'rigid' ? 'rigid' : value === '2' || value === 'fire' ? 'fire' : value === '3' || value === 'fog' ? 'fog' : 'canopy'
+    })(),
     lai: Number(xmlValue(node, 'lai', 3)), density: Number(xmlValue(node, 'density', 1)),
     hc: Number(xmlValue(node, 'hc', 2)), G: Number(xmlValue(node, 'G', 0.5)),
     LIDFa: Number(xmlValue(node, 'LIDFa', -0.35)), LIDFb: Number(xmlValue(node, 'LIDFb', -0.15)),
-    hspot: Number(xmlValue(node, 'hspot', 0.2)), leafwidth: Number(xmlValue(node, 'leafwidth', 0.1))
+    hspot: Number(xmlValue(node, 'hspot', 0.2)), leafwidth: Number(xmlValue(node, 'leafwidth', 0.1)),
+    extinction: Number(xmlValue(node, 'extinction', 0)), scatteringAlbedo: Number(xmlValue(node, 'scatteringAlbedo', 0)),
+    asymmetry: Number(xmlValue(node, 'asymmetry', 0)), emissionScale: Number(xmlValue(node, 'emissionScale', 0)),
+    fixedTemperature: Number(xmlValue(node, 'fixedTemperature', 0))
   }))
   return {
     outDir: xmlValue(doc, 'Control outDir', ''),
@@ -165,38 +269,71 @@ function parseXml(content) {
       height: Number(xmlValue(doc, 'Scene Height', base.scene.height)),
       voxel: Number(xmlValue(doc, 'Scene voxelSize', base.scene.voxel)),
       voxelFillThreshold: Number(xmlValue(doc, 'Scene voxelFillThreshold', base.scene.voxelFillThreshold)),
-      terrain: xmlValue(doc, 'Control isDEM', '0') === '1',
+      terrain: terrainEnabled,
+      demFile,
+      demInfo: null,
       background: {
         spectralName: xmlValue(doc, 'Scene bgSpectral', base.scene.background.spectralName),
         thermalName: xmlValue(doc, 'Scene bgThermal', base.scene.background.thermalName),
         materialType: xmlValue(doc, 'Scene bgBioType', base.scene.background.materialType),
-        materialName: xmlValue(doc, 'Scene bgBioName', base.scene.background.materialName)
+        materialName: xmlValue(doc, 'Scene bgBioName', base.scene.background.materialName),
+        heterogeneityEnabled: xmlValue(doc, 'Scene backgroundHeterogeneity', 'None').toLowerCase() === 'hapke',
+        angularEffectStrength: Math.max(0, Math.min(1, Number(xmlValue(
+          doc, 'Scene backgroundAngularStrength', base.scene.background.angularEffectStrength
+        ))))
       }
     },
     light: {
       zenith: lightPair[0], azimuth: lightPair[1],
-      direct: Number(xmlValue(doc, 'Geometry Light light direct', base.light.direct)),
-      diffuse: Number(xmlValue(doc, 'Geometry Light light diffuse', base.light.diffuse)),
+      direct: directFraction,
+      diffuse: 1 - directFraction,
       skyTemperature: Number(xmlValue(doc, 'Geometry Light light skyTemperature', base.light.skyTemperature))
     },
     sensor: {
       x: Number(xmlValue(doc, 'Geometry Sensor sensor pixelResolutionX', base.sensor.x)),
       y: Number(xmlValue(doc, 'Geometry Sensor sensor pixelResolutionY', base.sensor.y)),
-      bands: xmlValue(doc, 'Geometry Sensor sensor controlBand', base.sensor.bands),
+      bands: xmlValue(continuousNode, 'customBands', xmlValue(doc, 'Geometry Sensor sensor controlBand', base.sensor.bands)),
+      continuousBands: continuousNode?.getAttribute('enabled') === '1',
+      bandStart: Number(xmlValue(continuousNode, 'start', base.sensor.bandStart)),
+      bandEnd: Number(xmlValue(continuousNode, 'end', base.sensor.bandEnd)),
+      bandStep: Number(xmlValue(continuousNode, 'step', base.sensor.bandStep)),
+      principalPlane: samplingNode?.getAttribute('principalPlane') === '1',
+      hemisphere: samplingNode?.getAttribute('hemisphere') === '1',
       projection: ['perspective', 'central', 'center'].includes(projectionText) ? 'perspective' : 'parallel',
       vza: viewPair[0], vaa: viewPair[1],
       positionX: sensorPosition[0], positionY: sensorPosition[1], height: sensorPosition[2],
+      fov: Number(xmlValue(doc, 'Geometry Sensor sensor FOV', base.sensor.fov)),
+      cruiseEnabled: projectionText === 'perspective' && xmlValue(doc, 'Control isUAVtrave', '0') === '1',
+      cruiseHeading: Number(cruiseNode?.getAttribute('heading') ?? base.sensor.cruiseHeading),
+      cruiseRoute: cruiseNode?.getAttribute('route') || base.sensor.cruiseRoute,
+      cruiseTargetX: Number(cruiseNode?.getAttribute('targetX') ?? base.sensor.cruiseTargetX),
+      cruiseTargetY: Number(cruiseNode?.getAttribute('targetY') ?? base.sensor.cruiseTargetY),
+      cruiseTargetZ: Number(cruiseNode?.getAttribute('targetZ') ?? sensorPosition[2]),
+      cruiseStep: Number(cruiseNode?.getAttribute('step') ?? base.sensor.cruiseStep),
+      cruiseCount: Number(cruiseNode?.getAttribute('count') ?? cruiseNode?.querySelectorAll('position').length ?? base.sensor.cruiseCount),
       image: xmlValue(doc, 'Control isImage', '1') === '1',
       temperature: xmlValue(doc, 'Control isTemperature', '1') === '1',
       process: xmlValue(doc, 'Control isProcess', '0') === '1',
+      radiationProcess: xmlValue(doc, 'Control isRadiationProcess', energyMode ? '0' : xmlValue(doc, 'Control isProcess', '0')) === '1',
+      energyProcess: xmlValue(doc, 'Control isEnergyProcess', energyMode ? xmlValue(doc, 'Control isProcess', '0') : '0') === '1',
       albedo: xmlValue(doc, 'Control isAlbedo', '0') === '1'
     },
     control: {
       depth: Number(xmlValue(doc, 'Control rayTracingDepth', base.control.depth)),
+      samples: Number(xmlValue(doc, 'Control sampleCount', base.control.samples)),
+      radiationSolver: xmlValue(doc, 'Control radiationSolver', base.control.radiationSolver) === 'accelerated'
+        ? 'accelerated' : 'traditional',
       gpu: Number(xmlValue(doc, 'Control GPU', base.control.gpu)),
       couplingIterations: Number(xmlValue(doc, 'Control couplingIterations', base.control.couplingIterations)),
       temperatureTolerance: Number(xmlValue(doc, 'Control temperatureTolerance', base.control.temperatureTolerance)),
-      temperatureRelaxation: Number(xmlValue(doc, 'Control temperatureRelaxation', base.control.temperatureRelaxation))
+      temperatureRelaxation: Number(xmlValue(doc, 'Control temperatureRelaxation', base.control.temperatureRelaxation)),
+      soilTemperatureMethod: Math.max(0, Math.min(2, Math.round(Number(xmlValue(
+        doc, 'Control soilTemperatureMethod',
+        materials.find((item) => item.type === 'Soil')?.params?.method ?? base.control.soilTemperatureMethod
+      ))))),
+      vegetationTemperatureMethod: Math.max(0, Math.min(1, Math.round(Number(xmlValue(
+        doc, 'Control vegetationTemperatureMethod', base.control.vegetationTemperatureMethod
+      )))))
     },
     objects: { count: objectNodes.length, names: names.length ? names : ['均质地表'], items },
     spectra: spectra.length ? spectra : base.spectra,
@@ -206,46 +343,56 @@ function parseXml(content) {
     meteo: {
       path: xmlValue(doc, 'Meteorology filePath', '未配置'),
       start: Number(xmlValue(doc, 'Meteorology startTimeNode', 0)),
-      end: Number(xmlValue(doc, 'Meteorology endTimeNode', 0))
+      end: Number(xmlValue(doc, 'Meteorology endTimeNode', 0)),
+      z: Number(xmlValue(doc, 'Meteorology z', base.meteo.z)),
+      Tsold: Number(xmlValue(doc, 'Meteorology Tsold', base.meteo.Tsold)),
+      SatWater: Number(xmlValue(doc, 'Meteorology SatWater', base.meteo.SatWater)),
+      dTime: Number(xmlValue(doc, 'Meteorology dTime', base.meteo.dTime)),
+      latitude: Number(xmlValue(doc, 'Meteorology Latitude', base.meteo.latitude)),
+      longitude: Number(xmlValue(doc, 'Meteorology Longitude', base.meteo.longitude))
+    },
+    atmosphere: {
+      enabled: xmlValue(doc, 'Atmosphere enabled', '0') === '1',
+      model: ['tropical', 'midlatitude-summer', 'midlatitude-winter'].includes(xmlValue(doc, 'Atmosphere model', 'midlatitude-summer'))
+        ? xmlValue(doc, 'Atmosphere model', 'midlatitude-summer') : 'midlatitude-summer',
+      waterVapor: Math.max(0.5, Math.min(5, Number(xmlValue(doc, 'Atmosphere waterVapor', 2)))),
+      aerosol: ['rural', 'urban'].includes(xmlValue(doc, 'Atmosphere aerosol', 'rural'))
+        ? xmlValue(doc, 'Atmosphere aerosol', 'rural') : 'rural',
+      visibility: Math.max(10, Math.min(50, Number(xmlValue(doc, 'Atmosphere visibility', 23)))),
+      lutFile: xmlValue(doc, 'Atmosphere lutFile', 'assets/atmosphere/simple_modtran_lut.csv')
     }
   }
 }
 
-function updateXml(selector, value) {
-  if (!state.xmlText) return
-  const parsed = new DOMParser().parseFromString(state.xmlText, 'application/xml')
-  let node = parsed.querySelector(selector)
-  if (!node) {
-    const parts = selector.trim().split(/\s+/)
-    const tagName = parts.pop()
-    const parent = parts.length ? parsed.querySelector(parts.join(' ')) : null
-    if (parent && /^[A-Za-z_][\w:.-]*$/.test(tagName)) {
-      node = parsed.createElement(tagName)
-      parent.appendChild(node)
-    }
-  }
-  if (!node) return
-  node.textContent = String(value)
-  state.xmlText = new XMLSerializer().serializeToString(parsed)
+function syncProjectText() {
+  if (!state.project || !state.config) return
+  state.project.configuration = state.config
+  state.project.mode = state.mode
+  state.project = normalizeProject(state.project)
+  state.xmlText = stringifyProject(state.project)
   state.xmlDirty = true
   $('#xmlEditor').value = state.xmlText
   $('#unsavedMark').hidden = false
   $('#xmlStatus').textContent = '有未保存的修改'
 }
 
+function updateXml() { syncProjectText() }
+
 function updatePair(selector, index, value) {
-  if (!state.xmlText) return
-  const parsed = new DOMParser().parseFromString(state.xmlText, 'application/xml')
-  const node = parsed.querySelector(selector)
-  if (!node) return
-  const pair = parsePair(node.textContent, [0, 0])
-  pair[index] = Number(value)
-  updateXml(selector, `${pair[0]},${pair[1]}`)
+  syncProjectText()
 }
 
 function fileName(path) {
   if (!path) return '未打开工程'
   return path.replaceAll('\\', '/').split('/').pop()
+}
+
+function isPrimObject(item = {}) {
+  return item.sourceKind === 'prim' || Boolean(item.generation)
+}
+
+function isMediumObject(item = {}) {
+  return item.type === 'Fire' || item.type === 'Fog' || Boolean(item.medium)
 }
 
 function toast(title, message, kind = '') {
@@ -276,12 +423,49 @@ function setEngineState(label, detail, css = 'ready') {
   $('#engineDot').className = css
 }
 
+function runElapsedText(milliseconds = 0) {
+  const seconds = Math.max(0, milliseconds) / 1000
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor(seconds / 60) % 60
+  const remaining = Math.floor(seconds % 60)
+  const tenths = Math.floor((seconds % 1) * 10)
+  return `${hours ? `${String(hours).padStart(2, '0')}:` : ''}${String(minutes).padStart(2, '0')}:${String(remaining).padStart(2, '0')}.${tenths}`
+}
+
+function renderRunProgress(finalElapsed = null) {
+  const percent = Math.max(0, Math.min(100, Math.round(Number(state.progress) || 0)))
+  const elapsed = finalElapsed == null ? Date.now() - state.startedAt : finalElapsed
+  $('#elapsed').textContent = `${state.running ? '已运行' : '耗时'} ${runElapsedText(elapsed)}`
+  $('#runProgressText').textContent = state.running
+    ? '运行中' : (percent >= 100 ? '已完成' : state.progressStage)
+  $('#runProgressPercent').textContent = `${percent}%`
+  $$('#runProgress .run-progress-blocks i').forEach((block, index) => {
+    const fill = Math.max(0, Math.min(100, (percent - index * 10) * 10))
+    block.style.setProperty('--block-progress', `${fill}%`)
+  })
+  $('#runProgress').classList.toggle('running', state.running)
+  $('#runProgress').classList.toggle('complete', !state.running && percent >= 100)
+  if (state.running) {
+    $('#engineState').textContent = `模拟运行中 · ${percent}%`
+    $('#enginePath').textContent = `PID ${state.pid || '...'} · ${state.progressStage} · ${runElapsedText(elapsed)}`
+  }
+}
+
+function setSimulationProgress(percent, stage = state.progressStage) {
+  state.progress = Math.max(state.progress, Math.min(100, Math.max(0, Number(percent) || 0)))
+  state.progressStage = stage || state.progressStage
+  renderRunProgress()
+}
+
 function setRunning(running) {
   state.running = running
   $('#runBtn').disabled = running
   $('#stopBtn').disabled = !running
   $$('#modeGrid button').forEach((button) => { button.disabled = running })
-  if (running) setEngineState('模拟运行中', `PID ${state.pid || '...'}`, 'running')
+  if (running) {
+    setEngineState('模拟运行中', `PID ${state.pid || '...'}`, 'running')
+    renderRunProgress()
+  }
   else {
     const facet = state.mode === 'eFacetRT' || state.mode === 'eFacetEB'
     const exists = state.executableExists
@@ -294,7 +478,9 @@ function setRunning(running) {
 const viewport = $('#viewport')
 const scene = new THREE.Scene()
 scene.background = new THREE.Color(0xf3f6fa)
-scene.fog = new THREE.FogExp2(0xf3f6fa, 0.012)
+// Physical scene objects must not fade into the background as camera distance
+// increases; distance fog was visually equivalent to extra transmittance.
+scene.fog = null
 const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 1200)
 camera.position.set(25, 22, 28)
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' })
@@ -323,19 +509,20 @@ const world = new THREE.Group()
 scene.add(world)
 let grid = null
 let voxelPreview = null
+let sceneBoundsGuide = null
+let cruiseVisualization = null
+let sunVisualization = null
 let currentStyle = 'solid'
 let resultViewer = null
-
-function seeded(index) {
-  const value = Math.sin(index * 91.17 + 13.41) * 43758.5453
-  return value - Math.floor(value)
-}
 
 function disposeObject(object) {
   object.traverse((child) => {
     child.geometry?.dispose?.()
-    if (Array.isArray(child.material)) child.material.forEach((item) => item.dispose())
-    else child.material?.dispose?.()
+    const materials = Array.isArray(child.material) ? child.material : [child.material]
+    materials.forEach((item) => {
+      item?.map?.dispose?.()
+      item?.dispose?.()
+    })
   })
 }
 
@@ -346,33 +533,708 @@ function clearWorld() {
   }
   grid = null
   voxelPreview = null
+  sceneBoundsGuide = null
+  cruiseVisualization = null
+}
+
+function formatSceneDimension(value) {
+  const number = Math.max(0, Number(value) || 0)
+  return number >= 100 ? Math.round(number).toLocaleString('zh-CN') : Number(number.toFixed(1)).toLocaleString('zh-CN')
+}
+
+function createDimensionLabel(text, width) {
+  const canvas = document.createElement('canvas')
+  canvas.width = 320
+  canvas.height = 82
+  const context = canvas.getContext('2d')
+  context.fillStyle = 'rgba(248, 251, 255, 0.94)'
+  context.strokeStyle = 'rgba(36, 111, 211, 0.9)'
+  context.lineWidth = 4
+  context.beginPath()
+  context.roundRect(4, 4, canvas.width - 8, canvas.height - 8, 18)
+  context.fill()
+  context.stroke()
+  context.fillStyle = '#173f70'
+  context.font = '700 34px "Segoe UI", "Microsoft YaHei", sans-serif'
+  context.textAlign = 'center'
+  context.textBaseline = 'middle'
+  context.fillText(text, canvas.width / 2, canvas.height / 2 + 1)
+
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.colorSpace = THREE.SRGBColorSpace
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: texture,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false
+  }))
+  sprite.scale.set(width, width * canvas.height / canvas.width, 1)
+  sprite.renderOrder = 31
+  return sprite
+}
+
+function addSceneBoundsEdge(group, start, end, radius, material) {
+  const direction = end.clone().sub(start)
+  const geometry = new THREE.CylinderGeometry(radius, radius, direction.length(), 6, 1, false)
+  const edge = new THREE.Mesh(geometry, material.clone())
+  edge.position.copy(start).add(end).multiplyScalar(0.5)
+  edge.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize())
+  edge.renderOrder = 29
+  group.add(edge)
+}
+
+function updateSceneBoundsGuide(config) {
+  if (sceneBoundsGuide) {
+    world.remove(sceneBoundsGuide)
+    disposeObject(sceneBoundsGuide)
+    sceneBoundsGuide = null
+  }
+
+  const sceneX = Math.max(0.1, Number(config?.scene?.x) || 60)
+  const sceneY = Math.max(0.1, Number(config?.scene?.y) || 60)
+  const displayScale = world.userData.displayScale || Math.min(1, 45 / Math.max(sceneX, sceneY))
+  const width = sceneX * displayScale
+  const depth = sceneY * displayScale
+  // The guide describes the configured simulation domain, not the current
+  // mesh bounds. Objects may extend outside it, but must not resize the box.
+  const sceneHeight = Math.max(0, Number(config?.scene?.height) || 0)
+  const displayHeight = Math.max(0.06, sceneHeight * displayScale)
+
+  const bounds = new THREE.Box3(
+    new THREE.Vector3(-width / 2, 0, -depth / 2),
+    new THREE.Vector3(width / 2, displayHeight, depth / 2)
+  )
+  const group = new THREE.Group()
+  group.name = 'scene-bounds-guide'
+  group.userData.sceneBoundsGuide = true
+
+  const helper = new THREE.Box3Helper(bounds, 0x246fd3)
+  helper.material.transparent = true
+  helper.material.opacity = 0.66
+  helper.material.depthTest = false
+  helper.material.depthWrite = false
+  helper.renderOrder = 30
+  group.add(helper)
+
+  const edgeMaterial = new THREE.MeshBasicMaterial({ color: 0x247bd8, transparent: true, opacity: 0.72, depthTest: false, depthWrite: false })
+  const edgeRadius = THREE.MathUtils.clamp(Math.max(width, depth) * 0.0014, 0.018, 0.065)
+  const bottom = 0.035
+  const corners = [
+    new THREE.Vector3(-width / 2, bottom, -depth / 2),
+    new THREE.Vector3(width / 2, bottom, -depth / 2),
+    new THREE.Vector3(width / 2, bottom, depth / 2),
+    new THREE.Vector3(-width / 2, bottom, depth / 2)
+  ]
+  const topCorners = corners.map((corner) => new THREE.Vector3(corner.x, displayHeight, corner.z))
+  for (let index = 0; index < 4; index += 1) {
+    const next = (index + 1) % 4
+    addSceneBoundsEdge(group, corners[index], corners[next], edgeRadius, edgeMaterial)
+    addSceneBoundsEdge(group, topCorners[index], topCorners[next], edgeRadius, edgeMaterial)
+    addSceneBoundsEdge(group, corners[index], topCorners[index], edgeRadius, edgeMaterial)
+  }
+  edgeMaterial.dispose()
+
+  const extent = Math.max(width, depth)
+  const labelWidth = THREE.MathUtils.clamp(extent * 0.16, 2.8, 8)
+  const padding = THREE.MathUtils.clamp(extent * 0.035, 0.35, 1.4)
+  const xLabel = createDimensionLabel(`X · 南北 ${formatSceneDimension(sceneX)} m`, labelWidth)
+  xLabel.position.set(0, Math.max(0.18, displayHeight * 0.025), depth / 2 - padding * 0.55)
+  group.add(xLabel)
+  const zLabel = createDimensionLabel(`Z · 东西 ${formatSceneDimension(sceneY)} m`, labelWidth)
+  zLabel.position.set(width / 2 - padding * 0.55, Math.max(0.18, displayHeight * 0.025), 0)
+  group.add(zLabel)
+  const heightLabel = createDimensionLabel(`Y · 高度 ${formatSceneDimension(sceneHeight)} m`, labelWidth)
+  heightLabel.position.set(width / 2 - padding * 0.55, displayHeight / 2, depth / 2 - padding * 0.55)
+  group.add(heightLabel)
+
+  // Geographic azimuths use north as 0 degrees. Three.js +X is scene north.
+  const northLength = Math.min(
+    THREE.MathUtils.clamp(extent * 0.16, 2.8, 7.2),
+    Math.max(1.2, depth * 0.3)
+  )
+  // Keep the compass inside the front-left quadrant; depth testing is disabled
+  // so dense city geometry cannot hide the reference direction.
+  const northOrigin = new THREE.Vector3(
+    -width * 0.28,
+    Math.max(0.12, displayHeight + 0.08),
+    depth * 0.2 - northLength
+  )
+  const northArrow = new THREE.ArrowHelper(
+    new THREE.Vector3(1, 0, 0), northOrigin, northLength,
+    0x15805f, northLength * 0.22, northLength * 0.12
+  )
+  northArrow.name = 'scene-north-arrow'
+  northArrow.traverse((child) => {
+    child.renderOrder = 40
+    if (child.material) {
+      child.material.depthTest = false
+      child.material.depthWrite = false
+    }
+  })
+  group.add(northArrow)
+  const northLabel = createDimensionLabel('正北 N · 0°', THREE.MathUtils.clamp(labelWidth * 0.72, 2.8, 5.4))
+  northLabel.name = 'scene-north-label'
+  northLabel.position.copy(northOrigin).add(new THREE.Vector3(northLength * 1.08, Math.max(0.18, displayHeight * 0.025), 0))
+  northLabel.renderOrder = 41
+  group.add(northLabel)
+
+  sceneBoundsGuide = group
+  world.add(group)
+  world.userData.boundsHeight = displayHeight
+  world.userData.sceneHeight = sceneHeight
+  const summary = $('#sceneDimensionSummary')
+  if (summary) summary.textContent = `场景范围 X ${formatSceneDimension(sceneX)} × Z ${formatSceneDimension(sceneY)} × Y ${formatSceneDimension(sceneHeight)} m`
+}
+
+function cruisePointToWorld(point, config) {
+  const sceneX = Math.max(0.1, Number(config?.scene?.x) || 60)
+  const sceneY = Math.max(0.1, Number(config?.scene?.y) || 60)
+  const displayScale = world.userData.displayScale || Math.min(1, 45 / Math.max(sceneX, sceneY))
+  return new THREE.Vector3(
+    (Number(point.x) - sceneX * 0.5) * displayScale,
+    Math.max(0, Number(point.z)) * displayScale,
+    (Number(point.y) - sceneY * 0.5) * displayScale
+  )
+}
+
+function createCruiseAircraft(size, headingDegrees) {
+  const aircraft = new THREE.Group()
+  aircraft.name = 'cruise-aircraft'
+  aircraft.userData.kind = 'sensor'
+  aircraft.rotation.y = THREE.MathUtils.degToRad(headingDegrees + 90)
+
+  const white = new THREE.MeshStandardMaterial({ color: 0xf4f7fa, roughness: 0.42, metalness: 0.1, transparent: true, opacity: 0.86 })
+  const blue = new THREE.MeshStandardMaterial({ color: 0x83acd2, roughness: 0.46, metalness: 0.08, transparent: true, opacity: 0.84 })
+  const dark = new THREE.MeshStandardMaterial({ color: 0x718da6, roughness: 0.34, metalness: 0.14, transparent: true, opacity: 0.86 })
+  for (const item of [white, blue, dark]) item.userData.baseColor = item.color.getHex()
+
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(size * 0.085, size * 0.12, size * 1.18, 10), white)
+  body.rotation.x = Math.PI / 2
+  aircraft.add(body)
+  const nose = new THREE.Mesh(new THREE.ConeGeometry(size * 0.12, size * 0.34, 10), blue)
+  nose.rotation.x = Math.PI / 2
+  nose.position.z = size * 0.76
+  aircraft.add(nose)
+  const wings = new THREE.Mesh(new THREE.BoxGeometry(size * 1.45, size * 0.055, size * 0.34), blue)
+  wings.position.z = size * 0.04
+  aircraft.add(wings)
+  const tail = new THREE.Mesh(new THREE.BoxGeometry(size * 0.68, size * 0.045, size * 0.22), white)
+  tail.position.z = -size * 0.5
+  aircraft.add(tail)
+  const fin = new THREE.Mesh(new THREE.BoxGeometry(size * 0.055, size * 0.3, size * 0.25), blue)
+  fin.position.set(0, size * 0.15, -size * 0.48)
+  aircraft.add(fin)
+  const cockpit = new THREE.Mesh(new THREE.SphereGeometry(size * 0.105, 10, 6), dark)
+  cockpit.scale.set(0.85, 0.55, 1.35)
+  cockpit.position.set(0, size * 0.1, size * 0.28)
+  aircraft.add(cockpit)
+
+  // The aircraft's physical scale can be tiny in kilometre-scale scenes, so
+  // retain the 3-D model and add a camera-facing marker for legibility.
+  const markerCanvas = document.createElement('canvas')
+  markerCanvas.width = markerCanvas.height = 160
+  const markerContext = markerCanvas.getContext('2d')
+  markerContext.beginPath()
+  markerContext.arc(80, 80, 66, 0, Math.PI * 2)
+  markerContext.fillStyle = 'rgba(255, 255, 255, 0.76)'
+  markerContext.fill()
+  markerContext.lineWidth = 9
+  markerContext.strokeStyle = '#8aafd1'
+  markerContext.stroke()
+  markerContext.fillStyle = '#789fc2'
+  markerContext.font = '700 82px "Segoe UI Symbol", "Microsoft YaHei", sans-serif'
+  markerContext.textAlign = 'center'
+  markerContext.textBaseline = 'middle'
+  markerContext.fillText('✈', 80, 78)
+  const markerTexture = new THREE.CanvasTexture(markerCanvas)
+  markerTexture.colorSpace = THREE.SRGBColorSpace
+  const marker = new THREE.Sprite(new THREE.SpriteMaterial({ map: markerTexture, transparent: true, depthTest: false, depthWrite: false }))
+  marker.name = 'cruise-aircraft-marker'
+  marker.position.y = size * 0.68
+  marker.scale.set(size * 1.12, size * 1.12, 1)
+  marker.renderOrder = 38
+  aircraft.add(marker)
+  aircraft.traverse((child) => {
+    if (!child.isMesh) return
+    child.userData.kind = 'sensor'
+    child.castShadow = true
+    child.renderOrder = 35
+  })
+  return aircraft
+}
+
+function createObservationSatellite(size) {
+  const satellite = new THREE.Group()
+  satellite.name = 'parallel-observation-satellite'
+  satellite.userData.kind = 'sensor'
+
+  const bodyMaterial = new THREE.MeshStandardMaterial({ color: 0xeaf0f4, roughness: 0.42, metalness: 0.34, transparent: true, opacity: 0.86 })
+  const trimMaterial = new THREE.MeshStandardMaterial({ color: 0xd9bd83, roughness: 0.48, metalness: 0.3, transparent: true, opacity: 0.84 })
+  const panelMaterial = new THREE.MeshStandardMaterial({ color: 0x7197bc, roughness: 0.4, metalness: 0.2, transparent: true, opacity: 0.82 })
+  const cellMaterial = new THREE.LineBasicMaterial({ color: 0xa9c3dc, transparent: true, opacity: 0.58 })
+  for (const item of [bodyMaterial, trimMaterial, panelMaterial]) item.userData.baseColor = item.color.getHex()
+
+  const body = new THREE.Mesh(new THREE.BoxGeometry(size * 0.58, size * 0.48, size * 0.72), bodyMaterial)
+  satellite.add(body)
+  const trim = new THREE.Mesh(new THREE.BoxGeometry(size * 0.66, size * 0.12, size * 0.78), trimMaterial)
+  satellite.add(trim)
+
+  for (const side of [-1, 1]) {
+    const panel = new THREE.Mesh(new THREE.BoxGeometry(size * 1.05, size * 0.055, size * 0.58), panelMaterial)
+    panel.position.x = side * size * 0.86
+    satellite.add(panel)
+    const panelGrid = new THREE.GridHelper(size * 0.92, 4, 0x71a7e8, 0x71a7e8)
+    panelGrid.scale.z = 0.52
+    panelGrid.position.set(side * size * 0.86, size * 0.035, 0)
+    panelGrid.material = cellMaterial.clone()
+    satellite.add(panelGrid)
+  }
+
+  // The camera points along local -Y; the whole satellite is rotated toward
+  // the scene target after it has been positioned on the viewing hemisphere.
+  const cameraHousing = new THREE.Mesh(new THREE.CylinderGeometry(size * 0.18, size * 0.23, size * 0.32, 14), trimMaterial)
+  cameraHousing.position.y = -size * 0.38
+  satellite.add(cameraHousing)
+  const lens = new THREE.Mesh(new THREE.CylinderGeometry(size * 0.105, size * 0.105, size * 0.08, 16), new THREE.MeshStandardMaterial({ color: 0x71869a, roughness: 0.28, metalness: 0.4, transparent: true, opacity: 0.86 }))
+  lens.position.y = -size * 0.58
+  satellite.add(lens)
+
+  const antenna = new THREE.Mesh(new THREE.SphereGeometry(size * 0.24, 16, 8, 0, Math.PI * 2, 0, Math.PI * 0.48), bodyMaterial)
+  antenna.scale.y = 0.38
+  antenna.position.y = size * 0.38
+  satellite.add(antenna)
+  satellite.traverse((child) => {
+    if (!child.isMesh) return
+    child.userData.kind = 'sensor'
+    child.castShadow = true
+    child.renderOrder = 36
+  })
+  return satellite
+}
+
+function createParallelObservationVisualization(config) {
+  const sensor = config.sensor
+  const sceneX = Math.max(0.1, Number(config.scene?.x) || 60)
+  const sceneY = Math.max(0.1, Number(config.scene?.y) || 60)
+  const displayScale = world.userData.displayScale || Math.min(1, 45 / Math.max(sceneX, sceneY))
+  const extent = Math.max(sceneX, sceneY) * displayScale
+  const sceneHeight = Math.max(0, Number(config.scene?.height) || 0) * displayScale
+  const angles = sensorViewAngles(sensor, config.light?.azimuth)
+  const [zenithDegrees, azimuthDegrees] = angles[0] || [Number(sensor.vza) || 0, Number(sensor.vaa) || 0]
+  const zenith = THREE.MathUtils.degToRad(THREE.MathUtils.clamp(Number(zenithDegrees) || 0, 0, 89.999))
+  const azimuthValue = ((Number(azimuthDegrees) || 0) % 360 + 360) % 360
+  const azimuth = THREE.MathUtils.degToRad(azimuthValue)
+  const target = new THREE.Vector3(0, Math.max(0.04, sceneHeight * 0.32), 0)
+  const observationOut = new THREE.Vector3(
+    Math.sin(zenith) * Math.cos(azimuth),
+    Math.cos(zenith),
+    Math.sin(zenith) * Math.sin(azimuth)
+  ).normalize()
+  const orbitalRadius = THREE.MathUtils.clamp(extent * 0.63, 13, 31)
+  const satellitePosition = target.clone().addScaledVector(observationOut, orbitalRadius)
+  const satelliteSize = THREE.MathUtils.clamp(extent * 0.026, 0.55, 1.15)
+
+  const group = new THREE.Group()
+  group.name = 'sensor-parallel-visualization'
+  const satellite = createObservationSatellite(satelliteSize)
+  satellite.position.copy(satellitePosition)
+  satellite.quaternion.setFromUnitVectors(
+    new THREE.Vector3(0, -1, 0), target.clone().sub(satellitePosition).normalize()
+  )
+  group.add(satellite)
+
+  const viewArrow = new THREE.ArrowHelper(
+    observationOut.clone().negate(), satellitePosition,
+    orbitalRadius * 0.82, 0xc28aa6,
+    satelliteSize * 0.4, satelliteSize * 0.22
+  )
+  viewArrow.name = 'parallel-view-direction'
+  viewArrow.traverse((child) => {
+    child.renderOrder = 39
+    if (child.material) {
+      child.material.transparent = true
+      child.material.opacity = 0.62
+      child.material.depthTest = false
+      child.material.depthWrite = false
+    }
+  })
+  group.add(viewArrow)
+
+  const referenceGeometry = new THREE.BufferGeometry().setFromPoints([
+    target,
+    target.clone().add(new THREE.Vector3(0, orbitalRadius, 0))
+  ])
+  const reference = new THREE.Line(referenceGeometry, new THREE.LineDashedMaterial({
+    color: 0x82a9cd, dashSize: satelliteSize * 0.28, gapSize: satelliteSize * 0.18,
+    transparent: true, opacity: 0.5, depthTest: false, depthWrite: false
+  }))
+  reference.computeLineDistances()
+  reference.name = 'parallel-zenith-reference'
+  reference.renderOrder = 38
+  group.add(reference)
+
+  if (zenith > 0.002) {
+    const arcPoints = []
+    const arcRadius = orbitalRadius * 0.24
+    for (let index = 0; index <= 28; index += 1) {
+      const angle = zenith * index / 28
+      arcPoints.push(target.clone().add(new THREE.Vector3(
+        Math.sin(angle) * Math.cos(azimuth) * arcRadius,
+        Math.cos(angle) * arcRadius,
+        Math.sin(angle) * Math.sin(azimuth) * arcRadius
+      )))
+    }
+    const arc = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(arcPoints),
+      new THREE.LineBasicMaterial({ color: 0xc28aa6, transparent: true, opacity: 0.6, depthTest: false, depthWrite: false })
+    )
+    arc.name = 'parallel-view-zenith-arc'
+    arc.renderOrder = 40
+    group.add(arc)
+  }
+
+  const groundY = 0.075
+  const azimuthDirection = new THREE.Vector3(Math.cos(azimuth), 0, Math.sin(azimuth)).normalize()
+  const azimuthLength = THREE.MathUtils.clamp(extent * 0.2, 3.6, 8.5)
+  const azimuthArrow = new THREE.ArrowHelper(
+    azimuthDirection, new THREE.Vector3(0, groundY, 0), azimuthLength,
+    0x78a799, satelliteSize * 0.3, satelliteSize * 0.17
+  )
+  azimuthArrow.name = 'parallel-view-azimuth'
+  azimuthArrow.traverse((child) => {
+    child.renderOrder = 39
+    if (child.material) {
+      child.material.transparent = true
+      child.material.opacity = 0.62
+      child.material.depthTest = false
+      child.material.depthWrite = false
+    }
+  })
+  group.add(azimuthArrow)
+
+  const batchSuffix = angles.length > 1 ? ` · 代表方向 1/${angles.length}` : ''
+  const label = createDimensionLabel(
+    `卫星观测 Z${formatSceneDimension(zenithDegrees)}° A${formatSceneDimension(azimuthValue)}°${batchSuffix}`,
+    THREE.MathUtils.clamp(extent * 0.17, 4.2, 7.6)
+  )
+  label.name = 'parallel-observation-label'
+  label.position.copy(satellitePosition)
+  label.position.y += satelliteSize * 1.25
+  label.renderOrder = 42
+  group.add(label)
+
+  group.userData = { satellite, viewArrow, zenithDegrees, azimuthDegrees: azimuthValue }
+  return group
+}
+
+function createObservationFootprint() {
+  const group = new THREE.Group()
+  group.name = 'sensor-observation-footprint'
+
+  const fillGeometry = new THREE.BufferGeometry()
+  fillGeometry.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(12), 3))
+  fillGeometry.setIndex([0, 1, 2, 0, 2, 3])
+  const fill = new THREE.Mesh(fillGeometry, new THREE.MeshBasicMaterial({
+    color: 0xc28aa6,
+    transparent: true,
+    opacity: 0.08,
+    side: THREE.DoubleSide,
+    depthWrite: false
+  }))
+  fill.renderOrder = 32
+  group.add(fill)
+
+  const outlineGeometry = new THREE.BufferGeometry()
+  outlineGeometry.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(15), 3))
+  const outline = new THREE.Line(outlineGeometry, new THREE.LineBasicMaterial({
+    color: 0xc28aa6,
+    transparent: true,
+    opacity: 0.62,
+    depthTest: false,
+    depthWrite: false
+  }))
+  outline.renderOrder = 37
+  group.add(outline)
+
+  const coneGeometry = new THREE.BufferGeometry()
+  coneGeometry.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(24), 3))
+  const cone = new THREE.LineSegments(coneGeometry, new THREE.LineBasicMaterial({
+    color: 0xc28aa6,
+    transparent: true,
+    opacity: 0.36,
+    depthTest: false,
+    depthWrite: false
+  }))
+  cone.renderOrder = 36
+  group.add(cone)
+
+  return { group, fillGeometry, outlineGeometry, coneGeometry, label: null }
+}
+
+function updateObservationFootprint(data, origin, headingDegrees) {
+  const footprint = data.footprint
+  if (!footprint) return
+  const groundY = 0.045
+  const verticalHalfFov = THREE.MathUtils.degToRad(THREE.MathUtils.clamp(data.verticalFov, 0.1, 120) * 0.5)
+  const horizontalHalfFov = Math.atan(Math.tan(verticalHalfFov) * data.aspect)
+  const viewAzimuth = THREE.MathUtils.degToRad(headingDegrees + data.relativeVaa)
+  const forward = new THREE.Vector3(
+    Math.sin(data.zenith) * Math.cos(viewAzimuth),
+    -Math.cos(data.zenith),
+    Math.sin(data.zenith) * Math.sin(viewAzimuth)
+  ).normalize()
+  const right = new THREE.Vector3(-Math.sin(viewAzimuth), 0, Math.cos(viewAzimuth))
+  const up = right.clone().cross(forward).normalize()
+  const halfSceneWidth = data.sceneX * data.displayScale * 0.5
+  const halfSceneDepth = data.sceneY * data.displayScale * 0.5
+  const farDistance = Math.max(halfSceneWidth, halfSceneDepth) * 4
+  const corners = [[-1, 1], [1, 1], [1, -1], [-1, -1]].map(([horizontal, vertical]) => {
+    const ray = forward.clone()
+      .addScaledVector(right, horizontal * Math.tan(horizontalHalfFov))
+      .addScaledVector(up, vertical * Math.tan(verticalHalfFov))
+      .normalize()
+    const distance = ray.y < -0.0001
+      ? Math.max(0, (origin.y - groundY) / -ray.y)
+      : farDistance
+    const point = origin.clone().addScaledVector(ray, distance)
+    point.set(
+      THREE.MathUtils.clamp(point.x, -halfSceneWidth, halfSceneWidth),
+      groundY,
+      THREE.MathUtils.clamp(point.z, -halfSceneDepth, halfSceneDepth)
+    )
+    return point
+  })
+
+  const fillPositions = footprint.fillGeometry.getAttribute('position')
+  corners.forEach((point, index) => fillPositions.setXYZ(index, point.x, point.y, point.z))
+  fillPositions.needsUpdate = true
+
+  const outlinePositions = footprint.outlineGeometry.getAttribute('position')
+  ;[...corners, corners[0]].forEach((point, index) => outlinePositions.setXYZ(index, point.x, point.y, point.z))
+  outlinePositions.needsUpdate = true
+
+  const conePositions = footprint.coneGeometry.getAttribute('position')
+  corners.forEach((point, index) => {
+    conePositions.setXYZ(index * 2, origin.x, origin.y, origin.z)
+    conePositions.setXYZ(index * 2 + 1, point.x, point.y, point.z)
+  })
+  conePositions.needsUpdate = true
+
+  const center = corners.reduce((result, point) => result.add(point), new THREE.Vector3()).multiplyScalar(0.25)
+  if (!footprint.label) {
+    const width = (corners[0].distanceTo(corners[1]) + corners[3].distanceTo(corners[2])) * 0.5 / data.displayScale
+    const length = (corners[0].distanceTo(corners[3]) + corners[1].distanceTo(corners[2])) * 0.5 / data.displayScale
+    const labelWidth = THREE.MathUtils.clamp(Math.max(data.sceneX, data.sceneY) * data.displayScale * 0.18, 3.2, 8)
+    footprint.label = createDimensionLabel(`视场约 ${formatSceneDimension(width)} × ${formatSceneDimension(length)} m`, labelWidth)
+    footprint.label.name = 'sensor-observation-footprint-label'
+    footprint.label.renderOrder = 39
+    footprint.group.add(footprint.label)
+  }
+  footprint.label.position.copy(center)
+  footprint.label.position.y = groundY + Math.max(0.12, data.aircraftSize * 0.14)
+}
+
+function updateCruiseVisualization(config) {
+  if (cruiseVisualization) {
+    world.remove(cruiseVisualization)
+    disposeObject(cruiseVisualization)
+    cruiseVisualization = null
+  }
+  const sensor = config?.sensor
+  if (!sensor) return
+  if (sensor.projection !== 'perspective') {
+    cruiseVisualization = createParallelObservationVisualization(config)
+    world.add(cruiseVisualization)
+    return
+  }
+
+  const cruiseEnabled = Boolean(sensor.cruiseEnabled)
+  const fixedHeading = ((Number(sensor.vaa) || 0) % 360 + 360) % 360
+  const positions = cruiseEnabled
+    ? sensorCruisePositions(sensor, config.scene)
+    : [{ x: Number(sensor.positionX), y: Number(sensor.positionY), z: Number(sensor.height), heading: fixedHeading }]
+  if (!positions.length) return
+  const sceneX = Math.max(0.1, Number(config.scene?.x) || 60)
+  const sceneY = Math.max(0.1, Number(config.scene?.y) || 60)
+  const displayScale = world.userData.displayScale || Math.min(1, 45 / Math.max(sceneX, sceneY))
+  const worldPoints = positions.map((point) => cruisePointToWorld(point, config))
+  const group = new THREE.Group()
+  group.name = 'sensor-perspective-visualization'
+
+  const segmentVertices = []
+  for (let index = 1; cruiseEnabled && index < positions.length; index += 1) {
+    const previous = positions[index - 1]
+    const current = positions[index]
+    if (Math.abs(current.x - previous.x) > sceneX * 0.5 || Math.abs(current.y - previous.y) > sceneY * 0.5) continue
+    segmentVertices.push(...worldPoints[index - 1].toArray(), ...worldPoints[index].toArray())
+  }
+  if (segmentVertices.length) {
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(segmentVertices, 3))
+    const line = new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({ color: 0x82a9cd, transparent: true, opacity: 0.58, depthTest: false, depthWrite: false }))
+    line.renderOrder = 33
+    group.add(line)
+  }
+
+  if (cruiseEnabled) {
+    const maximumMarkers = 512
+    const markerStep = Math.max(1, Math.ceil(worldPoints.length / maximumMarkers))
+    const markerPoints = worldPoints.filter((_, index) => index % markerStep === 0 || index === worldPoints.length - 1)
+    const markerGeometry = new THREE.BufferGeometry().setFromPoints(markerPoints)
+    const markers = new THREE.Points(markerGeometry, new THREE.PointsMaterial({ color: 0xd9ad79, transparent: true, opacity: 0.68, size: 4.5, sizeAttenuation: false, depthTest: false, depthWrite: false }))
+    markers.renderOrder = 34
+    group.add(markers)
+  }
+
+  const aircraftSize = THREE.MathUtils.clamp(Math.max(sceneX, sceneY) * displayScale * 0.024, 0.52, 1.25)
+  const aircraft = createCruiseAircraft(aircraftSize, Number(positions[0].heading) || 0)
+  aircraft.position.copy(worldPoints[0])
+  group.add(aircraft)
+
+  const zenith = THREE.MathUtils.degToRad(THREE.MathUtils.clamp(Number(sensor.vza) || 0, 0, 89.999))
+  const relativeVaa = cruiseEnabled ? Number(sensor.vaa) || 0 : 0
+  const relativeAzimuth = Number(positions[0].heading) + relativeVaa
+  const azimuth = THREE.MathUtils.degToRad(relativeAzimuth || 0)
+  const viewDirection = new THREE.Vector3(
+    Math.sin(zenith) * Math.cos(azimuth),
+    -Math.cos(zenith),
+    Math.sin(zenith) * Math.sin(azimuth)
+  ).normalize()
+  const heightDisplay = Math.max(0.01, Number(sensor.height) * displayScale)
+  const arrowLength = THREE.MathUtils.clamp(heightDisplay / Math.max(0.12, Math.cos(zenith)) * 0.7, aircraftSize * 1.1, aircraftSize * 4)
+  const viewArrow = new THREE.ArrowHelper(viewDirection, worldPoints[0], arrowLength, 0xc28aa6, aircraftSize * 0.28, aircraftSize * 0.16)
+  viewArrow.traverse((child) => { child.renderOrder = 36; if (child.material) { child.material.transparent = true; child.material.opacity = 0.62; child.material.depthTest = false; child.material.depthWrite = false } })
+  group.add(viewArrow)
+
+  const footprint = createObservationFootprint()
+  group.add(footprint.group)
+  group.userData = {
+    positions,
+    worldPoints,
+    aircraft,
+    viewArrow,
+    sceneX,
+    sceneY,
+    displayScale,
+    aircraftSize,
+    zenith,
+    relativeVaa,
+    verticalFov: Number(sensor.fov) || 60,
+    aspect: Math.max(0.01, Number(sensor.x) || 1) / Math.max(0.01, Number(sensor.y) || 1),
+    footprint,
+    startedAt: performance.now(),
+    duration: THREE.MathUtils.clamp(Math.max(1, positions.length - 1) * 0.5, 2.5, 12)
+  }
+  updateObservationFootprint(group.userData, worldPoints[0], Number(positions[0].heading) || 0)
+  cruiseVisualization = group
+  world.add(group)
+}
+
+function updateCruiseAnimation(now) {
+  const data = cruiseVisualization?.userData
+  if (!data?.aircraft || !data.positions?.length) return
+  const count = data.positions.length
+  let point = data.positions[0]
+  let currentHeading = Number(point.heading) || 0
+  if (count > 1) {
+    const startedAt = Number.isFinite(Number(data.startedAt)) ? Number(data.startedAt) : now
+    const duration = Math.max(0.001, Number(data.duration) || 1)
+    const elapsedSeconds = Math.max(0, now - startedAt) / 1000
+    const progress = (elapsedSeconds % duration) / duration * (count - 1)
+    const index = Math.max(0, Math.min(count - 2, Math.floor(progress)))
+    const fraction = progress - index
+    const start = data.positions[index] || data.positions[0]
+    const end = data.positions[index + 1] || start
+    currentHeading = Number(start.heading) || 0
+    const wrappedLerp = (a, b, extent) => {
+      let delta = b - a
+      if (delta > extent * 0.5) delta -= extent
+      if (delta < -extent * 0.5) delta += extent
+      return ((a + delta * fraction) % extent + extent) % extent
+    }
+    point = {
+      x: wrappedLerp(start.x, end.x, data.sceneX),
+      y: wrappedLerp(start.y, end.y, data.sceneY),
+      z: THREE.MathUtils.lerp(start.z, end.z, fraction)
+    }
+  }
+  const worldPoint = cruisePointToWorld(point, state.config)
+  if (count > 1) worldPoint.y += Math.sin(now * 0.004) * data.aircraftSize * 0.035
+  data.aircraft.position.copy(worldPoint)
+  data.aircraft.rotation.y = THREE.MathUtils.degToRad(currentHeading + 90)
+  data.viewArrow.position.copy(worldPoint)
+  const viewAzimuth = THREE.MathUtils.degToRad(currentHeading + data.relativeVaa)
+  data.viewArrow.setDirection(new THREE.Vector3(
+    Math.sin(data.zenith) * Math.cos(viewAzimuth),
+    -Math.cos(data.zenith),
+    Math.sin(data.zenith) * Math.sin(viewAzimuth)
+  ).normalize())
+  updateObservationFootprint(data, worldPoint, currentHeading)
 }
 
 function material(color, roughness = .82) {
-  const result = new THREE.MeshStandardMaterial({ color, roughness, metalness: .02 })
+  const result = new THREE.MeshStandardMaterial({
+    color,
+    roughness,
+    metalness: .02,
+    transparent: false,
+    opacity: 1,
+    depthTest: true,
+    depthWrite: true,
+    alphaTest: 0,
+    alphaToCoverage: false
+  })
   result.userData.baseColor = result.color.getHex()
   return result
 }
 
 function generateWorld(config = defaultConfig()) {
   clearWorld()
-  const sx = Math.max(4, Math.min(config.scene.x || 60, 180))
-  const sz = Math.max(4, Math.min(config.scene.y || 45, 180))
+  const sx = Math.max(0.1, Number(config.scene.x) || 60)
+  const sz = Math.max(0.1, Number(config.scene.y) || 60)
   const displayScale = Math.min(1, 45 / Math.max(sx, sz))
   const width = sx * displayScale
   const depth = sz * displayScale
   world.userData.extent = Math.max(width, depth)
-  if (!state.inputPath) {
-    updateStats()
-    return
-  }
-  const groundGeo = new THREE.PlaneGeometry(width, depth, 36, 36)
+  world.userData.displayScale = displayScale
+  const dem = config.scene.terrain ? config.scene.demInfo : null
+  const demWidth = Math.max(2, Math.round(Number(dem?.terrainWidth) || 0))
+  const demHeight = Math.max(2, Math.round(Number(dem?.terrainHeight) || 0))
+  const demValues = Array.isArray(dem?.terrainValues) ? dem.terrainValues : []
+  const hasDemSurface = demValues.length === demWidth * demHeight
+  const sceneVoxel = Math.max(.1, Number(config.scene.voxel) || 1)
+  const requestedColumns = Math.max(2, Math.ceil(sx / sceneVoxel) + 1)
+  const requestedRows = Math.max(2, Math.ceil(sz / sceneVoxel) + 1)
+  const previewScale = Math.min(1, 128 / Math.max(requestedColumns, requestedRows))
+  const terrainColumns = Math.max(2, Math.round(requestedColumns * previewScale))
+  const terrainRows = Math.max(2, Math.round(requestedRows * previewScale))
+  const groundGeo = hasDemSurface
+    ? new THREE.PlaneGeometry(width, depth, terrainColumns - 1, terrainRows - 1)
+    : new THREE.PlaneGeometry(width, depth, 36, 36)
   const positions = groundGeo.attributes.position
+  const baseElevation = Number.isFinite(Number(dem?.minimum)) ? Number(dem.minimum) : 0
+  const demSample = (u, v) => {
+    const imageX = THREE.MathUtils.clamp(u, 0, 1) * (demWidth - 1)
+    const imageY = THREE.MathUtils.clamp(v, 0, 1) * (demHeight - 1)
+    const x0 = Math.floor(imageX), y0 = Math.floor(imageY)
+    const x1 = Math.min(demWidth - 1, x0 + 1), y1 = Math.min(demHeight - 1, y0 + 1)
+    const at = (x, y) => {
+      const source = demValues[y * demWidth + x]
+      const value = source == null ? Number.NaN : Number(source)
+      return Number.isFinite(value) ? value : baseElevation
+    }
+    const top = THREE.MathUtils.lerp(at(x0, y0), at(x1, y0), imageX - x0)
+    const bottom = THREE.MathUtils.lerp(at(x0, y1), at(x1, y1), imageX - x0)
+    return THREE.MathUtils.lerp(top, bottom, imageY - y0)
+  }
   for (let i = 0; i < positions.count; i++) {
-    const x = positions.getX(i), y = positions.getY(i)
-    const edge = Math.min(1, Math.max(0, (1 - Math.abs(x) / (width / 2)) * (1 - Math.abs(y) / (depth / 2)) * 5))
-    const height = config.scene.terrain ? (Math.sin(x * .35) * .16 + Math.cos(y * .27) * .13 + seeded(i) * .06) * edge : 0
-    positions.setZ(i, height)
+    // After the -90° X rotation, world +X is north and world +Z is east.
+    // GeoTIFF columns grow eastward and row zero is the northern edge.
+    const u = depth > 0 ? .5 - positions.getY(i) / depth : .5
+    const v = width > 0 ? .5 - positions.getX(i) / width : .5
+    const sourceElevation = hasDemSurface ? demSample(u, v) : baseElevation
+    const elevation = Number.isFinite(sourceElevation) ? sourceElevation : baseElevation
+    positions.setZ(i, hasDemSurface ? Math.max(0, elevation - baseElevation) * displayScale : 0)
   }
   groundGeo.computeVertexNormals()
   const ground = new THREE.Mesh(groundGeo, material(0xcbd8e6, .96))
@@ -386,14 +1248,85 @@ function generateWorld(config = defaultConfig()) {
   grid.material.transparent = true
   world.add(grid)
 
+  updateSceneBoundsGuide(config)
+  updateCruiseVisualization(config)
   applyViewStyle(currentStyle)
   updateStats()
 }
 
 function updateSun(config) {
-  const zenith = THREE.MathUtils.degToRad(config.light.zenith), azimuth = THREE.MathUtils.degToRad(config.light.azimuth), radius = 45
-  sun.position.set(Math.sin(zenith) * Math.sin(azimuth) * radius, Math.cos(zenith) * radius, Math.sin(zenith) * Math.cos(azimuth) * radius)
+  const zenithDegrees = THREE.MathUtils.clamp(Number(config.light.zenith) || 0, 0, 90)
+  const azimuthDegrees = ((Number(config.light.azimuth) || 0) % 360 + 360) % 360
+  const zenith = THREE.MathUtils.degToRad(zenithDegrees)
+  const azimuth = THREE.MathUtils.degToRad(azimuthDegrees)
+  const lightDirection = new THREE.Vector3(
+    Math.sin(zenith) * Math.cos(azimuth),
+    Math.cos(zenith),
+    Math.sin(zenith) * Math.sin(azimuth)
+  ).normalize()
+  sun.position.copy(lightDirection).multiplyScalar(45)
   sun.intensity = 1.2 + config.light.direct * 2.5
+
+  if (sunVisualization) {
+    scene.remove(sunVisualization)
+    disposeObject(sunVisualization)
+  }
+  const extent = Math.max(12, Number(world.userData.extent) || 45)
+  const sceneHeight = Math.max(0, Number(world.userData.boundsHeight) || 0)
+  const radius = THREE.MathUtils.clamp(extent * 0.54, 11, 28)
+  const center = new THREE.Vector3(0, sceneHeight * 0.35, 0)
+  const sunPosition = center.clone().addScaledVector(lightDirection, radius)
+  const group = new THREE.Group()
+  group.name = 'sun-direction-visualization'
+
+  const sunSize = THREE.MathUtils.clamp(extent * 0.024, 0.45, 1.05)
+  const sphere = new THREE.Mesh(
+    new THREE.SphereGeometry(sunSize, 24, 14),
+    new THREE.MeshBasicMaterial({ color: 0xf1d57c, transparent: true, opacity: 0.84, depthTest: false, depthWrite: false })
+  )
+  sphere.position.copy(sunPosition)
+  sphere.renderOrder = 44
+  group.add(sphere)
+
+  const glowCanvas = document.createElement('canvas')
+  glowCanvas.width = glowCanvas.height = 192
+  const glowContext = glowCanvas.getContext('2d')
+  const glow = glowContext.createRadialGradient(96, 96, 18, 96, 96, 92)
+  glow.addColorStop(0, 'rgba(255, 248, 205, 0.74)')
+  glow.addColorStop(0.34, 'rgba(244, 215, 132, 0.44)')
+  glow.addColorStop(1, 'rgba(237, 196, 101, 0)')
+  glowContext.fillStyle = glow
+  glowContext.fillRect(0, 0, 192, 192)
+  const glowTexture = new THREE.CanvasTexture(glowCanvas)
+  glowTexture.colorSpace = THREE.SRGBColorSpace
+  const glowSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTexture, transparent: true, depthTest: false, depthWrite: false }))
+  glowSprite.position.copy(sunPosition)
+  glowSprite.scale.setScalar(sunSize * 3.5)
+  glowSprite.renderOrder = 43
+  group.add(glowSprite)
+
+  const incomingDirection = center.clone().sub(sunPosition).normalize()
+  const arrow = new THREE.ArrowHelper(incomingDirection, sunPosition, radius * 0.72, 0xd8ba73, sunSize * 0.76, sunSize * 0.4)
+  arrow.name = 'sun-incoming-direction'
+  arrow.traverse((child) => {
+    child.renderOrder = 42
+    if (child.material) {
+      child.material.transparent = true
+      child.material.opacity = 0.58
+      child.material.depthTest = false
+      child.material.depthWrite = false
+    }
+  })
+  group.add(arrow)
+
+  const label = createDimensionLabel(`太阳 Z${formatSceneDimension(zenithDegrees)}° A${formatSceneDimension(azimuthDegrees)}°`, THREE.MathUtils.clamp(extent * 0.11, 3.2, 5.4))
+  label.position.copy(sunPosition)
+  label.position.y += sunSize * 1.75
+  label.renderOrder = 45
+  group.add(label)
+
+  sunVisualization = group
+  scene.add(group)
 }
 
 function applyViewStyle(style) {
@@ -414,8 +1347,9 @@ function applyViewStyle(style) {
 
 function fitCamera() {
   const extent = world.userData.extent || 20
-  camera.position.set(extent * .68, extent * .56, extent * .74)
-  controls.target.set(0, 1.3, 0)
+  const height = world.userData.boundsHeight || 2
+  camera.position.set(extent * 1.04, Math.max(extent * .86, height * 1.35), extent * 1.14)
+  controls.target.set(0, Math.min(height * .36, extent * .25), 0)
   controls.update()
 }
 
@@ -435,10 +1369,12 @@ function resize() {
   camera.updateProjectionMatrix()
 }
 new ResizeObserver(resize).observe(viewport)
-let frameCount = 0, lastFps = performance.now()
+let frameCount = 0, lastFps = performance.now(), lastAnimationTime = performance.now()
 function animate(now) {
   requestAnimationFrame(animate)
-  controls.update(); renderer.render(scene, camera); renderResultViewer(); frameCount++
+  const deltaSeconds = Math.min(.1, Math.max(0, (now - lastAnimationTime) / 1000))
+  lastAnimationTime = now
+  controls.update(); updateSceneDynamics(world, deltaSeconds, state.config); updateCruiseAnimation(now); renderer.render(scene, camera); renderResultViewer(); frameCount++
   if (now - lastFps > 750) {
     $('#fps').textContent = `${Math.round(frameCount * 1000 / (now - lastFps))} FPS`
     frameCount = 0; lastFps = now
@@ -447,23 +1383,37 @@ function animate(now) {
 requestAnimationFrame(animate)
 
 // 属性面板
-const panelTitles = { scene: '场景', light: '太阳与天空', sensor: '传感器', objects: '场景对象', materials: '材质属性', meteorology: '气象驱动', simulation: '仿真模拟' }
+const panelTitles = { scene: '场景', light: '太阳与天空', sensor: '传感器', objects: '场景对象', materials: '材质属性', atmosphere: '大气影响', meteorology: '气象驱动', fluid: '流体力学', simulation: '仿真模拟' }
 function inputUnit(id, value, unit, attrs = '') { return `<div class="input-with-unit"><input class="input" id="${id}" value="${escapeHtml(value)}" ${attrs}><span>${unit}</span></div>` }
-function field(label, content) { return `<div class="field"><label>${label}</label>${content}</div>` }
-function switchRow(label, id, on) { return `<div class="switch-row"><span>${label}</span><button class="switch ${on ? 'on' : ''}" id="${id}" role="switch" aria-checked="${on}"></button></div>` }
-function builtinNotice() { return state.inputPath ? '' : '<div class="property-group"><div class="notice">尚未打开工程。请点击“打开工程”，选择已有工程的 project.json 或 Input.xml。</div></div>' }
+function field(label, content) { return `<div class="field"><label>${t(label)}</label>${content}</div>` }
+function switchRow(label, id, on, disabled = false) { return `<div class="switch-row"><span>${t(label)}</span><button type="button" class="switch ${on ? 'on' : ''}" id="${id}" role="switch" aria-checked="${on}" ${disabled ? 'disabled' : ''}></button></div>` }
+function builtinNotice() { return state.inputPath ? '' : '<div class="property-group"><div class="notice">尚未打开工程。请点击“打开工程”，选择已有工程的 project.json。</div></div>' }
 
-function libraryCard(title, subtitle, values) {
+function libraryCard(title, subtitle, values, kind, index) {
   const detail = values.map(([key, value]) => `${key}: ${value}`).join('；')
   const search = `${title} ${subtitle} ${detail}`.toLowerCase()
-  return `<div class="library-card" data-library-search="${escapeHtml(search)}" title="${escapeHtml(`${title} · ${subtitle}\n${detail}`)}"><strong>${escapeHtml(title)}</strong><small>${escapeHtml(subtitle)}</small><div class="library-values">${values.map(([key, value]) => `<span><i>${escapeHtml(key)}</i>${escapeHtml(value)}</span>`).join('')}</div></div>`
+  return `<button class="library-card" type="button" data-library-search="${escapeHtml(search)}" data-preset-kind="${kind}" data-preset-index="${index}" title="点击修改 · ${escapeHtml(`${title} · ${subtitle}\n${detail}`)}"><strong>${escapeHtml(title)}</strong><small>${escapeHtml(subtitle)}</small><div class="library-values">${values.map(([key, value]) => `<span><i>${escapeHtml(key)}</i>${escapeHtml(value)}</span>`).join('')}</div></button>`
 }
 
 function physicalValues(item) {
   const p = item.params || {}
+  if (item.energyModel === 'wood') return [['模型', '木质固体'], ['比热容', p.cs], ['密度', p.rhos], ['导热率', p.lambdas], ['对流倍率', p.convectiveScale], ['初温', `${p.Tsoil} ℃`], ['蒸腾', '关闭']]
   if (item.type === 'Vegetation') return [['Vcmax', p.Vcmax], ['BallBerry', p.BallBerry], ['kV', p.kV], ['Rd', p.Rdparam], ['Tyear', p.Tyear], ['胁迫', p.stressfactor]]
-  if (item.type === 'Water') return [['rss', p.rss], ['热容', p.heatCapacity], ['混合深度', p.mixingDepth], ['蒸发系数', p.evaporationCoefficient]]
+  if (item.type === 'Water') return [['辐射模型', Number(p.brdfModel) === 1 ? 'Cox–Munk' : 'Lambert'], ['折射率', p.refractiveIndex], ['坡度方差', Number(p.slopeVariance) > 0 ? p.slopeVariance : '随风速'], ['漫反射比例', p.diffuseFraction], ['rss', p.rss], ['热容', p.heatCapacity], ['混合深度', p.mixingDepth], ['蒸发系数', p.evaporationCoefficient]]
   return [['rss', p.rss], ['热容', p.cs], ['密度', p.rhos], ['导热率', p.lambdas], ['SMC', p.SMC], ['饱和量', p.Satwater]]
+}
+
+function canopyValues(item) {
+  const labels = { canopy: '混沌介质', rigid: '刚体', fire: '火焰' }
+  if (item.structureType === 'fire') return [
+    ['结构', labels[item.structureType]], ['消光', `${item.extinction} m⁻¹`], ['散射率', item.scatteringAlbedo],
+    ['非对称', item.asymmetry], ['温度', `${item.fixedTemperature} K`], ['发射倍率', item.emissionScale]
+  ]
+  return [
+    ['结构', labels[item.structureType] || '混沌介质'],
+    ['LAI', item.lai], ['LAD', item.density], ['高度', `${item.hc} m`],
+    ['G', item.G], ['热点', item.hspot]
+  ]
 }
 
 function libraryHeading(title, count, kind) {
@@ -471,88 +1421,261 @@ function libraryHeading(title, count, kind) {
 }
 
 function materialLibraryHtml(c) {
-  const spectra = c.spectra.map((item) => libraryCard(item.label || item.name, `${item.name} · ${item.model}`, [['反射率', item.reflectance], ['透射率', item.transmittance], ['TIR反射', item.refTir]])).join('')
-  const thermals = c.thermals.map((item) => libraryCard(item.label || item.name, item.name, [['阳面', `${item.sunlitTemperature} K`], ['阴面', `${item.shadedTemperature} K`]])).join('')
-  const types = { Vegetation: '植被生理生化', Soil: '土壤表面物化', Water: '水体物性' }
-  const materials = c.materials.map((item) => libraryCard(item.label || item.name, `${item.name} · ${types[item.type] || item.type}`, physicalValues(item))).join('')
-  return `<div class="property-group">${libraryHeading('光谱特征', c.spectra.length, 'spectrum')}<div class="library-list" data-library-list="spectrum">${spectra}</div></div><div class="property-group">${libraryHeading('温度特征', c.thermals.length, 'thermal')}<div class="library-list" data-library-list="thermal">${thermals}</div></div><div class="property-group">${libraryHeading('物化属性', c.materials.length, 'physical')}<div class="library-list" data-library-list="physical">${materials}</div></div><div class="property-group"><div class="notice">这里是当前工程的属性预设库，用来给各场景 OBJ 提供光谱、温度和物化属性选项；在此新增预设不会自动创建场景对象。</div></div>`
+  const spectra = c.spectra.map((item, index) => libraryCard(item.label || item.name, `${item.name} · ${item.model}`, [['反射率', item.reflectance], ['透射率', item.transmittance], ['TIR反射', item.refTir]], 'spectrum', index)).join('')
+  const thermals = c.thermals.map((item, index) => libraryCard(item.label || item.name, item.name, [['阳面', `${item.sunlitTemperature} K`], ['阴面', `${item.shadedTemperature} K`]], 'thermal', index)).join('')
+  const canopies = c.canopies.map((item, index) => libraryCard(item.label || item.name, item.name, canopyValues(item), 'canopy', index)).join('')
+  const types = { Vegetation: '植被生理生化', Soil: '土壤表面物化', Water: '水体物性', Ship: '船舶表面物化' }
+  const materials = c.materials.map((item, index) => libraryCard(item.label || item.name, `${item.name} · ${item.energyModel === 'wood' ? '木质固体热平衡' : (types[item.type] || item.type)}`, physicalValues(item), 'physical', index)).join('')
+  return `<div class="property-group">${libraryHeading('光谱特征', c.spectra.length, 'spectrum')}<div class="library-list" data-library-list="spectrum">${spectra}</div></div><div class="property-group">${libraryHeading('温度特征', c.thermals.length, 'thermal')}<div class="library-list" data-library-list="thermal">${thermals}</div></div><div class="property-group">${libraryHeading('结构参数', c.canopies.length, 'canopy')}<div class="library-list" data-library-list="canopy">${canopies}</div></div><div class="property-group">${libraryHeading('物化属性', c.materials.length, 'physical')}<div class="library-list" data-library-list="physical">${materials}</div></div><div class="property-group"><div class="notice">点击任一属性可直接修改；保存后同步更新当前工程的 project.json。</div></div>`
 }
 
 function renderInspector() {
   const c = state.config || defaultConfig()
-  $('#inspectorTitle').textContent = panelTitles[state.panel]
-  const voxelSize = Math.max(.1, Number(c.scene.voxel) || 1)
-  const voxelShape = [c.scene.x, c.scene.y, c.scene.height].map((size) => Math.ceil(Number(size) / voxelSize))
-  const voxelCount = voxelShape.reduce((total, size) => total * size, 1)
-  const voxelMode = state.mode === 'eVoxelRT' || state.mode === 'eVoxelEB'
-  const voxelTarget = state.mode === 'eFacetEB' ? 'eVoxelEB' : 'eVoxelRT'
-  const voxelTargetLabel = voxelTarget === 'eVoxelEB' ? '体元能量平衡' : '体元辐射传输'
+  $('#inspectorTitle').textContent = t(panelTitles[state.panel])
   const background = c.scene.background || {}
-  const backgroundPanel = `<div class="property-group"><h3>背景属性（均质地表）</h3>${field('光谱属性', `<select class="select" id="backgroundSpectral">${bindingOptionList(c.spectra, background.spectralName, 'soil')}</select>`)}${field('温度属性', `<select class="select" id="backgroundThermal">${bindingOptionList(c.thermals, background.thermalName, 'soil_temperature')}</select>`)}${field('物化属性', `<select class="select" id="backgroundMaterial">${bindingOptionList(c.materials, background.materialName, 'soilset')}</select>`)}<div class="notice">土壤等均质背景的属性在此设置。</div></div>`
-  const voxelChannel = `<div class="property-group"><h3>面元 → 体元通道</h3><div class="metric-grid"><div class="metric"><strong>${voxelShape.join(' × ')}</strong><small>体元网格</small></div><div class="metric"><strong>${voxelCount.toLocaleString('zh-CN')}</strong><small>包围盒体元数</small></div></div><div class="notice">保留 OBJ、材质和位置；当前按对象类型、包围盒尺寸与分布位置建立稀疏体元。</div><button class="button ghost" id="facetToVoxelAction" style="width:100%;justify-content:center;margin-top:9px" ${voxelMode ? 'disabled' : ''}>${voxelMode ? '体元通道已启用' : `转换到${voxelTargetLabel}`}</button></div>`
+  const dem = c.scene.demInfo
+  const demNumber = (value, digits = 3) => Number.isFinite(Number(value)) ? Number(value).toLocaleString(getLocale(), { maximumFractionDigits: digits }) : '—'
+  const demPixelSize = dem ? `${demNumber(dem.pixelSizeX)} × ${demNumber(dem.pixelSizeY)} ${dem.unit || ''}`.trim() : '—'
+  const demReliefWarning = dem && Number(dem.relief) > Number(c.scene.height)
+    ? `<div class="notice warning">高差 ${demNumber(dem.relief)} m 超过场景最大高度 ${demNumber(c.scene.height)} m，请增大最大高度。</div>` : ''
+  const demMetadata = dem ? `<div class="metric-grid"><div class="metric"><strong>${dem.width} × ${dem.height}</strong><small>栅格列 × 行</small></div><div class="metric"><strong>${escapeHtml(demPixelSize)}</strong><small>像元大小</small></div><div class="metric"><strong>${demNumber(dem.minimum)}–${demNumber(dem.maximum)} m</strong><small>最低–最高高程</small></div><div class="metric"><strong>${dem.noData == null ? '未设置' : demNumber(dem.noData)}</strong><small>NoData</small></div></div><div class="notice">整幅 DEM 自动双线性拉伸至 ${demNumber(c.scene.x)} × ${demNumber(c.scene.y)} m 场景范围。</div>${demReliefWarning}` : ''
+  const angularStrength = Math.max(0, Math.min(1, Number(background.angularEffectStrength ?? 0.5)))
+  const backgroundPanel = `<div class="property-group"><h3>背景属性</h3>${field('光谱属性', `<select class="select" id="backgroundSpectral">${bindingOptionList(c.spectra, background.spectralName, 'soil')}</select>`)}${field('温度属性', `<select class="select" id="backgroundThermal">${bindingOptionList(c.thermals, background.thermalName, 'soil_temperature')}</select>`)}${field('物化属性', `<select class="select" id="backgroundMaterial">${bindingOptionList(c.materials, background.materialName, 'soilset')}</select>`)}</div><div class="property-group"><h3>背景异质性</h3>${switchRow('启用 Hapke 角度效应', 'backgroundHeterogeneitySwitch', Boolean(background.heterogeneityEnabled))}${field('结构强度', `<div class="range-wrap"><input class="range" id="backgroundAngularStrength" type="range" min="0" max="1" step="0.01" value="${angularStrength}" ${background.heterogeneityEnabled ? '' : 'disabled'}><span class="range-value" id="backgroundAngularStrengthValue">${angularStrength.toFixed(2)}</span></div>`)}<div class="notice">光学波段使用 Hapke，热红外使用红外 Hapke；0 为各向同性，1 为完整角度效应。</div></div>`
   let html = ''
   if (state.panel === 'scene') {
-    const projectBlock = `<div class="property-group"><h3>当前工程</h3><div class="path-input"><span title="${escapeHtml(state.inputPath)}">${escapeHtml(state.inputPath || '未打开 Input.xml')}</span></div><button class="button ghost" id="openProjectAction" style="width:100%;justify-content:center;margin-top:9px">打开其他工程</button></div>`
-    html = `${projectBlock}<div class="property-group"><h3>空间范围</h3>${field('X 尺寸', inputUnit('sceneX', c.scene.x, 'm', 'type="number" min="1"'))}${field('Y 尺寸', inputUnit('sceneY', c.scene.y, 'm', 'type="number" min="1"'))}${field('最大高度', inputUnit('sceneHeight', c.scene.height, 'm', 'type="number" min="0.1"'))}${field('体元大小', inputUnit('voxelSize', c.scene.voxel, 'm', 'type="number" min="0.1" step="0.1"'))}${field('OBJ填充阈值', inputUnit('voxelFillThreshold', c.scene.voxelFillThreshold, '0–1', 'type="number" min="0" max="1" step="0.01"'))}${switchRow('启用 DEM 地形', 'terrainSwitch', c.scene.terrain)}</div>${backgroundPanel}${voxelChannel}${builtinNotice()}`
+    html = `<div class="property-group"><h3>空间范围</h3>${field('X 尺寸（南北）', inputUnit('sceneX', c.scene.x, 'm', 'type="number" min="1"'))}${field('Z 尺寸（东西）', inputUnit('sceneY', c.scene.y, 'm', 'type="number" min="1"'))}${field('Y 最大高度', inputUnit('sceneHeight', c.scene.height, 'm', 'type="number" min="0.1"'))}${field('体元大小', inputUnit('voxelSize', c.scene.voxel, 'm', 'type="number" min="0.1" step="0.1"'))}${field('OBJ填充阈值', inputUnit('voxelFillThreshold', c.scene.voxelFillThreshold, '0–1', 'type="number" min="0" max="1" step="0.01"'))}<div class="notice">统一方向：+X 向北、−X 向南；+Y 向上；+Z 向东、−Z 向西。OBJ、Three.js 与计算引擎采用同一约定；方位角 0° 向北、90° 向东；输出影像固定上北、右东。</div></div><div class="property-group"><h3>DEM 地形</h3>${switchRow('启用 DEM 地形', 'terrainSwitch', c.scene.terrain)}${c.scene.demFile ? `<div class="path-input"><span title="${escapeHtml(c.scene.demFile)}">${escapeHtml(c.scene.demFile)}</span></div>` : ''}${demMetadata}<label class="button ghost" for="demFile" style="width:100%;justify-content:center;margin-top:9px"><svg><use href="#i-import"/></svg>导入 DEM 文件<input id="demFile" type="file" accept=".tif,.tiff,.asc,image/tiff,text/plain" hidden></label></div>${backgroundPanel}${builtinNotice()}`
   } else if (state.panel === 'light') {
     html = `<div class="property-group"><h3>太阳位置</h3>${field('太阳天顶角', inputUnit('sunZenith', c.light.zenith, '°', 'type="number" min="0" max="90"'))}${field('太阳方位角', inputUnit('sunAzimuth', c.light.azimuth, '°', 'type="number" min="0" max="360"'))}</div>
-      <div class="property-group"><h3>辐照条件</h3>${field('直射比例', `<div class="range-wrap"><input class="range" id="directLight" type="range" min="0" max="1" step="0.01" value="${c.light.direct}"><span class="range-value" id="directValue">${c.light.direct.toFixed(2)}</span></div>`)}${field('漫射比例', `<div class="range-wrap"><input class="range" id="diffuseLight" type="range" min="0" max="1" step="0.01" value="${c.light.diffuse}"><span class="range-value" id="diffuseValue">${c.light.diffuse.toFixed(2)}</span></div>`)}${field('天空温度', inputUnit('skyTemperature', c.light.skyTemperature, 'K', 'type="number"'))}</div>${builtinNotice()}`
+      <div class="property-group"><h3>辐照条件</h3>${field('直射比例', `<div class="range-wrap"><input class="range" id="directLight" type="range" min="0" max="1" step="0.01" value="${c.light.direct}"><span class="range-value" id="directValue">${c.light.direct.toFixed(2)}</span></div>`)}${field('漫射比例', `<div class="range-wrap"><input class="range" id="diffuseLight" type="range" min="0" max="1" step="0.01" value="${c.light.diffuse}"><span class="range-value" id="diffuseValue">${c.light.diffuse.toFixed(2)}</span></div>`)}${field('天空温度', inputUnit('skyTemperature', c.light.skyTemperature, 'K', 'type="number"'))}<div class="notice">HiStream 自动令漫射比例 = 1 − 直射比例。</div></div>${builtinNotice()}`
   } else if (state.panel === 'sensor') {
     const perspective = c.sensor.projection === 'perspective'
+    updateCruiseVisualization(c)
+    const cruisePositions = perspective && c.sensor.cruiseEnabled ? sensorCruisePositions(c.sensor, c.scene) : []
+    const previewIndices = cruisePositions.length <= 8
+      ? cruisePositions.map((_, index) => index)
+      : [0, 1, 2, 3, 4, cruisePositions.length - 2, cruisePositions.length - 1]
+    const cruisePreview = cruisePositions.length
+      ? `<div class="notice"><strong>预计巡航位置 · 共 ${cruisePositions.length} 个</strong><br>${previewIndices.map((index, previewIndex) => {
+          const point = cruisePositions[index]
+          const separator = previewIndex === 5 && cruisePositions.length > 8 ? '…　' : ''
+          return `${separator}P${index + 1} · X/Y/Z (${demNumber(point.x)}, ${demNumber(point.z)}, ${demNumber(point.y)}) m`
+        }).join('　')}</div>`
+      : ''
+    const cruiseRoute = ['line', 'rectangle', 'random'].includes(c.sensor.cruiseRoute) ? c.sensor.cruiseRoute : 'line'
+    const cruiseRouteOptions = `<select class="input" id="sensorCruiseRoute"><option value="line" ${cruiseRoute === 'line' ? 'selected' : ''}>直线往返</option><option value="rectangle" ${cruiseRoute === 'rectangle' ? 'selected' : ''}>中心矩形</option><option value="random" ${cruiseRoute === 'random' ? 'selected' : ''}>随机飞行</option></select>`
+    const cruiseRouteFields = cruiseRoute === 'line'
+      ? `${field('目标位置 X（北向）', inputUnit('sensorCruiseTargetX', c.sensor.cruiseTargetX, 'm', 'type="number"'))}${field('目标位置 Z（东向）', inputUnit('sensorCruiseTargetY', c.sensor.cruiseTargetY, 'm', 'type="number"'))}${field('目标位置 Y（高度）', inputUnit('sensorCruiseTargetZ', c.sensor.cruiseTargetZ, 'm', 'type="number" min="0.01"'))}`
+      : cruiseRoute === 'rectangle'
+        ? `${field('矩形长度 X（南北）', inputUnit('sensorCruiseRectangleWidth', c.sensor.cruiseRectangleWidth, 'm', 'type="number" min="0.01"'))}${field('矩形宽度 Z（东西）', inputUnit('sensorCruiseRectangleHeight', c.sensor.cruiseRectangleHeight, 'm', 'type="number" min="0.01"'))}`
+        : '<button class="button ghost" id="randomCruiseBtn" type="button" style="width:100%;justify-content:center;margin:8px 0"><svg><use href="#i-camera"/></svg>换一条随机路线</button>'
+    const cruiseFields = c.sensor.cruiseEnabled
+      ? `${field('巡航轨迹', cruiseRouteOptions)}${cruiseRouteFields}${field('航点间距', inputUnit('sensorCruiseStep', c.sensor.cruiseStep, 'm', 'type="number" min="0.01" step="any"'))}${field('航点数量', inputUnit('sensorCruiseCount', c.sensor.cruiseCount, '个', 'type="number" min="1" max="10000" step="1"'))}<div class="notice">直线轨迹在起点与目标点之间三维往返，高度随航程线性变化；矩形和随机轨迹保持当前高度。越界后从对侧继续。</div>${cruisePreview}`
+      : ''
+    const sensorHeightLabel = c.sensor.cruiseEnabled ? (cruiseRoute === 'line' ? '起始位置 Y（高度）' : '巡航高度 Y') : '观测位置 Y（高度）'
     const projectionFields = perspective
-      ? `${field('传感器 X', inputUnit('sensorPositionX', c.sensor.positionX, 'm', 'type="number"'))}${field('传感器 Y', inputUnit('sensorPositionY', c.sensor.positionY, 'm', 'type="number"'))}${field('传感器高度', inputUnit('sensorHeight', c.sensor.height, 'm', 'type="number" min="0.01"'))}`
-      : `${field('观测天顶角', inputUnit('viewZenith', c.sensor.vza, '°', 'type="number" min="0" max="90"'))}${field('观测方位角', inputUnit('viewAzimuth', c.sensor.vaa, '°', 'type="number" min="0" max="360"'))}`
-    html = `<div class="property-group"><h3>成像参数</h3>${field('图像分辨率', `<div class="input-row"><input class="input" id="sensorX" type="number" value="${c.sensor.x}"><input class="input" id="sensorY" type="number" value="${c.sensor.y}"></div>`)}${field('波段 [nm]', `<input class="input" id="sensorBands" value="${escapeHtml(c.sensor.bands)}">`)}${field('投影方式', `<select class="input" id="sensorProjection"><option value="parallel" ${perspective ? '' : 'selected'}>平行投影</option><option value="perspective" ${perspective ? 'selected' : ''}>中心投影</option></select>`)}${projectionFields}</div><div class="property-group"><div class="notice">平行投影由观测角度确定方向；中心投影从指定位置朝向场景中心，默认位于场景中心上方 3000 m。</div></div>${builtinNotice()}`
+      ? `${field(cruiseRoute === 'rectangle' && c.sensor.cruiseEnabled ? '矩形中心 X（北向）' : '起始位置 X（北向）', inputUnit('sensorPositionX', c.sensor.positionX, 'm', 'type="number"'))}${field(cruiseRoute === 'rectangle' && c.sensor.cruiseEnabled ? '矩形中心 Z（东向）' : '起始位置 Z（东向）', inputUnit('sensorPositionY', c.sensor.positionY, 'm', 'type="number"'))}${field(sensorHeightLabel, inputUnit('sensorHeight', c.sensor.height, 'm', 'type="number" min="0.01"'))}${field('垂直视场角', inputUnit('sensorFov', c.sensor.fov, '°', 'type="number" min="0.1" max="120" step="0.1"'))}${field('视场天顶角', inputUnit('viewZenith', c.sensor.vza, '°', 'type="number" min="0" max="89.999" step="any"'))}${field(c.sensor.cruiseEnabled ? '相对飞机方位角' : '视场方位角', inputUnit('viewAzimuth', c.sensor.vaa, '°', 'type="number" min="0" max="360" step="any"'))}${switchRow('启用航点巡航', 'sensorCruiseSwitch', c.sensor.cruiseEnabled)}${cruiseFields}`
+      : `${field('观测天顶角', inputUnit('viewZenith', c.sensor.vza, '°', 'type="number" min="0" max="89.999" step="any"'))}${field('观测方位角', inputUnit('viewAzimuth', c.sensor.vaa, '°', 'type="number" min="0" max="360" step="any"'))}${switchRow('太阳主平面与垂直主平面', 'principalPlaneSwitch', c.sensor.principalPlane)}${switchRow('128 方向半球观测', 'hemisphereSwitch', c.sensor.hemisphere)}`
+    const bandCount = sensorBandValues(c.sensor).length
+    const angleCount = perspective ? 1 : sensorViewAngles(c.sensor, c.light.azimuth).length
+    const continuousFields = c.sensor.continuousBands
+      ? `${field('起始波段', inputUnit('bandStart', c.sensor.bandStart, 'nm', 'type="number" min="0.000001" step="any"'))}${field('结束波段', inputUnit('bandEnd', c.sensor.bandEnd, 'nm', 'type="number" min="0.000001" step="any"'))}${field('波段间隔', inputUnit('bandStep', c.sensor.bandStep, 'nm', 'type="number" min="0.000001" step="any"'))}`
+      : ''
+    const projectionNotice = perspective
+      ? (c.sensor.cruiseEnabled
+          ? '相机方向随飞机航向旋转。天顶角 0° 表示垂直向下；相对飞机方位角 0° 向前、90° 向右、180° 向后、270° 向左。输出统一为上北、右东。'
+          : '中心投影使用观测位置、巡航高度、视场角和视场方向；天顶角 0° 表示垂直向下。输出统一为上北、右东。')
+      : `平行投影共 ${angleCount} 个观测方向。主平面批量范围为 −75°～75°、间隔 5°，同时包含太阳主平面和垂直太阳主平面；半球采用 128 个等面积方向。输出统一为上北、右东。`
+    html = `<div class="property-group"><h3>成像参数</h3>${field('图像分辨率', `<div class="input-row"><input class="input" id="sensorX" type="number" value="${c.sensor.x}"><input class="input" id="sensorY" type="number" value="${c.sensor.y}"></div>`)}${field('自定义波段 [nm]', `<input class="input" id="sensorBands" value="${escapeHtml(c.sensor.bands)}">`)}${switchRow('连续波段模拟', 'continuousBandsSwitch', c.sensor.continuousBands)}${continuousFields}<div class="notice">最终输出 ${bandCount} 个波段：连续与自定义波段合并、去重并按波长升序排列；最多 ${MAX_SENSOR_BANDS} 个波段。</div>${field('投影方式', `<select class="input" id="sensorProjection"><option value="parallel" ${perspective ? '' : 'selected'}>平行投影</option><option value="perspective" ${perspective ? 'selected' : ''}>中心投影</option></select>`)}${projectionFields}</div><div class="property-group"><div class="notice">${projectionNotice}</div></div>${builtinNotice()}`
   } else if (state.panel === 'objects') {
-    const objectCards = (c.objects.items || []).map((item, index) => {
-      const meshBindings = (item.meshes || []).map((mesh) => `${mesh.name}: ${mesh.spectralName} / ${mesh.thermalName}`).join('；') || '无 Mesh 映射'
+    const objectCard = (item, index) => {
+      const prim = isPrimObject(item)
+      const meshBindings = (item.meshes || []).map((mesh) => `${mesh.name}: ${mesh.spectralName} / ${mesh.thermalName} / ${mesh.materialName || item.materialName} / ${mesh.canopyName || item.canopyName}`).join('；') || '无 Mesh 映射'
+      const generatedShape = item.type === 'Water'
+        ? (item.generation?.shape || item.shape) === 'ellipsoid' ? '圆形/椭圆水面' : '矩形水面'
+        : (item.generation?.shape || item.shape) === 'ellipsoid' ? '椭球' : '立方体'
+      const generatedGeometry = prim
+        ? `<small>${escapeHtml(item.generation?.type || 'PRIM 原型')} · ${generatedShape} · ${(item.dimensions || []).map((value) => Number(value).toLocaleString('zh-CN')).join(' × ')} m</small>`
+        : ''
       return `<div class="object-card ${state.selectedObjectIndex === index ? 'active' : ''}" data-index="${index}" role="button" tabindex="0">
         <div class="object-card-head"><strong>${escapeHtml(item.name)}</strong><div class="object-card-actions"><button class="button ghost object-material" type="button">属性</button><button class="button ghost object-distribution" type="button">分布</button><button class="button ghost danger object-delete" type="button">删除</button></div></div>
-        <small title="${escapeHtml(meshBindings)}">属性 · ${escapeHtml(item.materialName || '未定义物化属性')} · ${escapeHtml(item.canopyName || '未定义冠层')} · ${escapeHtml(meshBindings)}</small>
+        ${generatedGeometry}
+        <small title="${escapeHtml(meshBindings)}">属性 · ${escapeHtml(item.materialName || '未定义物化属性')} · ${escapeHtml(item.canopyName || '未定义结构参数')} · ${escapeHtml(meshBindings)}</small>
         <small>分布 · ${escapeHtml(distributionSummary(item))}</small>
-        <small title="${escapeHtml(item.fileName)}">OBJ · ${escapeHtml(item.fileName || '无 OBJ 文件')}</small>
+        <small title="${escapeHtml(item.fileName)}">${prim ? 'PRIM 网格' : 'OBJ 文件'} · ${escapeHtml(item.fileName || '无网格文件')}</small>
       </div>`
-    }).join('')
+    }
+    const indexedObjects = (c.objects.items || []).map((item, index) => ({ item, index }))
+    const importedCards = indexedObjects.filter(({ item }) => !isPrimObject(item) && !isMediumObject(item)).map(({ item, index }) => objectCard(item, index)).join('')
+    const primitiveCards = indexedObjects.filter(({ item }) => isPrimObject(item) && !isMediumObject(item)).map(({ item, index }) => objectCard(item, index)).join('')
+    const mediumCards = indexedObjects.filter(({ item }) => isMediumObject(item)).map(({ item, index }) => objectCard(item, index)).join('')
+    const mediumDisabled = state.mode === 'eVoxelRT' || state.mode === 'eVoxelEB' ? '' : 'disabled'
     html = `<div class="property-group"><h3>场景统计</h3><div class="metric-grid"><div class="metric"><strong>${c.objects.count || '—'}</strong><small>计算对象</small></div><div class="metric"><strong>${c.spectra.length}</strong><small>光谱定义</small></div></div></div>
-      <div class="property-group"><h3>OBJ 属性与分布</h3>${objectCards || '<div class="notice">尚未导入 OBJ。</div>'}<button class="button ghost" id="objectImportAction" style="width:100%;justify-content:center;margin-top:8px"><svg><use href="#i-import"/></svg>新增 OBJ 原型</button></div>
-      <div class="property-group"><div class="notice">每个 OBJ 同时保存一套计算属性绑定和一套独立实例分布；点击“属性”或“分布”分别查看。</div></div>`
+      <div class="property-group"><h3>OBJ 导入实体</h3>${importedCards || '<div class="notice">尚未导入 OBJ 实体。</div>'}<button class="button ghost" id="objectImportAction" style="width:100%;justify-content:center;margin-top:8px"><svg><use href="#i-import"/></svg>导入 OBJ 实体</button></div>
+      <div class="property-group"><h3>PRIM 原型几何</h3>${primitiveCards || '<div class="notice">尚未生成 PRIM 原型。</div>'}<button class="button ghost" id="objectGenerateAction" style="width:100%;justify-content:center;margin-top:8px"><svg><use href="#i-cube"/></svg>新增 PRIM 原型</button></div>
+      <div class="property-group"><h3>火焰场景对象</h3>${mediumCards || '<div class="notice">尚未添加火焰。</div>'}<button class="button ghost" id="objectMediumAction" ${mediumDisabled} style="width:100%;justify-content:center;margin-top:8px"><svg><use href="#i-cloud"/></svg>新增火焰</button><div class="notice">火焰参与 VoxelRT 辐射传输；VoxelEB 可另外计算烟雾浓度输送，但当前烟雾尚未耦合进辐射图像。</div></div>
+      <div class="property-group"><div class="notice">OBJ 用于管理外部导入实体；PRIM 用于管理椭球、立方体、混沌介质和水平水面。对象均可独立设置属性和实例分布。</div></div>`
   } else if (state.panel === 'materials') {
     html = materialLibraryHtml(c)
+  } else if (state.panel === 'atmosphere') {
+    const atmosphere = c.atmosphere || (c.atmosphere = { enabled: false, model: 'midlatitude-summer', waterVapor: 2, aerosol: 'rural', visibility: 23, lutFile: 'assets/atmosphere/simple_modtran_lut.csv' })
+    const disabled = atmosphere.enabled ? '' : 'disabled'
+    html = `<div class="property-group"><h3>大气辐射传输</h3>${switchRow('启用 MODTRAN 查找表', 'atmosphereSwitch', atmosphere.enabled)}${field('大气类型', `<select class="select" id="atmosphereModel" ${disabled}><option value="tropical" ${atmosphere.model === 'tropical' ? 'selected' : ''}>热带大气</option><option value="midlatitude-summer" ${atmosphere.model === 'midlatitude-summer' ? 'selected' : ''}>中纬度夏季</option><option value="midlatitude-winter" ${atmosphere.model === 'midlatitude-winter' ? 'selected' : ''}>中纬度冬季</option></select>`)}${field('柱状水汽量 PWV', inputUnit('atmosphereWaterVapor', atmosphere.waterVapor, 'cm', `type="number" min="0.5" max="5" step="0.1" ${disabled}`))}${field('气溶胶类型', `<select class="select" id="atmosphereAerosol" ${disabled}><option value="rural" ${atmosphere.aerosol === 'rural' ? 'selected' : ''}>乡村型</option><option value="urban" ${atmosphere.aerosol === 'urban' ? 'selected' : ''}>城市型</option></select>`)}${field('能见度', inputUnit('atmosphereVisibility', atmosphere.visibility, 'km', `type="number" min="10" max="50" step="1" ${disabled}`))}<div class="notice">传感器高度和观测角度自动读取，参数在 LUT 节点间插值，覆盖 350–14000 nm。视场中的天空像元按各自半球天顶角计算；启用时使用 LUT，关闭时使用简化经验天空模型。</div></div>${builtinNotice()}`
   } else if (state.panel === 'meteorology') {
-    html = `<div class="property-group"><h3>时间范围</h3>${field('开始节点', `<input class="input" id="meteoStart" type="number" value="${c.meteo.start}">`)}${field('结束节点', `<input class="input" id="meteoEnd" type="number" value="${c.meteo.end}">`)}</div>
-      <div class="property-group"><h3>驱动文件</h3><div class="path-input"><span title="${escapeHtml(c.meteo.path)}">${escapeHtml(c.meteo.path)}</span></div><label class="button ghost" for="meteoFile" style="width:100%;justify-content:center;margin-top:9px"><svg><use href="#i-import"/></svg>导入本地 meteo 文件<input id="meteoFile" type="file" accept=".txt,.meteo,.dat,.csv,text/plain" hidden></label><div class="notice">文件将复制到当前工程的 meteorology 目录，并自动写入 Input.xml。</div></div>${builtinNotice()}`
+    html = `<div class="property-group"><h3>时间设置</h3>${field('开始节点', `<input class="input" id="meteoStart" type="number" min="0" step="1" value="${c.meteo.start}">`)}${field('结束节点', `<input class="input" id="meteoEnd" type="number" min="${Number(c.meteo.start) + 1}" step="1" value="${c.meteo.end}">`)}${field('时间步长 dTime', inputUnit('meteoDTime', c.meteo.dTime, 's', 'type="number" min="1" step="1"'))}</div>
+      <div class="property-group"><h3>站点参数</h3>${field('纬度', inputUnit('meteoLatitude', c.meteo.latitude, '°', 'type="number" min="-90" max="90" step="0.0001"'))}${field('经度', inputUnit('meteoLongitude', c.meteo.longitude, '°', 'type="number" min="-180" max="180" step="0.0001"'))}${field('观测高度 z', inputUnit('meteoHeight', c.meteo.z, 'm', 'type="number" min="0" step="0.1"'))}</div>
+      <div class="property-group"><h3>初始状态</h3>${field('初始土壤温度 Tsold', inputUnit('meteoSoilTemperature', c.meteo.Tsold, 'K', 'type="number" min="150" max="400" step="0.1"'))}${field('饱和含水量 SatWater', inputUnit('meteoSatWater', c.meteo.SatWater, '0–1', 'type="number" min="0" max="1" step="0.01"'))}<div class="notice">当前能量平衡初温取首个气象节点，饱和含水量以“材质属性 → 物化属性”的土壤参数为准。</div></div>
+      <div class="property-group"><h3>驱动文件</h3><div class="path-input"><span title="${escapeHtml(c.meteo.path)}">${escapeHtml(c.meteo.path)}</span></div><label class="button ghost" for="meteoFile" style="width:100%;justify-content:center;margin-top:9px"><svg><use href="#i-import"/></svg>导入本地 meteo 文件<input id="meteoFile" type="file" accept=".txt,.meteo,.dat,.csv,text/plain" hidden></label><div class="notice">文件将复制到当前工程的 meteorology 目录，并写入 project.json。</div></div>${builtinNotice()}`
+  } else if (state.panel === 'fluid') {
+    const fluid = c.fluid || (c.fluid = { enabled: false, voxelSize: Number(c.scene.voxel) || 1, timeStep: 5, pressureIterations: 20, windDirection: 0, buoyancy: 0.033, dragCoefficient: 0.3, thermalCoupling: 1, diffusivity: 0.1, smokeEmission: 0.02, maxVelocity: 30, outputWind: false, outputAirTemperature: false, outputHeight: 2 })
+    if (state.mode !== 'eVoxelEB') {
+      html = `<div class="property-group"><h3>流体力学</h3><div class="notice">流体力学当前只接入体元能量平衡（VoxelEB）。切换到“体元能量平衡”后，可设置风场、热浮力、树冠阻力以及地表换热。</div></div>${builtinNotice()}`
+    } else {
+      const disabled = fluid.enabled ? '' : 'disabled'
+      const spacing = Math.max(0.1, Number(fluid.voxelSize) || Number(c.scene.voxel) || 1)
+      const fluidHeight = Math.max(
+        spacing,
+        Number(c.scene.height) || 0,
+        (Number(fluid.outputHeight) || 2) + spacing * 0.5
+      )
+      const gridX = Math.max(1, Math.ceil(Number(c.scene.x) / spacing))
+      const gridY = Math.max(1, Math.ceil(fluidHeight / spacing))
+      const gridZ = Math.max(1, Math.ceil(Number(c.scene.y) / spacing))
+      const cellCount = gridX * gridY * gridZ
+      const memoryMb = cellCount * 236 / 1048576
+      const outputLayer = Math.max(0, Math.min(gridY - 1, Math.floor((Number(fluid.outputHeight) || 2) / spacing)))
+      const resolvedOutputHeight = (outputLayer + 0.5) * spacing
+      html = `<div class="property-group"><h3>求解器 · D3Q19 LBM</h3>${switchRow('启用流体力学', 'fluidSwitch', fluid.enabled)}${field('流体体元大小', inputUnit('fluidVoxelSize', spacing, 'm', `type="number" min="0.1" step="0.1" ${disabled}`))}<div class="metric-grid"><div class="metric"><strong>${gridX} × ${gridY} × ${gridZ}</strong><small>空气网格 X × 高 × Y</small></div><div class="metric"><strong>${cellCount.toLocaleString('zh-CN')}</strong><small>空气单元</small></div><div class="metric"><strong>${memoryMb < 1 ? memoryMb.toFixed(2) : memoryMb.toFixed(1)} MB</strong><small>流体状态估算显存</small></div></div><div class="notice">流体采用 D3Q19 BGK 格子玻尔兹曼方法；分布函数、风速、气温和烟雾使用独立稠密网格，辐射传输与能量平衡仍使用场景体元。调大流体体元可显著降低显存占用。</div></div>
+        <div class="property-group"><h3>来流边界</h3>${field('来流风向', inputUnit('fluidWindDirection', fluid.windDirection, '°', `type="number" min="0" max="359.9" step="1" ${disabled}`))}${field('数值限速上限', inputUnit('fluidMaxVelocity', fluid.maxVelocity, 'm/s', `type="number" min="0.1" max="200" step="0.5" ${disabled}`))}<div class="notice">来流风速逐时间读取气象驱动；限速上限只用于防止数值发散，不是入射风速或色标上限。0° 沿场景正 Y 方向，90° 沿正 X 方向。</div></div>
+        <div class="property-group"><h3>数值求解</h3>${field('最大标量时间步', inputUnit('fluidTimeStep', fluid.timeStep, 's', `type="number" min="0.1" max="60" step="0.1" ${disabled}`))}${field('运动黏度/标量扩散', inputUnit('fluidDiffusivity', fluid.diffusivity, 'm²/s', `type="number" min="0" step="0.01" ${disabled}`))}<div class="notice">每个气象节点至少推进一次来流穿越计算域的 LBM 迭代；物理风速采用固定比例映射到稳定的格子速度，温度与烟雾按这里的最大时间步输运。LBM 直接由密度分布恢复压力，不再执行压力 Jacobi 迭代。</div></div>
+        <div class="property-group"><h3>热力与介质耦合</h3>${field('热浮力系数', `<input class="input" id="fluidBuoyancy" type="number" min="0" step="0.001" value="${fluid.buoyancy}" ${disabled}>`)}${field('树冠阻力系数', `<input class="input" id="fluidDrag" type="number" min="0" step="0.05" value="${fluid.dragCoefficient}" ${disabled}>`)}${field('地表换热强度', `<input class="input" id="fluidThermalCoupling" type="number" min="0" step="0.1" value="${fluid.thermalCoupling}" ${disabled}>`)}${field('火焰烟雾源强', `<input class="input" id="fluidSmokeEmission" type="number" min="0" step="0.01" value="${fluid.smokeEmission}" ${disabled}>`)}<div class="notice">建筑和刚体为固体边界，树冠为多孔阻力区；火焰提供温度和烟雾浓度源项。</div></div>
+        <div class="property-group"><h3>高度切片输出</h3>${field('输出高度', inputUnit('fluidOutputHeight', fluid.outputHeight, 'm', `type="number" min="0.1" step="0.1" ${disabled}`))}${switchRow('输出风速 GeoTIFF', 'fluidWindOutputSwitch', Boolean(fluid.outputWind), !fluid.enabled)}${switchRow('输出气温 GeoTIFF', 'fluidTemperatureOutputSwitch', Boolean(fluid.outputAirTemperature), !fluid.enabled)}<div class="notice">填写高度会定位到对应流体体元；当前实际输出体元中心约为 ${resolvedOutputHeight.toFixed(2)} m。两个文件均按气象时间节点输出到 output 目录。风速文件包含水平风速大小、X 分量、垂直分量和 Y 分量；气温文件单位为 ℃。建筑内部按固体处理，在风速和气温图中写为 NoData。默认均不输出。</div></div>${builtinNotice()}`
+    }
   } else {
-    const coupling = state.mode === 'eFacetEB' ? `<div class="property-group"><h3>面元 RT–EB 耦合</h3>${field('最大耦合迭代', `<input class="input" id="couplingIterations" type="number" min="1" max="100" value="${c.control.couplingIterations}">`)}${field('温度收敛阈值', inputUnit('temperatureTolerance', c.control.temperatureTolerance, 'K', 'type="number" min="0.001" step="0.01"'))}${field('温度松弛系数', `<input class="input" id="temperatureRelaxation" type="number" min="0.05" max="1" step="0.05" value="${c.control.temperatureRelaxation}">`)}<div class="notice">场景几何和面元可见性图只初始化一次；每个气象节点在同一模型内进行辐射传输与能量平衡耦合迭代，温度由收敛解得到。</div></div>` : ''
-    html = `<div class="property-group"><h3>模拟产出</h3>${switchRow('逐时保存图像', 'imageSwitch', c.sensor.image)}${switchRow('逐时保存完整能量过程', 'processSwitch', c.sensor.process)}${switchRow('输出温度', 'temperatureSwitch', c.sensor.temperature)}${switchRow('输出反照率', 'albedoSwitch', c.sensor.albedo)}</div><div class="property-group"><h3>计算控制</h3>${field('追踪深度', `<input class="input" id="rayDepth" type="number" min="1" max="64" value="${c.control.depth}">`)}${field('GPU 序号', `<input class="input" id="gpuIndex" type="number" min="0" value="${c.control.gpu}">`)}</div>${coupling}${builtinNotice()}`
+    const energyBalanceOutput = state.mode === 'eFacetEB' || state.mode === 'eVoxelEB'
+    const imageOutputLabel = energyBalanceOutput ? '逐时间输出图像' : '输出图像'
+    const processOutputNotice = energyBalanceOutput
+      ? '<div class="notice">辐射过程：短波、长波和净辐射；能量过程：潜热、显热和表面热通量。两类结果可独立输出并用于三维分析。</div>'
+      : '<div class="notice">辐射过程保存面元或体元辐射度，用于三维分析。</div>'
+    const processOutputSwitches = switchRow('输出辐射过程', 'radiationProcessSwitch', c.sensor.radiationProcess) +
+      (energyBalanceOutput ? switchRow('输出能量过程', 'energyProcessSwitch', c.sensor.energyProcess) : '')
+    const samplingControl = field('采样数目', `<input class="input" id="sampleCount" type="number" min="1" max="256" step="1" value="${c.control.samples}">`)
+    const configuredPeriodicCount = Math.max(0, Math.min(20, Math.round(
+      Number.isFinite(Number(c.control.periodicNeighborCount))
+        ? Number(c.control.periodicNeighborCount) : 8
+    )))
+    const effectivePeriodicCount = c.control.periodicBoundary
+      ? configuredPeriodicCount : 0
+    const periodicBoundaryControl = `${field('临近区域数量', `<input class="input" id="periodicNeighborCount" type="number" min="0" max="20" step="1" value="${effectivePeriodicCount}">`, '0=关闭')}<div class="notice">0 自动关闭邻域；1–20 自动开启，仅填补传感器主视线越出研究区后的地表空缺。研究区内已经命中的像元、阴影和多次散射保持原计算不变，近水平观测建议设为 20。</div>`
+    const heterogeneousVoxelControl = (state.mode === 'eVoxelRT' || state.mode === 'eVoxelEB')
+      ? `${switchRow('使用异质性体元', 'heterogeneousVoxelSwitch', Boolean(c.control.heterogeneousVoxel))}<div class="notice">开启后从 OBJ 面元计算每个体元的三轴聚集指数和体密度，并在 VoxelRT/VoxelEB 消光、散射及热辐射中使用；关闭时保持均匀体元算法。默认关闭。</div>`
+      : ''
+    const radiationSolverControl = state.mode === 'eFacetRT' || state.mode === 'eVoxelRT'
+      ? `${field('辐射求解方法', `<select class="select" id="radiationSolver"><option value="traditional" ${c.control.radiationSolver !== 'accelerated' ? 'selected' : ''}>传统稳健方法</option><option value="accelerated" ${c.control.radiationSolver === 'accelerated' ? 'selected' : ''}>${state.mode === 'eVoxelRT' ? '光谱批处理加速' : '光谱复用加速'}</option></select>`)}<div class="notice">${state.mode === 'eVoxelRT' ? '传统方法逐波段提交并等待 GPU；加速方法每次同时求解最多 4 个相邻波段，共享同一轮几何射线遍历，保留全部射线、光谱参数和物理公式，不进行波段插值。' : '传统方法每个波段从零开始固定迭代；加速方法复用相邻同类型波段的辐射度，并按残差提前收敛。两者使用相同几何、采样和输出定义。'}</div>`
+      : ''
+    const couplingGeometry = state.mode === 'eFacetEB' ? '面元' : state.mode === 'eVoxelEB' ? '体元' : ''
+    const spectralAcceleration = field('光谱加速宽度', inputUnit('spectralAccelerationWidth', c.control.spectralAccelerationWidth ?? 100, 'nm', 'type="number" min="1" max="1000" step="1"'))
+    const couplingNotice = state.mode === 'eVoxelEB'
+      ? '默认100 nm。直射和漫射均在窗口内积分，并使用窗口中心光学属性计算一次。'
+      : '默认100 nm。短波净辐射按窗口分别积分直射和漫射，并使用窗口中心光学属性求解后累加；最终影像对传感器选定波段逐个独立求解，不进行输出波段插值。'
+    const coupling = couplingGeometry ? `<div class="property-group"><h3>${couplingGeometry} RT–EB 耦合</h3>${spectralAcceleration}${field('最大耦合迭代', `<input class="input" id="couplingIterations" type="number" min="1" max="100" value="${c.control.couplingIterations}">`)}${field('温度收敛阈值', inputUnit('temperatureTolerance', c.control.temperatureTolerance, 'K', 'type="number" min="0.001" step="0.01"'))}${field('温度松弛系数', `<input class="input" id="temperatureRelaxation" type="number" min="0.05" max="1" step="0.05" value="${c.control.temperatureRelaxation}">`)}<div class="notice">${couplingNotice}场景几何和${couplingGeometry}辐射结构只初始化一次。</div></div>` : ''
+    const temperatureMethods = energyBalanceOutput ? `<div class="property-group"><h3>温度模拟方法</h3>${field('土壤温度', `<select class="select" id="soilTemperatureMethod"><option value="0" ${c.control.soilTemperatureMethod === 0 ? 'selected' : ''}>0 · 瞬时能量平衡</option><option value="1" ${c.control.soilTemperatureMethod === 1 ? 'selected' : ''}>1 · 热惯性动态模型</option><option value="2" ${c.control.soilTemperatureMethod === 2 ? 'selected' : ''}>2 · 温度廓线传导模型（默认）</option></select>`)}${field('植被温度', `<select class="select" id="vegetationTemperatureMethod"><option value="0" ${c.control.vegetationTemperatureMethod === 0 ? 'selected' : ''}>经验法 · Ball–Berry</option><option value="1" ${c.control.vegetationTemperatureMethod === 1 ? 'selected' : ''}>机制法 · Farquhar</option></select>`)}<div class="notice">初始温度只作为求解初值；能量平衡各时刻均由所选方法动态更新。土壤方法会同步应用到全部土壤物化属性。</div></div>` : ''
+    html = `<div class="property-group"><h3>模拟产出</h3>${switchRow(imageOutputLabel, 'imageSwitch', c.sensor.image)}${processOutputSwitches}${processOutputNotice}${switchRow('输出温度', 'temperatureSwitch', c.sensor.temperature)}${switchRow('输出反照率', 'albedoSwitch', c.sensor.albedo)}</div><div class="property-group"><h3>计算控制</h3>${field('追踪深度', `<input class="input" id="rayDepth" type="number" min="1" max="64" value="${c.control.depth}">`)}${samplingControl}${periodicBoundaryControl}${heterogeneousVoxelControl}${radiationSolverControl}${field('GPU 序号', `<input class="input" id="gpuIndex" type="number" min="0" value="${c.control.gpu}">`)}</div>${temperatureMethods}${coupling}${builtinNotice()}`
   }
   $('#inspectorContent').innerHTML = html
   bindInspector()
 }
 
-function bindValue(id, target, selector, converter = Number) {
+function restoreActualScene() {
+  loadActualScene(state.config).catch((error) => addLog(`恢复场景对象失败：${error.message}`, 'error'))
+}
+
+function bindValue(id, target, selector, converter = Number, rebuildScene = false) {
   const input = $(`#${id}`)
   input?.addEventListener('change', () => {
-    target(converter(input.value)); updateXml(selector, input.value); refreshFromState()
+    const value = converter(input.value)
+    target(value); input.value = String(value); updateXml(selector, value)
+    refreshFromState(rebuildScene)
+    if (rebuildScene) restoreActualScene()
   })
 }
 
-function bindSwitch(id, getter, setter, selector) {
+function bindSwitch(id, getter, setter, selector, rebuildScene = false) {
   const button = $(`#${id}`)
   button?.addEventListener('click', () => {
-    const next = !getter(); setter(next); button.classList.toggle('on', next); button.setAttribute('aria-checked', String(next)); updateXml(selector, next ? 1 : 0); refreshFromState(false)
+    const next = !getter(); setter(next); button.classList.toggle('on', next); button.setAttribute('aria-checked', String(next)); updateXml(selector, next ? 1 : 0); refreshFromState(rebuildScene)
+    if (rebuildScene) restoreActualScene()
   })
+}
+
+function syncSensorSamplingXml() {
+  syncProjectText()
 }
 
 function bindInspector() {
   const c = state.config
   if (!c) return
-  bindValue('sceneX', (v) => c.scene.x = v, 'Scene sceneSizeX'); bindValue('sceneY', (v) => c.scene.y = v, 'Scene sceneSizeY')
-  bindValue('sceneHeight', (v) => c.scene.height = v, 'Scene Height'); bindValue('voxelSize', (v) => c.scene.voxel = v, 'Scene voxelSize'); bindValue('voxelFillThreshold', (v) => c.scene.voxelFillThreshold = Math.min(1, Math.max(0, v)), 'Scene voxelFillThreshold')
-  bindValue('rayDepth', (v) => c.control.depth = v, 'Control rayTracingDepth'); bindValue('gpuIndex', (v) => c.control.gpu = v, 'Control GPU')
+  bindValue('sceneX', (v) => c.scene.x = v, 'Scene sceneSizeX', Number, true); bindValue('sceneY', (v) => c.scene.y = v, 'Scene sceneSizeY', Number, true)
+  bindValue('sceneHeight', (v) => c.scene.height = v, 'Scene Height', Number, true); bindValue('voxelSize', (v) => c.scene.voxel = v, 'Scene voxelSize'); bindValue('voxelFillThreshold', (v) => c.scene.voxelFillThreshold = Math.min(1, Math.max(0, v)), 'Scene voxelFillThreshold')
+  bindValue('rayDepth', (v) => c.control.depth = v, 'Control rayTracingDepth')
+  bindValue('sampleCount', (v) => c.control.samples = Math.min(256, Math.max(1, Math.round(v))), 'Control sampleCount', (value) => Math.min(256, Math.max(1, Math.round(Number(value) || 32))))
+  bindValue('periodicNeighborCount', (count) => {
+    c.control.periodicNeighborCount = count
+    c.control.periodicBoundary = count > 0
+    updateXml('Control periodicBoundary', count > 0 ? 1 : 0)
+  }, 'Control periodicNeighborCount', (value) => {
+    const parsed = Number(value)
+    return Math.max(0, Math.min(20, Math.round(Number.isFinite(parsed) ? parsed : 8)))
+  })
+  bindSwitch('heterogeneousVoxelSwitch', () => Boolean(c.control.heterogeneousVoxel), (v) => c.control.heterogeneousVoxel = v, 'Control heterogeneousVoxel')
+  bindValue('radiationSolver', (v) => c.control.radiationSolver = v, 'Control radiationSolver', (value) => value === 'accelerated' ? 'accelerated' : 'traditional')
+  bindValue('gpuIndex', (v) => c.control.gpu = v, 'Control GPU')
   bindValue('couplingIterations', (v) => c.control.couplingIterations = v, 'Control couplingIterations')
+  bindValue('spectralAccelerationWidth', (v) => c.control.spectralAccelerationWidth = Math.max(1, Math.min(1000, v)), 'Control spectralAccelerationWidth', (value) => Math.max(1, Math.min(1000, Number(value) || 100)))
   bindValue('temperatureTolerance', (v) => c.control.temperatureTolerance = v, 'Control temperatureTolerance')
   bindValue('temperatureRelaxation', (v) => c.control.temperatureRelaxation = v, 'Control temperatureRelaxation')
-  bindSwitch('terrainSwitch', () => c.scene.terrain, (v) => c.scene.terrain = v, 'Control isDEM')
+  bindValue('soilTemperatureMethod', (v) => {
+    c.control.soilTemperatureMethod = Math.max(0, Math.min(2, Math.round(v)))
+    c.materials.filter((item) => item.type === 'Soil').forEach((item) => { item.params.method = c.control.soilTemperatureMethod })
+  }, 'Control soilTemperatureMethod', (value) => Math.max(0, Math.min(2, Math.round(Number(value) || 0))))
+  bindValue('vegetationTemperatureMethod', (v) => c.control.vegetationTemperatureMethod = Math.max(0, Math.min(1, Math.round(v))), 'Control vegetationTemperatureMethod', (value) => Math.max(0, Math.min(1, Math.round(Number(value) || 0))))
+  const fluid = c.fluid || (c.fluid = {})
+  $('#fluidSwitch')?.addEventListener('click', () => {
+    fluid.enabled = !fluid.enabled
+    syncProjectText()
+    refreshFromState(false)
+    renderInspector()
+  })
+  bindValue('fluidWindDirection', (v) => fluid.windDirection = ((v % 360) + 360) % 360, 'Fluid windDirection', (value) => ((Number(value) % 360) + 360) % 360)
+  bindValue('fluidVoxelSize', (v) => fluid.voxelSize = Math.max(0.1, v), 'Fluid voxelSize', (value) => Math.max(0.1, Number(value) || Number(c.scene.voxel) || 1), true)
+  bindValue('fluidTimeStep', (v) => fluid.timeStep = Math.max(0.1, Math.min(60, v)), 'Fluid timeStep', (value) => Math.max(0.1, Math.min(60, Number(value) || 5)))
+  bindValue('fluidPressureIterations', (v) => fluid.pressureIterations = Math.max(2, Math.min(100, 2 * Math.round(v / 2))), 'Fluid pressureIterations', (value) => Math.max(2, Math.min(100, 2 * Math.round((Number(value) || 20) / 2))))
+  bindValue('fluidBuoyancy', (v) => fluid.buoyancy = Math.max(0, v), 'Fluid buoyancy', (value) => Math.max(0, Number(value) || 0))
+  bindValue('fluidDrag', (v) => fluid.dragCoefficient = Math.max(0, v), 'Fluid dragCoefficient', (value) => Math.max(0, Number(value) || 0))
+  bindValue('fluidThermalCoupling', (v) => fluid.thermalCoupling = Math.max(0, v), 'Fluid thermalCoupling', (value) => Math.max(0, Number(value) || 0))
+  bindValue('fluidDiffusivity', (v) => fluid.diffusivity = Math.max(0, v), 'Fluid diffusivity', (value) => Math.max(0, Number(value) || 0))
+  bindValue('fluidSmokeEmission', (v) => fluid.smokeEmission = Math.max(0, v), 'Fluid smokeEmission', (value) => Math.max(0, Number(value) || 0))
+  bindValue('fluidMaxVelocity', (v) => fluid.maxVelocity = Math.max(0.1, Math.min(200, v)), 'Fluid maxVelocity', (value) => Math.max(0.1, Math.min(200, Number(value) || 30)))
+  bindValue('fluidOutputHeight', (v) => fluid.outputHeight = Math.max(0.1, v), 'Fluid outputHeight', (value) => Math.max(0.1, Number(value) || 2))
+  bindSwitch('fluidWindOutputSwitch', () => Boolean(fluid.outputWind), (v) => fluid.outputWind = v, 'Fluid outputWind')
+  bindSwitch('fluidTemperatureOutputSwitch', () => Boolean(fluid.outputAirTemperature), (v) => fluid.outputAirTemperature = v, 'Fluid outputAirTemperature')
+  bindSwitch('terrainSwitch', () => c.scene.terrain, (v) => c.scene.terrain = v, 'Control isDEM', true)
+  const atmosphere = c.atmosphere || (c.atmosphere = { enabled: false, model: 'midlatitude-summer', waterVapor: 2, aerosol: 'rural', visibility: 23, lutFile: 'assets/atmosphere/simple_modtran_lut.csv' })
+  const atmosphereSwitch = $('#atmosphereSwitch')
+  atmosphereSwitch?.addEventListener('click', () => {
+    atmosphere.enabled = !atmosphere.enabled
+    atmosphereSwitch.classList.toggle('on', atmosphere.enabled)
+    atmosphereSwitch.setAttribute('aria-checked', String(atmosphere.enabled))
+    for (const id of ['atmosphereModel', 'atmosphereWaterVapor', 'atmosphereAerosol', 'atmosphereVisibility']) {
+      const input = $(`#${id}`)
+      if (input) input.disabled = !atmosphere.enabled
+    }
+    updateXml('Atmosphere enabled', atmosphere.enabled ? 1 : 0)
+    refreshFromState(false)
+  })
+  bindValue('atmosphereModel', (value) => atmosphere.model = value, 'Atmosphere model', String)
+  bindValue('atmosphereWaterVapor', (value) => atmosphere.waterVapor = Math.max(0.5, Math.min(5, value)), 'Atmosphere waterVapor', (value) => Math.max(0.5, Math.min(5, Number(value) || 2)))
+  bindValue('atmosphereAerosol', (value) => atmosphere.aerosol = value, 'Atmosphere aerosol', String)
+  bindValue('atmosphereVisibility', (value) => atmosphere.visibility = Math.max(10, Math.min(50, value)), 'Atmosphere visibility', (value) => Math.max(10, Math.min(50, Number(value) || 23)))
   const background = c.scene.background || (c.scene.background = {})
   const bindBackground = (id, key, selector) => $(`#${id}`)?.addEventListener('change', (event) => {
     background[key] = event.target.value
@@ -567,17 +1690,59 @@ function bindInspector() {
   bindBackground('backgroundSpectral', 'spectralName', 'Scene bgSpectral')
   bindBackground('backgroundThermal', 'thermalName', 'Scene bgThermal')
   bindBackground('backgroundMaterial', 'materialName', 'Scene bgBioName')
-  const bindAngle = (id, key, index) => $(`#${id}`)?.addEventListener('change', (event) => { c.light[key] = Number(event.target.value); updatePair('Geometry Light light lightAngle lightAngle', index, event.target.value); refreshFromState() })
+  const heterogeneitySwitch = $('#backgroundHeterogeneitySwitch')
+  heterogeneitySwitch?.addEventListener('click', () => {
+    const enabled = !Boolean(background.heterogeneityEnabled)
+    background.heterogeneityEnabled = enabled
+    heterogeneitySwitch.classList.toggle('on', enabled)
+    heterogeneitySwitch.setAttribute('aria-checked', String(enabled))
+    const strengthInput = $('#backgroundAngularStrength')
+    if (strengthInput) strengthInput.disabled = !enabled
+    updateXml('Scene backgroundHeterogeneity', enabled ? 'Hapke' : 'None')
+    updateXml('Scene backgroundAngularStrength', enabled
+      ? Math.max(0, Math.min(1, Number(background.angularEffectStrength ?? 0.5))) : 0)
+    refreshFromState(false)
+  })
+  const angularStrengthInput = $('#backgroundAngularStrength')
+  angularStrengthInput?.addEventListener('input', () => {
+    const value = Math.max(0, Math.min(1, Number(angularStrengthInput.value)))
+    background.angularEffectStrength = value
+    $('#backgroundAngularStrengthValue').textContent = value.toFixed(2)
+    updateXml('Scene backgroundAngularStrength', background.heterogeneityEnabled ? value : 0)
+  })
+  angularStrengthInput?.addEventListener('change', () => refreshFromState(false))
+  const bindAngle = (id, key, index) => $(`#${id}`)?.addEventListener('change', (event) => { c.light[key] = Number(event.target.value); updatePair('Geometry Light light lightAngle lightAngle', index, event.target.value); if (key === 'azimuth' && c.sensor.principalPlane) syncSensorSamplingXml(); refreshFromState(false) })
   bindAngle('sunZenith', 'zenith', 0); bindAngle('sunAzimuth', 'azimuth', 1)
-  const bindRange = (id, key, valueId, selector) => {
+  const bindLightFraction = (id, sourceKey) => {
     const input = $(`#${id}`)
-    input?.addEventListener('input', () => { c.light[key] = Number(input.value); $(`#${valueId}`).textContent = Number(input.value).toFixed(2); updateSun(c) })
-    input?.addEventListener('change', () => { updateXml(selector, input.value); refreshFromState(false) })
+    input?.addEventListener('input', () => {
+      const value = Math.max(0, Math.min(1, Number(input.value)))
+      c.light[sourceKey] = value
+      c.light[sourceKey === 'direct' ? 'diffuse' : 'direct'] = 1 - value
+      $('#directLight').value = String(c.light.direct); $('#diffuseLight').value = String(c.light.diffuse)
+      $('#directValue').textContent = c.light.direct.toFixed(2); $('#diffuseValue').textContent = c.light.diffuse.toFixed(2)
+      updateSun(c)
+    })
+    input?.addEventListener('change', () => {
+      updateXml('Geometry Light light directScatteringRatio', c.light.direct)
+      refreshFromState(false)
+    })
   }
-  bindRange('directLight', 'direct', 'directValue', 'Geometry Light light direct'); bindRange('diffuseLight', 'diffuse', 'diffuseValue', 'Geometry Light light diffuse')
+  bindLightFraction('directLight', 'direct'); bindLightFraction('diffuseLight', 'diffuse')
   bindValue('skyTemperature', (v) => c.light.skyTemperature = v, 'Geometry Light light skyTemperature')
   bindValue('sensorX', (v) => c.sensor.x = v, 'Geometry Sensor sensor pixelResolutionX'); bindValue('sensorY', (v) => c.sensor.y = v, 'Geometry Sensor sensor pixelResolutionY')
-  bindValue('sensorBands', (v) => c.sensor.bands = v, 'Geometry Sensor sensor controlBand', String)
+  $('#sensorBands')?.addEventListener('change', (event) => { c.sensor.bands = event.target.value; syncSensorSamplingXml(); renderInspector() })
+  const bindSensorNumber = (id, key, minimum = -Infinity) => $(`#${id}`)?.addEventListener('change', (event) => {
+    c.sensor[key] = Math.max(minimum, Number(event.target.value)); syncSensorSamplingXml(); renderInspector()
+  })
+  bindSensorNumber('bandStart', 'bandStart', 0.000001); bindSensorNumber('bandEnd', 'bandEnd', 0.000001); bindSensorNumber('bandStep', 'bandStep', 0.000001)
+  const bindSensorSwitch = (id, key) => $(`#${id}`)?.addEventListener('click', () => {
+    c.sensor[key] = !c.sensor[key]; syncSensorSamplingXml(); renderInspector()
+  })
+  bindSensorSwitch('continuousBandsSwitch', 'continuousBands')
+  bindSensorSwitch('principalPlaneSwitch', 'principalPlane')
+  bindSensorSwitch('hemisphereSwitch', 'hemisphere')
+  bindSensorSwitch('sensorCruiseSwitch', 'cruiseEnabled')
   $('#sensorProjection')?.addEventListener('change', (event) => {
     c.sensor.projection = event.target.value === 'perspective' ? 'perspective' : 'parallel'
     if (!Number.isFinite(Number(c.sensor.positionX))) c.sensor.positionX = Number(c.scene.x) / 2
@@ -585,20 +1750,60 @@ function bindInspector() {
     if (!(Number(c.sensor.height) > 0)) c.sensor.height = 3000
     updateXml('Geometry Sensor sensor projection', c.sensor.projection)
     updateXml('Geometry Sensor sensor sensorPosition', `${c.sensor.positionX},${c.sensor.positionY},${c.sensor.height}`)
+    syncSensorSamplingXml()
     refreshFromState(false)
+    renderInspector()
   })
   const bindSensorPosition = (id, key) => $(`#${id}`)?.addEventListener('change', (event) => {
     c.sensor[key] = Number(event.target.value)
     updateXml('Geometry Sensor sensor sensorPosition', `${c.sensor.positionX},${c.sensor.positionY},${c.sensor.height}`)
     refreshFromState(false)
+    renderInspector()
   })
   bindSensorPosition('sensorPositionX', 'positionX'); bindSensorPosition('sensorPositionY', 'positionY'); bindSensorPosition('sensorHeight', 'height')
-  const bindView = (id, key, index) => $(`#${id}`)?.addEventListener('change', (event) => { c.sensor[key] = Number(event.target.value); updatePair('Geometry Sensor sensor viewAngle viewAngle[type="custom"] viewAngles', index, event.target.value); refreshFromState(false) })
-  bindView('viewZenith', 'vza', 0); bindView('viewAzimuth', 'vaa', 1)
-  bindSwitch('imageSwitch', () => c.sensor.image, (v) => c.sensor.image = v, 'Control isImage'); bindSwitch('processSwitch', () => c.sensor.process, (v) => c.sensor.process = v, 'Control isProcess'); bindSwitch('temperatureSwitch', () => c.sensor.temperature, (v) => c.sensor.temperature = v, 'Control isTemperature'); bindSwitch('albedoSwitch', () => c.sensor.albedo, (v) => c.sensor.albedo = v, 'Control isAlbedo')
-  bindValue('meteoStart', (v) => c.meteo.start = v, 'Meteorology startTimeNode'); bindValue('meteoEnd', (v) => c.meteo.end = v, 'Meteorology endTimeNode')
+  bindSensorNumber('sensorFov', 'fov', 0.1)
+  $('#sensorCruiseRoute')?.addEventListener('change', (event) => {
+    c.sensor.cruiseRoute = event.target.value
+    syncSensorSamplingXml()
+    renderInspector()
+  })
+  bindSensorNumber('sensorCruiseTargetX', 'cruiseTargetX')
+  bindSensorNumber('sensorCruiseTargetY', 'cruiseTargetY')
+  bindSensorNumber('sensorCruiseTargetZ', 'cruiseTargetZ', 0.01)
+  bindSensorNumber('sensorCruiseRectangleWidth', 'cruiseRectangleWidth', 0.01)
+  bindSensorNumber('sensorCruiseRectangleHeight', 'cruiseRectangleHeight', 0.01)
+  bindSensorNumber('sensorCruiseStep', 'cruiseStep', 0.01)
+  bindSensorNumber('sensorCruiseCount', 'cruiseCount', 1)
+  $('#randomCruiseBtn')?.addEventListener('click', () => {
+    c.sensor.cruiseRandomSeed = Math.max(1, Math.floor(Math.random() * 2147483646))
+    syncSensorSamplingXml()
+    renderInspector()
+  })
+  const bindView = (id, key) => $(`#${id}`)?.addEventListener('change', (event) => { c.sensor[key] = Number(event.target.value); syncSensorSamplingXml(); renderInspector() })
+  bindView('viewZenith', 'vza'); bindView('viewAzimuth', 'vaa')
+  const energyOutputMode = state.mode === 'eFacetEB' || state.mode === 'eVoxelEB'
+  const syncActiveProcess = () => updateXml('Control isProcess',
+    (energyOutputMode ? (c.sensor.radiationProcess || c.sensor.energyProcess) : c.sensor.radiationProcess) ? 1 : 0)
+  bindSwitch('imageSwitch', () => c.sensor.image, (v) => c.sensor.image = v, 'Control isImage')
+  bindSwitch('radiationProcessSwitch', () => c.sensor.radiationProcess, (v) => { c.sensor.radiationProcess = v; syncActiveProcess() }, 'Control isRadiationProcess')
+  bindSwitch('energyProcessSwitch', () => c.sensor.energyProcess, (v) => { c.sensor.energyProcess = v; syncActiveProcess() }, 'Control isEnergyProcess')
+  bindSwitch('temperatureSwitch', () => c.sensor.temperature, (v) => c.sensor.temperature = v, 'Control isTemperature'); bindSwitch('albedoSwitch', () => c.sensor.albedo, (v) => c.sensor.albedo = v, 'Control isAlbedo')
+  bindValue('meteoStart', (v) => {
+    c.meteo.start = v
+    if (!(Number(c.meteo.end) > v)) { c.meteo.end = v + 1; updateXml('Meteorology endTimeNode', c.meteo.end); $('#meteoEnd').value = String(c.meteo.end) }
+  }, 'Meteorology startTimeNode', (value) => Math.max(0, Math.round(Number(value) || 0)))
+  bindValue('meteoEnd', (v) => c.meteo.end = v, 'Meteorology endTimeNode', (value) => Math.max(Number(c.meteo.start) + 1, Math.round(Number(value) || 0)))
+  bindValue('meteoDTime', (v) => c.meteo.dTime = v, 'Meteorology dTime', (value) => Math.max(1, Number(value) || 1800))
+  bindValue('meteoLatitude', (v) => c.meteo.latitude = v, 'Meteorology Latitude', (value) => Math.max(-90, Math.min(90, Number(value) || 0)))
+  bindValue('meteoLongitude', (v) => c.meteo.longitude = v, 'Meteorology Longitude', (value) => Math.max(-180, Math.min(180, Number(value) || 0)))
+  bindValue('meteoHeight', (v) => c.meteo.z = v, 'Meteorology z', (value) => Math.max(0, Number(value) || 0))
+  bindValue('meteoSoilTemperature', (v) => c.meteo.Tsold = v, 'Meteorology Tsold', (value) => Math.max(150, Math.min(400, Number(value) || 300)))
+  bindValue('meteoSatWater', (v) => c.meteo.SatWater = v, 'Meteorology SatWater', (value) => Math.max(0, Math.min(1, Number(value) || 0)))
+  $('#demFile')?.addEventListener('change', (event) => importDem(event.target.files?.[0]))
   $('#meteoFile')?.addEventListener('change', (event) => importMeteo(event.target.files?.[0]))
   $('#objectImportAction')?.addEventListener('click', importObj)
+  $('#objectGenerateAction')?.addEventListener('click', showGeometryDialog)
+  $('#objectMediumAction:not([disabled])')?.addEventListener('click', showMediumDialog)
   $$('.object-card[data-index]').forEach((card) => {
     const showAttributes = () => showObjectAttributeDialog(Number(card.dataset.index))
     card.addEventListener('click', (event) => { if (!event.target.closest('button')) showAttributes() })
@@ -607,31 +1812,57 @@ function bindInspector() {
   $$('.object-material').forEach((button) => button.addEventListener('click', (event) => { event.stopPropagation(); showObjectAttributeDialog(Number(button.closest('.object-card').dataset.index)) }))
   $$('.object-distribution').forEach((button) => button.addEventListener('click', (event) => { event.stopPropagation(); showObjectDialog(Number(button.closest('.object-card').dataset.index)) }))
   $$('.object-delete').forEach((button) => button.addEventListener('click', (event) => { event.stopPropagation(); deleteSceneObject(Number(button.closest('.object-card').dataset.index)) }))
-  $('#openProjectAction')?.addEventListener('click', chooseXml)
   $$('.library-add').forEach((button) => button.addEventListener('click', () => showPresetDialog(button.dataset.presetKind)))
+  $$('.library-card[data-preset-index]').forEach((card) => card.addEventListener('click', () => showPresetDialog(card.dataset.presetKind, Number(card.dataset.presetIndex))))
   $$('.library-filter').forEach((input) => input.addEventListener('input', () => {
     const keyword = input.value.trim().toLowerCase()
     $$(`[data-library-list="${input.dataset.libraryFilter}"] .library-card`).forEach((card) => card.classList.toggle('filtered-out', !card.dataset.librarySearch.includes(keyword)))
   }))
-  $('#facetToVoxelAction:not([disabled])')?.addEventListener('click', () => selectMode(state.mode === 'eFacetEB' ? 'eVoxelEB' : 'eVoxelRT', true))
 }
 
 function refreshFromState(rebuild = true) {
   const c = state.config
+  const simulationOutputs = []
+  if (c.sensor?.image) simulationOutputs.push('图像')
+  if (c.sensor?.radiationProcess || c.sensor?.energyProcess || c.sensor?.process) simulationOutputs.push('过程')
+  simulationOutputs.push('统计')
   $('#sceneSizeBadge').textContent = `${c.scene.x} × ${c.scene.y} m`; $('#lightBadge').textContent = `${c.light.zenith}° / ${c.light.azimuth}°`; $('#sensorBadge').textContent = `${c.sensor.x} × ${c.sensor.y}`
-  $('#objectBadge').textContent = c.objects.count || '0'; $('#materialBadge').textContent = `${c.spectra.length + c.thermals.length + c.materials.length}`; $('#meteoBadge').textContent = state.inputPath ? `${c.meteo.start}–${c.meteo.end}` : '未加载'; updateSun(c)
+  $('#objectBadge').textContent = c.objects.count || '0'; $('#materialBadge').textContent = `${c.spectra.length + c.thermals.length + c.canopies.length + c.materials.length}`; $('#atmosphereBadge').textContent = c.atmosphere?.enabled ? '已启用' : '关闭'; $('#meteoBadge').textContent = state.inputPath ? `${c.meteo.start}–${c.meteo.end}` : '未加载'; $('#fluidBadge').textContent = state.mode === 'eVoxelEB' ? (c.fluid?.enabled ? '已启用' : '关闭') : '仅 VoxelEB'; $('#simulationBadge').textContent = simulationOutputs.join(' / ')
   if (rebuild) { generateWorld(c); fitCamera() }
+  updateSun(c)
+}
+
+function hasTerrainValues(config) {
+  const dem = config?.scene?.demInfo
+  const width = Math.max(2, Math.round(Number(dem?.terrainWidth) || 0))
+  const height = Math.max(2, Math.round(Number(dem?.terrainHeight) || 0))
+  return Array.isArray(dem?.terrainValues) && dem.terrainValues.length === width * height
+}
+
+async function ensureDemInfo(config) {
+  if (!config?.scene?.terrain || !config.scene.demFile || hasTerrainValues(config)) return false
+  const inspected = await api.inspectDem({ path: config.scene.demFile, projectPath: state.inputPath })
+  config.scene.demInfo = inspected.metadata || null
+  if (state.project?.configuration) state.project.configuration.scene.demInfo = config.scene.demInfo
+  return hasTerrainValues(config)
 }
 
 async function loadActualScene(config) {
+  try {
+    if (await ensureDemInfo(config)) generateWorld(config)
+  } catch (error) {
+    addLog(`DEM 高程恢复失败：${error.message}`, 'error')
+  }
   await loadXmlScene({ api, world, config, log: addLog })
-  updateStats(); applyViewStyle(currentStyle); fitCamera()
+  updateSceneBoundsGuide(config); updateStats(); applyViewStyle(currentStyle); fitCamera()
 }
 
 function loadXml(result) {
   try {
-    const config = ensureMaterialPresets(parseXml(result.content))
-    const project = result.project || null
+    const projectMode = result.project?.mode || projectModeFromXml(result.content, state.mode)
+    const project = normalizeProject(result.project || parseProjectJson(result.content))
+    const config = ensureMaterialPresets(project.configuration)
+    if (project?.configuration?.scene?.demInfo) config.scene.demInfo = project.configuration.scene.demInfo
     const storedItems = project?.configuration?.objects?.items || []
     config.objects.items = config.objects.items.map((item, index) => {
       const stored = storedItems.find((entry) => (entry.fileName && entry.fileName === item.fileName) || entry.name === item.name) || storedItems[index]
@@ -639,7 +1870,7 @@ function loadXml(result) {
     })
     if (project) project.configuration = config
     Object.assign(state, { inputPath: result.path, xmlText: result.content, xmlDirty: false, project, projectPath: result.projectPath || '', config, outputDir: config.outDir || result.path.replace(/[\\/][^\\/]+$/, '') , selectedObjectIndex: -1, editingObjectIndex: -1, editingAttributeIndex: -1 })
-    if (project?.mode) selectMode(project.mode)
+    selectMode(projectMode)
     $('#xmlEditor').value = result.content; $('#xmlEditor').hidden = false; $('#emptyEditor').hidden = true; $('#applyXmlBtn').disabled = false; $('#xmlStatus').textContent = result.path
     $('#projectName').textContent = project?.name || fileName(result.path); $('#unsavedMark').hidden = true
     refreshFromState(); loadActualScene(config); renderInspector(); addLog(`已加载配置：${result.path}`, 'success'); toast('配置已加载', fileName(result.path))
@@ -658,6 +1889,8 @@ async function importMeteo(file) {
     project.configuration = state.config
     updateXml('Meteorology filePath', imported.path)
     if (!(await saveXml(true))) throw new Error('工程配置保存失败')
+    refreshFromState(false)
+    await loadActualScene(state.config)
     renderInspector()
     toast('导入成功', imported.relativePath || file.name)
     addLog(`已导入气象驱动：${imported.path}`, 'success')
@@ -666,11 +1899,48 @@ async function importMeteo(file) {
     addLog(error.message, 'error')
   }
 }
+
+function readFileBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(reader.error || new Error('无法读取 DEM 文件'))
+    reader.onload = () => resolve(String(reader.result || '').split(',', 2)[1] || '')
+    reader.readAsDataURL(file)
+  })
+}
+
+async function importDem(file) {
+  if (!file) return
+  try {
+    if (state.running) throw new Error('模拟运行中，不能更换 DEM 文件')
+    if (file.size > 64 * 1024 * 1024) throw new Error('DEM 文件超过 64MB，请先裁剪或降采样')
+    const imported = await api.importDem({ name: file.name, contentBase64: await readFileBase64(file), projectPath: state.inputPath })
+    const project = ensureProjectState()
+    state.config.scene.demFile = imported.relativePath || imported.path
+    state.config.scene.demInfo = imported.metadata || null
+    state.config.scene.terrain = true
+    project.configuration = state.config
+    if (!(await saveXml(true))) throw new Error('工程配置保存失败')
+    refreshFromState()
+    await loadActualScene(state.config)
+    renderInspector()
+    const warning = (imported.warnings || []).join('；')
+    toast(warning ? 'DEM 已导入（有提示）' : 'DEM 导入成功', warning || imported.relativePath || file.name, warning ? 'warning' : '')
+    addLog(`已导入 DEM：${imported.path}`, 'success')
+    if (warning) addLog(`DEM 提示：${warning}`, 'warning')
+  } catch (error) {
+    toast('DEM 导入失败', error.message, 'error')
+    addLog(error.message, 'error')
+  }
+}
+
 async function saveXml(fromProject = false) {
   fromProject = fromProject === true
   if (!state.xmlText) { await chooseXml(); return false }
+  state.lastSaveError = null
   try {
-    const config = fromProject ? state.config : parseXml(state.xmlText)
+    const config = fromProject ? state.config : parseXml(state.xmlText, state.mode)
+    if (fromProject) await ensureDemInfo(config)
     state.config = config
     if (state.project) {
       state.project.configuration = config
@@ -686,7 +1956,12 @@ async function saveXml(fromProject = false) {
     $('#xmlEditor').value = state.xmlText
     $('#unsavedMark').hidden = true; $('#xmlStatus').textContent = result.path; $('#projectName').textContent = state.project?.name || fileName(result.path)
     addLog(`已保存配置：${result.path}`, 'success'); toast('保存成功', fileName(result.path)); return true
-  } catch (error) { toast('保存失败', error.message, 'error'); return false }
+  } catch (error) {
+    state.lastSaveError = error
+    toast('保存失败', error.message, 'error')
+    addLog(`工程配置保存失败：${error.message}`, 'error')
+    return false
+  }
 }
 
 function ensureProjectState() {
@@ -718,8 +1993,17 @@ function finiteNumber(value, fallback) {
 
 const MIN_DISTRIBUTION_DENSITY = .01
 const DISTRIBUTION_DENSITY_DECIMALS = 2
+const MAX_DISTRIBUTION_INSTANCES = 100000
+const SQUARE_METERS_PER_HECTARE = 10000
 
-function normalizeDistributionDensity(value, fallback = .02) {
+function densityPerHectare(value, unit = 'hectare') {
+  const density = normalizeDistributionDensity(value)
+  return unit === 'squareKilometer'
+    ? normalizeDistributionDensity(density / 100)
+    : density
+}
+
+function normalizeDistributionDensity(value, fallback = 200) {
   const number = Number(value)
   const safe = Number.isFinite(number) && number > 0 ? number : fallback
   return Math.max(MIN_DISTRIBUTION_DENSITY, Number(safe.toFixed(DISTRIBUTION_DENSITY_DECIMALS)))
@@ -736,45 +2020,48 @@ function distributionArea(distribution) {
 }
 
 function populationFromValues(countValue, densityValue, area, basis) {
-  let count = Math.max(1, Math.min(10000, Math.round(finiteNumber(countValue, 1))))
+  let count = Math.max(1, Math.min(MAX_DISTRIBUTION_INSTANCES, Math.round(finiteNumber(countValue, 1))))
   let density = normalizeDistributionDensity(densityValue)
   if (basis === 'density') {
-    count = Math.max(1, Math.min(10000, Math.round(area * density)))
+    count = Math.max(1, Math.min(MAX_DISTRIBUTION_INSTANCES, Math.round(area * density / SQUARE_METERS_PER_HECTARE)))
   } else {
-    density = normalizeDistributionDensity(count / area)
+    density = normalizeDistributionDensity(count / area * SQUARE_METERS_PER_HECTARE)
   }
   return { count, density }
 }
 
 function defaultDistribution(item = {}) {
   const sceneX = Math.max(1, finiteNumber(state.config?.scene?.x, 60))
-  const sceneY = Math.max(1, finiteNumber(state.config?.scene?.y, 45))
+  const sceneY = Math.max(1, finiteNumber(state.config?.scene?.y, 60))
   const vegetation = item.type === 'Vegetation' || !item.type
-  const density = .02
-  const count = Math.max(1, Math.min(10000, Math.round(sceneX * sceneY * density)))
+  const density = 200
+  const count = Math.max(1, Math.min(MAX_DISTRIBUTION_INSTANCES, Math.round(sceneX * sceneY * density / SQUARE_METERS_PER_HECTARE)))
   return {
-    mode: 'random', basis: 'count', count, density,
+    mode: 'random', basis: 'density', count, density, densityUnit: 'hectare',
     rows: 4, columns: 6,
     minX: 0, maxX: sceneX,
     minY: 0, maxY: sceneY,
     seed: 1, scaleMin: vegetation ? .85 : 1, scaleMax: vegetation ? 1.15 : 1,
-    z: 0, points: ''
+    z: 0, offsetX: 0, offsetY: 0, offsetZ: 0, points: ''
   }
 }
 
 function distributionFromForm(form, options = {}) {
   const values = Object.fromEntries(new FormData(form).entries())
   const defaults = defaultDistribution({ type: values.objectType })
+  const mode = ['random', 'grid', 'single', 'manual'].includes(values.distributionMode) ? values.distributionMode : defaults.mode
+  const basis = values.distributionBasis === 'density' ? 'density' : 'count'
   const densityInput = String(values.distributionDensity ?? '').trim()
   const densityValue = Number(densityInput)
-  if (options.requireValidDensity && (!densityInput || !Number.isFinite(densityValue) || densityValue <= 0 || normalizeDistributionDensity(densityValue) < MIN_DISTRIBUTION_DENSITY)) {
+  const requiresDensity = options.requireValidDensity &&
+    (mode === 'random' || mode === 'grid') && basis === 'density'
+  if (requiresDensity && (!densityInput || !Number.isFinite(densityValue) || densityValue < MIN_DISTRIBUTION_DENSITY)) {
     throw new Error('分布密度必须填写大于 0 的有效数值，且保留两位小数')
   }
   const minX = finiteNumber(values.distributionMinX, defaults.minX)
   const maxX = finiteNumber(values.distributionMaxX, defaults.maxX)
   const minY = finiteNumber(values.distributionMinY, defaults.minY)
   const maxY = finiteNumber(values.distributionMaxY, defaults.maxY)
-  const basis = values.distributionBasis === 'density' ? 'density' : 'count'
   const population = populationFromValues(
     values.distributionCount,
     values.distributionDensity,
@@ -782,30 +2069,44 @@ function distributionFromForm(form, options = {}) {
     basis
   )
   return {
-    mode: ['random', 'grid', 'single', 'manual'].includes(values.distributionMode) ? values.distributionMode : defaults.mode,
+    mode,
     basis,
     count: population.count,
     density: population.density,
+    densityUnit: 'hectare',
     rows: Math.max(1, Math.round(finiteNumber(values.distributionRows, defaults.rows))),
     columns: Math.max(1, Math.round(finiteNumber(values.distributionColumns, defaults.columns))),
     minX, maxX, minY, maxY,
     seed: Math.round(finiteNumber(values.distributionSeed, defaults.seed)),
     scaleMin: Math.max(.01, finiteNumber(values.distributionScaleMin, defaults.scaleMin)),
     scaleMax: Math.max(.01, finiteNumber(values.distributionScaleMax, defaults.scaleMax)),
-    z: finiteNumber(values.distributionZ, defaults.z), points: String(values.distributionPoints || '').trim()
+    z: finiteNumber(values.distributionZ, defaults.z),
+    offsetX: finiteNumber(values.distributionOffsetX, defaults.offsetX),
+    offsetY: finiteNumber(values.distributionOffsetY, defaults.offsetY),
+    offsetZ: finiteNumber(values.distributionOffsetZ, defaults.offsetZ),
+    points: String(values.distributionPoints || '').trim()
   }
 }
 
 function setDistributionForm(form, value) {
-  const distribution = { ...defaultDistribution(), ...(value || {}) }
+  const source = value || {}
+  const distribution = {
+    ...defaultDistribution(),
+    ...source,
+    density: densityPerHectare(source.density, source.densityUnit),
+    densityUnit: 'hectare'
+  }
   const fields = {
     distributionMode: distribution.mode, distributionBasis: distribution.basis,
     distributionCount: distribution.count, distributionDensity: distributionDensityInputValue(distribution.density),
+    distributionDensityUnit: 'hectare',
     distributionRows: distribution.rows, distributionColumns: distribution.columns,
     distributionMinX: distribution.minX, distributionMaxX: distribution.maxX,
     distributionMinY: distribution.minY, distributionMaxY: distribution.maxY,
     distributionSeed: distribution.seed, distributionScaleMin: distribution.scaleMin,
     distributionScaleMax: distribution.scaleMax, distributionZ: distribution.z,
+    distributionOffsetX: distribution.offsetX, distributionOffsetY: distribution.offsetY,
+    distributionOffsetZ: distribution.offsetZ,
     distributionPoints: distribution.points || ''
   }
   for (const [name, fieldValue] of Object.entries(fields)) if (form.elements[name]) form.elements[name].value = fieldValue
@@ -825,8 +2126,98 @@ function seededRandom(seed) {
 function distributionTargetCount(distribution) {
   const width = Math.max(0, Math.abs(distribution.maxX - distribution.minX))
   const height = Math.max(0, Math.abs(distribution.maxY - distribution.minY))
-  const requested = distribution.basis === 'density' ? Math.round(width * height * distribution.density) : Math.round(distribution.count)
-  return Math.max(1, Math.min(10000, requested || 1))
+  const requested = distribution.basis === 'density'
+    ? Math.round(width * height * distribution.density / SQUARE_METERS_PER_HECTARE)
+    : Math.round(distribution.count)
+  return Math.max(1, Math.min(MAX_DISTRIBUTION_INSTANCES, requested || 1))
+}
+
+function isMobileAgentType(type) {
+  return type === 'Human' || type === 'Vehicle' || type === 'Ship'
+}
+
+function defaultMovement(type) {
+  const vehicle = type === 'Vehicle' || type === 'Ship'
+  return {
+    enabled: false,
+    mode: 'random',
+    speed: vehicle ? 8.3 : 1.3,
+    speedVariation: vehicle ? 1 : .2,
+    range: vehicle ? 50 : 20,
+    turnInterval: vehicle ? 8 : 5,
+    seed: 1
+  }
+}
+
+function movementFromForm(form) {
+  const type = form.elements.objectType.value
+  if (!isMobileAgentType(type)) return null
+  const defaults = defaultMovement(type)
+  return {
+    enabled: form.elements.movementEnabled.checked,
+    mode: 'random',
+    speed: Math.max(0, finiteNumber(form.elements.movementSpeed.value, defaults.speed)),
+    speedVariation: Math.max(0, finiteNumber(form.elements.movementSpeedVariation.value, defaults.speedVariation)),
+    range: Math.max(.1, finiteNumber(form.elements.movementRange.value, defaults.range)),
+    turnInterval: Math.max(.1, finiteNumber(form.elements.movementTurnInterval.value, defaults.turnInterval)),
+    seed: Math.round(finiteNumber(form.elements.movementSeed.value, defaults.seed))
+  }
+}
+
+function setMovementForm(form, movement, type) {
+  const value = { ...defaultMovement(type), ...(movement || {}), mode: 'random' }
+  form.elements.movementEnabled.checked = Boolean(value.enabled)
+  form.elements.movementSpeed.value = value.speed
+  form.elements.movementSpeedVariation.value = value.speedVariation
+  form.elements.movementRange.value = value.range
+  form.elements.movementTurnInterval.value = value.turnInterval
+  form.elements.movementSeed.value = value.seed
+}
+
+function updateMovementFormState(form) {
+  const section = $('#objectMovementFields')
+  const visible = isMobileAgentType(form.elements.objectType.value)
+  section.hidden = !visible
+  const enabled = visible && form.elements.movementEnabled.checked
+  section.querySelectorAll('input:not([name="movementEnabled"])').forEach((input) => { input.disabled = !enabled })
+}
+
+function parseDistributionPointsText(text, defaultZ = 0) {
+  const points = []
+  const lines = String(text || '').replace(/^\uFEFF/, '').split(/\r?\n/)
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].trim()
+    if (!line || line.startsWith('#') || line.startsWith('//')) continue
+    const values = line.split(/[\s,]+/).filter(Boolean).map(Number)
+    if (values.length < 2 || values.length > 5 || !values.every(Number.isFinite)) {
+      throw new Error(`自定义坐标第 ${index + 1} 行无效，应为 2–5 个数值`)
+    }
+    const point = {
+      x: values[0], y: values[1], z: values[2] ?? defaultZ,
+      scale: values[3] ?? 1, rotation: values[4] ?? 0
+    }
+    if (point.scale <= 0) throw new Error(`自定义坐标第 ${index + 1} 行的缩放必须大于 0`)
+    points.push(point)
+  }
+  if (!points.length) throw new Error('TXT 中没有有效的自定义坐标')
+  if (points.length > MAX_DISTRIBUTION_INSTANCES) throw new Error('单个 OBJ 最多支持 100000 个实例')
+  return points
+}
+
+function distributionPointsText(points) {
+  return points.map((point) => [point.x, point.y, point.z, point.scale, point.rotation].join(' ')).join('\n')
+}
+
+function applyDistributionOffset(points, distribution) {
+  const offsetX = finiteNumber(distribution.offsetX, 0)
+  const offsetY = finiteNumber(distribution.offsetY, 0)
+  const offsetZ = finiteNumber(distribution.offsetZ, 0)
+  return points.map((point) => ({
+    ...point,
+    x: point.x + offsetX,
+    y: point.y + offsetY,
+    z: point.z + offsetZ
+  }))
 }
 
 function generateDistribution(distribution) {
@@ -835,44 +2226,41 @@ function generateDistribution(distribution) {
   const minY = Math.min(d.minY, d.maxY), maxY = Math.max(d.minY, d.maxY)
   const scaleMin = Math.min(d.scaleMin, d.scaleMax), scaleMax = Math.max(d.scaleMin, d.scaleMax)
   if (d.mode === 'manual') {
-    const points = String(d.points || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line, index) => {
-      const values = line.split(/[\s,]+/).map(Number)
-      if (values.length < 2 || !values.every(Number.isFinite)) throw new Error(`自定义坐标第 ${index + 1} 行无效`)
-      return { x: values[0], y: values[1], z: values[2] ?? d.z, scale: values[3] ?? 1, rotation: values[4] ?? 0 }
-    })
-    if (!points.length) throw new Error('自定义坐标不能为空')
-    if (points.length > 10000) throw new Error('单个 OBJ 最多支持 10000 个实例')
-    if (points.some((item) => item.scale <= 0)) throw new Error('实例缩放必须大于 0')
-    return points
+    return applyDistributionOffset(parseDistributionPointsText(d.points, d.z), d)
   }
-  if (d.mode === 'single') return [{ x: (minX + maxX) / 2, y: (minY + maxY) / 2, z: d.z, scale: scaleMin, rotation: 0 }]
+  if (d.mode === 'single') return applyDistributionOffset([{ x: (minX + maxX) / 2, y: (minY + maxY) / 2, z: d.z, scale: scaleMin, rotation: 0 }], d)
   const targetCount = distributionTargetCount(d)
   if (d.mode === 'grid') {
     const width = Math.max(.001, maxX - minX), height = Math.max(.001, maxY - minY)
     const columns = Math.max(1, Math.ceil(Math.sqrt(targetCount * width / height)))
     const rows = Math.max(1, Math.ceil(targetCount / columns))
     d.rows = rows; d.columns = columns
-    return Array.from({ length: targetCount }, (_, index) => {
+    return applyDistributionOffset(Array.from({ length: targetCount }, (_, index) => {
       const row = Math.floor(index / columns), column = index % columns
       return {
         x: columns === 1 ? (minX + maxX) / 2 : minX + (maxX - minX) * column / (columns - 1),
         y: rows === 1 ? (minY + maxY) / 2 : minY + (maxY - minY) * row / (rows - 1),
         z: d.z, scale: scaleMin, rotation: 0
       }
-    })
+    }), d)
   }
   const random = seededRandom(d.seed)
-  return Array.from({ length: targetCount }, () => ({
+  return applyDistributionOffset(Array.from({ length: targetCount }, () => ({
     x: minX + random() * (maxX - minX), y: minY + random() * (maxY - minY), z: d.z,
     scale: scaleMin + random() * (scaleMax - scaleMin), rotation: random() * 360
-  }))
+  })), d)
 }
 
 function distributionSummary(item) {
   const labels = { random: '随机', grid: '网格', single: '单实例', manual: '自定义' }
   const count = item.instanceCount || (item.distribution ? distributionTargetCount({ ...defaultDistribution(item), ...item.distribution }) : 1)
-  const control = item.distribution?.basis === 'density' ? `${item.distribution.density} 个/m²` : `${count} 个实例`
-  return `${labels[item.distribution?.mode] || '已有位置'} · ${control}`
+  const control = item.distribution?.basis === 'density' ? `${item.distribution.density} 个/公顷` : `${count} 个实例`
+  const offsets = [item.distribution?.offsetX, item.distribution?.offsetY, item.distribution?.offsetZ].map((value) => finiteNumber(value, 0))
+  const offset = offsets.some((value) => value !== 0) ? ` · 偏移 (${offsets.join(', ')}) m` : ''
+  const movement = isMobileAgentType(item.type) && item.movement?.enabled
+    ? ` · 随机移动 ${finiteNumber(item.movement.speed, defaultMovement(item.type).speed)} m/s`
+    : ''
+  return `${labels[item.distribution?.mode] || '已有位置'} · ${control}${offset}${movement}`
 }
 
 function optionList(items, newLabel, selected = '__new__') {
@@ -888,7 +2276,8 @@ function setFormField(name, value) {
 }
 
 function physicalTypeForObject(type) {
-  if (type === 'Vegetation' || type === 'Water') return type
+  if (type === 'Vegetation' || type === 'Fire') return 'Vegetation'
+  if (type === 'Water' || type === 'Ship') return type
   return 'Soil'
 }
 
@@ -896,38 +2285,103 @@ function physicalInput(label, name, value, step = 'any') {
   return `<label class="dialog-field"><span>${escapeHtml(label)}</span><input class="input" name="${name}" type="number" step="${step}" value="${escapeHtml(value)}"></label>`
 }
 
-function renderModelParameters() {
+function spectrumFileImportFields(prefix, fileName = '') {
+  return `<label class="dialog-field"><span>波谱文件</span><input class="input" id="${prefix}SpectrumFile" type="file" accept=".txt,.dat,.csv,text/plain"></label><input type="hidden" name="fileName" value="${escapeHtml(fileName)}"><div class="notice" id="${prefix}SpectrumFileStatus">${fileName ? `已导入：${escapeHtml(fileName)}` : 'TXT 第 1 行为波长，第 2 行为反射率，第 3 行可选为透射率。'}</div>`
+}
+
+function physicalTextureFields(texture = {}) {
+  const enabled = Boolean(texture.enabled)
+  const fileName = String(texture.fileName || PHYSICAL_TEXTURE_PRESETS[0][0])
+  const known = PHYSICAL_TEXTURE_PRESETS.some(([value]) => value === fileName)
+  const options = PHYSICAL_TEXTURE_PRESETS.map(([value, label]) =>
+    `<option value="${escapeHtml(value)}" ${value === fileName ? 'selected' : ''}>${escapeHtml(label)}</option>`
+  ).join('')
+  const custom = !known && fileName
+    ? `<option value="${escapeHtml(fileName)}" selected>${escapeHtml(fileName)}</option>` : ''
+  return `<label class="dialog-field"><span>物理纹理</span><select class="select" name="physicalTextureEnabled"><option value="false" ${enabled ? '' : 'selected'}>关闭（默认）</option><option value="true" ${enabled ? 'selected' : ''}>启用</option></select></label><label class="dialog-field"><span>方差模板</span><select class="select" name="physicalTextureFileName">${options}${custom}</select></label>${physicalInput('方差强度（0–1）', 'physicalTextureStrength', texture.strength ?? 0.2, 0.01)}${physicalInput('重复尺寸（m）', 'physicalTextureRepeatSize', texture.repeatSize ?? 2, 0.01)}<div class="notice" style="grid-column:1 / -1">仅改变短波反射率的空间方差；按材质面积归一化，平均反射率保持不变。热红外发射率不随此纹理变化。</div>`
+}
+
+function physicalTextureFromValues(values) {
+  return {
+    enabled: values.physicalTextureEnabled === 'true',
+    fileName: String(values.physicalTextureFileName || ''),
+    strength: Math.max(0, Math.min(1, Number(values.physicalTextureStrength) || 0)),
+    repeatSize: Math.max(0.01, Number(values.physicalTextureRepeatSize) || 2)
+  }
+}
+
+function bindSpectrumFileInput(prefix, rootSelector) {
+  const root = $(rootSelector)
+  const input = root?.querySelector(`#${prefix}SpectrumFile`)
+  const hidden = root?.querySelector('[name="fileName"]')
+  const status = root?.querySelector(`#${prefix}SpectrumFileStatus`)
+  if (!input || !hidden || !status) return
+  input.addEventListener('change', async () => {
+    const file = input.files?.[0]
+    if (!file) return
+    try {
+      input.disabled = true
+      const imported = await api.importSpectrum({ name: file.name, content: await file.text() })
+      hidden.value = imported.relativePath
+      status.textContent = `已导入：${imported.relativePath}`
+      toast('波谱导入成功', imported.relativePath, 'success')
+    } catch (error) {
+      input.value = ''
+      toast('波谱导入失败', error.message, 'error')
+    } finally { input.disabled = false }
+  })
+}
+
+function renderModelParameters(fileName = '') {
   const model = $('#spectralModel').value
   if (model === 'Prospect') {
     $('#modelParameterFields').innerHTML = `${field('Cab', '<input class="input" name="paramCab" type="number" step="0.1" value="40">')}${field('Cw', '<input class="input" name="paramCw" type="number" step="0.001" value="0.01">')}${field('Cdm', '<input class="input" name="paramCdm" type="number" step="0.001" value="0.01">')}${field('Cs', '<input class="input" name="paramCs" type="number" step="0.001" value="0">')}${field('N', '<input class="input" name="paramN" type="number" step="0.1" value="1.5">')}`
   } else if (model === 'BSM') {
-    $('#modelParameterFields').innerHTML = `${field('SMC', '<input class="input" name="paramSMC" type="number" step="0.1" value="25">')}${field('亮度', '<input class="input" name="paramBSMBrightness" type="number" step="0.1" value="0.5">')}${field('纬度参数', '<input class="input" name="paramBSMlat" type="number" step="0.1" value="0">')}${field('经度参数', '<input class="input" name="paramBSMlon" type="number" step="0.1" value="0">')}`
-  } else $('#modelParameterFields').innerHTML = '<div class="notice">自定义模型直接使用各波段反射率和透射率，填写单个光学反射率和透射率值。</div>'
+    $('#modelParameterFields').innerHTML = `${field('SMC', '<input class="input" name="paramSMC" type="number" step="0.1" value="25">')}${field('亮度', '<input class="input" name="paramBSMBrightness" type="number" step="0.1" value="0.5">')}${field('纬度参数', '<input class="input" name="paramBSMlat" type="number" step="0.1" value="25">')}${field('经度参数', '<input class="input" name="paramBSMlon" type="number" step="0.1" value="45">')}`
+  } else if (model === 'file') {
+    $('#modelParameterFields').innerHTML = spectrumFileImportFields('material', fileName)
+    bindSpectrumFileInput('material', '#materialForm')
+  } else {
+    const count = configuredSpectralBands().length
+    $('#modelParameterFields').innerHTML = `<div class="notice">自定义模型按传感器波段填写反射率和透射率；当前为 ${count} 个波段。</div>`
+  }
+}
+
+function materialSpectrumValues(name) {
+  return $$(`#materialForm [name="${name}Value"]`).map((input) => input.value.trim()).filter(Boolean).join(',')
+}
+
+function renderMaterialSpectrumValueFields(reflectance = '0.20', transmittance = '0.0') {
+  const multiband = $('#spectralModel').value === 'custom'
+  $('#materialReflectanceFields').innerHTML = presetSpectrumFields('反射率', 'reflectance', reflectance, '0.20', multiband)
+  $('#materialTransmittanceFields').innerHTML = presetSpectrumFields('透射率', 'transmittance', transmittance, '0.0', multiband)
 }
 
 function applySpectrumPreset() {
-  const selected = state.config.spectra.find((item) => item.name === document.querySelector("#spectralPreset").value)
-  const nameInput = document.querySelector("#spectralMaterialName")
+  const selected = state.config.spectra.find((item) => item.name === document.querySelector('#spectralPreset').value)
+  const nameInput = document.querySelector('#spectralMaterialName')
   if (selected) {
     nameInput.value = selected.name
     nameInput.readOnly = true
-    document.querySelector("#spectralModel").value = selected.model || "custom"
-    setFormField("reflectance", selected.reflectance || "0.20")
-    setFormField("transmittance", selected.transmittance || "0.0")
-    setFormField("refTir", selected.refTir ?? 0.05)
-    setFormField("tauTir", selected.tauTir ?? 0)
-    renderModelParameters()
+    document.querySelector('#spectralModel').value = selected.model || 'custom'
+    setFormField('refTir', selected.refTir ?? 0.05)
+    setFormField('tauTir', selected.tauTir ?? 0)
+    renderModelParameters(selected.fileName || '')
+    renderMaterialSpectrumValueFields(selected.reflectance || '0.20', selected.transmittance || '0.0')
+    $('#materialPhysicalTextureFields').innerHTML = physicalTextureFields(selected.physicalTexture)
     const params = selected.params || {}
-    for (const [key, value] of Object.entries({ Cab: params.Cab, Cw: params.Cw, Cdm: params.Cdm, Cs: params.Cs, N: params.N, SMC: params.SMC, BSMBrightness: params.BSMBrightness, BSMlat: params.BSMlat, BSMlon: params.BSMlon })) setFormField("param" + key, value)
+    for (const [key, value] of Object.entries({ Cab: params.Cab, Cw: params.Cw, Cdm: params.Cdm, Cs: params.Cs, N: params.N, SMC: params.SMC, BSMBrightness: params.BSMBrightness, BSMlat: params.BSMlat, BSMlon: params.BSMlon })) setFormField('param' + key, value)
   } else {
     nameInput.readOnly = false
     renderModelParameters()
+    renderMaterialSpectrumValueFields()
+    $('#materialPhysicalTextureFields').innerHTML = physicalTextureFields()
   }
 }
 
 function renderSpectrumPresetOptions() {
   const type = document.querySelector("#materialObjectType").value
-  const preferred = { Vegetation: "green_leaf", Soil: "soil", Building: "concrete", Other: "concrete", Water: "water_surface" }[type]
+  const preferred = { Vegetation: "green_leaf", Fire: "fire_medium", Soil: "soil", Building: "concrete", Human: "human_surface", Vehicle: "vehicle_surface", Ship: "ship_surface", Other: "concrete", Water: "water_surface" }[type]
   const current = document.querySelector("#spectralPreset").value
   const selected = state.config.spectra.some((item) => item.name === current) ? current : preferred
   document.querySelector("#spectralPreset").innerHTML = optionList(state.config.spectra, document.querySelector("#spectralMaterialName").value, selected)
@@ -947,7 +2401,7 @@ function applyThermalPreset() {
 
 function renderThermalPresetOptions() {
   const type = document.querySelector("#materialObjectType").value
-  const preferred = { Vegetation: "vegetation_temperature", Soil: "soil_temperature", Building: "building_temperature", Other: "building_temperature", Water: "water_temperature" }[type]
+  const preferred = { Vegetation: "vegetation_temperature", Fire: "fire_temperature", Soil: "soil_temperature", Building: "building_temperature", Human: "human_temperature", Vehicle: "vehicle_temperature", Ship: "ship_temperature", Other: "building_temperature", Water: "water_temperature" }[type]
   const current = document.querySelector("#thermalPreset").value
   const selected = state.config.thermals.some((item) => item.name === current) ? current : preferred
   document.querySelector("#thermalPreset").innerHTML = optionList(state.config.thermals, document.querySelector("#thermalMaterialName").value, selected)
@@ -980,7 +2434,9 @@ function renderPhysicalParameters() {
   } else if (type === 'Water') {
     $('#physicalParameterFields').innerHTML = [
       physicalInput('表面阻力 rss', 'waterRss', defaults.rss, 1), physicalInput('体积热容', 'waterHeatCapacity', defaults.heatCapacity, 1),
-      physicalInput('混合深度', 'waterMixingDepth', defaults.mixingDepth, 0.1), physicalInput('蒸发系数', 'waterEvaporationCoefficient', defaults.evaporationCoefficient, 0.1)
+      physicalInput('混合深度', 'waterMixingDepth', defaults.mixingDepth, 0.1), physicalInput('蒸发系数', 'waterEvaporationCoefficient', defaults.evaporationCoefficient, 0.1),
+      physicalInput('辐射模型（0 Lambert / 1 Cox–Munk）', 'waterBrdfModel', defaults.brdfModel, 1), physicalInput('水体折射率', 'waterRefractiveIndex', defaults.refractiveIndex, 0.001),
+      physicalInput('水面坡度方差（0 随风速）', 'waterSlopeVariance', defaults.slopeVariance, 0.001), physicalInput('漫反射比例', 'waterDiffuseFraction', defaults.diffuseFraction, 0.01)
     ].join('')
   } else {
     $('#physicalParameterFields').innerHTML = [
@@ -996,20 +2452,53 @@ function renderPhysicalPresetOptions() {
   const objectType = $('#materialObjectType').value
   const type = physicalTypeForObject(objectType)
   const materials = state.config.materials.filter((item) => item.type === type)
-  const preferred = { Vegetation: 'leaf_c3', Soil: 'soilset', Building: 'soil_dry', Other: 'soilset', Water: 'water_set' }[objectType]
+  const preferred = { Vegetation: 'leaf_c3', Fire: 'leaf_c3', Soil: 'soilset', Building: 'soil_dry', Human: 'soil_dry', Vehicle: 'soil_dry', Ship: 'ship_material', Other: 'soilset', Water: 'water_set' }[objectType]
   $('#physicalMaterialPreset').innerHTML = optionList(materials, $('#physicalMaterialName').value, materials.some((item) => item.name === preferred) ? preferred : materials[0]?.name || '__new__')
   renderPhysicalParameters()
+}
+
+function recommendedVegetationMeshBinding(meshName, fallback) {
+  const name = String(meshName || '').toLowerCase()
+  if (/(leaf|leaves|foliage|needle|叶片|树叶|针叶)/.test(name)) {
+    return { ...fallback, spectralName: 'green_leaf', thermalName: 'vegetation_temperature', materialName: 'leaf_c3', canopyName: 'tree_leaf_canopy' }
+  }
+  if (/(branch|branches|twig|limb|树枝|枝条)/.test(name)) {
+    return { ...fallback, spectralName: 'tree_wood', thermalName: 'tree_wood_temperature', materialName: 'tree_branch_wood', canopyName: 'tree_branch_rigid' }
+  }
+  if (/(trunk|stem|bark|wood|树干|树皮|木质)/.test(name)) {
+    return { ...fallback, spectralName: 'tree_wood', thermalName: 'tree_wood_temperature', materialName: 'tree_trunk_wood', canopyName: 'tree_trunk_rigid' }
+  }
+  return fallback
 }
 
 function renderMeshMaterialRows() {
   const pending = state.pendingObject
   if (!pending) return
   const type = $('#materialObjectType').value
-  const preferredSpectrum = { Vegetation: 'green_leaf', Soil: 'soil', Building: 'concrete', Other: 'concrete', Water: 'water_surface' }[type]
-  const preferredThermal = { Vegetation: 'vegetation_temperature', Soil: 'soil_temperature', Building: 'building_temperature', Other: 'building_temperature', Water: 'water_temperature' }[type]
-  const spectrumOptions = optionList(state.config.spectra || [], $('#spectralMaterialName').value, document.querySelector("#spectralPreset").value || preferredSpectrum)
-  const thermalOptions = optionList(state.config.thermals || [], $('#thermalMaterialName').value, document.querySelector("#thermalPreset").value || preferredThermal)
-  $('#meshMaterialRows').innerHTML = pending.meshNames.map((name, index) => `<tr><td title="${escapeHtml(name)}">${escapeHtml(name)}</td><td><select class="select mesh-spectrum" data-index="${index}">${spectrumOptions}</select></td><td><select class="select mesh-thermal" data-index="${index}">${thermalOptions}</select></td></tr>`).join('')
+  const preferredSpectrum = { Vegetation: 'green_leaf', Fire: 'fire_medium', Soil: 'soil', Building: 'concrete', Human: 'human_surface', Vehicle: 'vehicle_surface', Ship: 'ship_surface', Other: 'concrete', Water: 'water_surface' }[type]
+  const preferredThermal = { Vegetation: 'vegetation_temperature', Fire: 'fire_temperature', Soil: 'soil_temperature', Building: 'building_temperature', Human: 'human_temperature', Vehicle: 'vehicle_temperature', Ship: 'ship_temperature', Other: 'building_temperature', Water: 'water_temperature' }[type]
+  const selectedSpectrum = document.querySelector("#spectralPreset").value || preferredSpectrum
+  const selectedThermal = document.querySelector("#thermalPreset").value || preferredThermal
+  const physicalType = physicalTypeForObject(type)
+  const physicalItems = state.config.materials.filter((item) => item.type === physicalType)
+  const preferredPhysical = { Vegetation: 'leaf_c3', Fire: 'leaf_c3', Soil: 'soilset', Building: 'soil_dry', Human: 'soil_dry', Vehicle: 'soil_dry', Ship: 'ship_material', Other: 'soilset', Water: 'water_set' }[type]
+  const selectedPhysical = $('#physicalMaterialPreset').value || preferredPhysical
+  const preferredCanopy = type === 'Fire' ? 'fire_medium' : type === 'Vegetation' ? 'tree_leaf_canopy' : 'rigid_body'
+  $('#meshMaterialRows').innerHTML = pending.meshNames.map((name, index) => {
+    const defaults = {
+      spectralName: selectedSpectrum,
+      thermalName: selectedThermal,
+      materialName: selectedPhysical,
+      canopyName: preferredCanopy
+    }
+    const binding = type === 'Vegetation'
+      ? recommendedVegetationMeshBinding(name, defaults) : defaults
+    const spectrumOptions = optionList(state.config.spectra || [], $('#spectralMaterialName').value, binding.spectralName)
+    const thermalOptions = optionList(state.config.thermals || [], $('#thermalMaterialName').value, binding.thermalName)
+    const physicalOptions = optionList(physicalItems, $('#physicalMaterialName').value, binding.materialName)
+    const canopyOptions = bindingOptionList(state.config.canopies || [], binding.canopyName, binding.canopyName)
+    return `<tr><td title="${escapeHtml(name)}">${escapeHtml(name)}</td><td><select class="select mesh-spectrum" data-index="${index}">${spectrumOptions}</select></td><td><select class="select mesh-thermal" data-index="${index}">${thermalOptions}</select></td><td><select class="select mesh-physical" data-index="${index}">${physicalOptions}</select></td><td><select class="select mesh-canopy" data-index="${index}">${canopyOptions}</select></td></tr>`
+  }).join('')
 }
 
 function showMaterialDialog() {
@@ -1017,7 +2506,9 @@ function showMaterialDialog() {
   if (!pending) return
   $('#materialForm').reset()
   const base = uniqueName(pending.source.path, 'object')
+  const suggestedType = pending.suggestedType || 'Vegetation'
   $('#materialObjectName').value = base
+  $('#materialObjectType').value = suggestedType
   $('#physicalMaterialName').value = `${base}_material`
   $('#spectralMaterialName').value = `${base}_spectral`
   $('#thermalMaterialName').value = `${base}_temperature`
@@ -1025,7 +2516,7 @@ function showMaterialDialog() {
   $('#spectralPreset').value = '__new__'
   $('#thermalPreset').value = '__new__'
   $('#physicalMaterialPreset').value = '__new__'
-  $('#spectralModel').value = 'Prospect'
+  $('#spectralModel').value = suggestedType === 'Vegetation' ? 'Prospect' : suggestedType === 'Soil' ? 'BSM' : 'custom'
   renderModelParameters(); renderSpectrumPresetOptions(); renderThermalPresetOptions(); renderPhysicalPresetOptions(); renderMeshMaterialRows()
   $('#materialDialog').hidden = false
 }
@@ -1036,19 +2527,388 @@ function hideMaterialDialog(discard = true) {
   if (discard) state.pendingObject = null
 }
 
+function geometryValues() {
+  const values = Object.fromEntries(new FormData($('#geometryForm')).entries())
+  const result = {
+    name: uniqueName(values.geometryName, 'geometry'),
+    shape: values.geometryShape === 'cube' ? 'cube' : 'ellipsoid',
+    mode: ['surface', 'chaos', 'water', 'fire'].includes(values.geometryMode) ? values.geometryMode : 'surface',
+    sizeX: Number(values.geometrySizeX), sizeY: Number(values.geometrySizeY), sizeZ: Number(values.geometrySizeZ),
+    detail: Math.max(1, Math.min(32, Math.round(Number(values.geometryDetail) || 2))),
+    basis: ['lai', 'lad', 'count'].includes(values.chaosBasis) ? values.chaosBasis : 'lai',
+    amount: Number(values.chaosAmount), facetArea: Number(values.chaosFacetArea),
+    orientation: ['spherical', 'horizontal', 'vertical'].includes(values.chaosOrientation) ? values.chaosOrientation : 'spherical',
+    seed: Math.round(Number(values.chaosSeed) || 0),
+    positionX: Number(values.mediumPositionX), positionY: Number(values.mediumPositionY), positionZ: Number(values.mediumPositionZ),
+    extinction: Number(values.mediumExtinction), scatteringAlbedo: Number(values.mediumScatteringAlbedo),
+    asymmetry: Number(values.mediumAsymmetry), temperature: Number(values.mediumTemperature), emissionScale: Number(values.mediumEmissionScale),
+    waterPositionX: Number(values.waterPositionX), waterPositionY: Number(values.waterPositionY), waterPositionZ: Number(values.waterPositionZ),
+    waterOffsetX: Number(values.waterOffsetX), waterOffsetY: Number(values.waterOffsetY), waterOffsetZ: Number(values.waterOffsetZ)
+  }
+  if (![result.sizeX, result.sizeY, result.sizeZ].every((value) => Number.isFinite(value) && value > 0)) throw new Error('几何体三个方向的尺寸必须大于 0')
+  if (result.mode === 'chaos' && (!Number.isFinite(result.amount) || result.amount <= 0 || !Number.isFinite(result.facetArea) || result.facetArea <= 0)) throw new Error('填充强度和单个面元面积必须大于 0')
+  if (result.mode === 'fire' && ![result.positionX, result.positionY, result.positionZ, result.extinction, result.scatteringAlbedo, result.asymmetry, result.temperature, result.emissionScale].every(Number.isFinite)) throw new Error('火焰介质参数必须为有效数值')
+  if (result.mode === 'fire' && (result.extinction < 0 || result.scatteringAlbedo < 0 || result.scatteringAlbedo > 1 || Math.abs(result.asymmetry) >= 1 || result.temperature < 0 || result.emissionScale < 0)) throw new Error('火焰介质参数超出有效范围')
+  if (result.mode === 'water' && ![result.waterPositionX, result.waterPositionY, result.waterPositionZ, result.waterOffsetX, result.waterOffsetY, result.waterOffsetZ].every(Number.isFinite)) throw new Error('水体位置与偏移必须为有效数值')
+  return result
+}
+
+function chaosTriangleCount(values) {
+  if (values.basis === 'count') return Math.round(values.amount)
+  const footprint = values.shape === 'cube'
+    ? values.sizeX * values.sizeZ
+    : Math.PI * values.sizeX * values.sizeZ / 4
+  const volume = values.shape === 'cube'
+    ? values.sizeX * values.sizeY * values.sizeZ
+    : Math.PI * values.sizeX * values.sizeY * values.sizeZ / 6
+  return Math.ceil((values.basis === 'lad' ? values.amount * volume : values.amount * footprint) / values.facetArea)
+}
+
+function surfaceTriangleCount(values) {
+  if (values.mode === 'water') return values.shape === 'cube'
+    ? 2 * values.detail * values.detail
+    : Math.max(16, values.detail * 16)
+  return values.shape === 'cube' ? 12 * values.detail * values.detail : 16 * values.detail * (4 * values.detail - 1)
+}
+
+function updateGeometryDialog() {
+  const form = $('#geometryForm')
+  if (!form) return
+  const chaos = form.elements.geometryMode.value === 'chaos'
+  const medium = form.elements.geometryMode.value === 'fire'
+  const water = form.elements.geometryMode.value === 'water'
+  $('#geometryShapeField').hidden = false
+  $('#geometrySizeYField').hidden = water
+  $('#geometryShapeLabel').textContent = water ? '水面形状' : '包络形状'
+  form.elements.geometryShape.options[0].textContent = water ? '圆形 / 椭圆' : '椭球'
+  form.elements.geometryShape.options[1].textContent = water ? '矩形' : '立方体'
+  $('#geometrySizeYLabel').textContent = medium ? 'Y 尺寸（m）' : 'Y 高度（m）'
+  $('#geometrySizeZLabel').textContent = medium ? 'Z 高度（m）' : water ? 'Y 尺寸（m）' : 'Z 尺寸（m）'
+  $('#geometrySurfaceFields').hidden = chaos || medium
+  $('#geometryChaosFields').hidden = !chaos
+  $('#geometryWaterFields').hidden = !water
+  $('#geometryMediumFields').hidden = !medium
+  $('#geometrySurfaceNotice').textContent = water
+    ? '生成朝上的水平三角网格水面；水面高程可在对象“分布”中通过 Z 设置。'
+    : '生成封闭外壳，适用于建筑等连续表面。立方体按六个面细分，椭球生成连续三角网格。'
+  const labels = { lai: 'LAI（m²/m²）', lad: 'LAD（m²/m³）', count: '面元数量' }
+  $('#geometryAmountLabel').textContent = labels[form.elements.chaosBasis.value] || labels.lai
+  try {
+    const values = geometryValues()
+    const triangles = values.mode === 'chaos'
+      ? chaosTriangleCount(values)
+      : surfaceTriangleCount(values)
+    $('#geometryEstimate').textContent = medium
+      ? `将生成 ${(values.shape === 'ellipsoid' ? '椭球' : '立方体')}火焰体积；中心平面位置 X/Y=(${values.positionX}, ${values.positionY}) m，底部 Z=${values.positionZ} m。`
+      : water
+        ? `将生成 ${values.shape === 'ellipsoid' ? '圆形/椭圆' : '矩形'}水面 ${values.sizeX} × ${values.sizeZ} m；最终中心 X/Y/Z=(${values.waterPositionX + values.waterOffsetX}, ${values.waterPositionY + values.waterOffsetY}, ${values.waterPositionZ + values.waterOffsetZ}) m；共 ${Math.max(1, triangles).toLocaleString('zh-CN')} 个三角面元。`
+      : `预计生成 ${Math.max(1, triangles).toLocaleString('zh-CN')} 个三角面元；Y 方向为高度，底面位于 Y=0。`
+  } catch (error) {
+    $('#geometryEstimate').textContent = error.message
+  }
+}
+
+function showGeometryDialog() {
+  if (!state.inputPath) { toast('无法生成几何体', '请先新建或打开工程', 'error'); return }
+  const form = $('#geometryForm')
+  form.reset()
+  form.elements.geometryName.value = `geometry_${(state.config?.objects?.items?.length || 0) + 1}`
+  updateGeometryDialog()
+  $('#geometryDialog').hidden = false
+  setTimeout(() => form.elements.geometryName.focus(), 0)
+}
+
+function setMediumDefaults(kind) {
+  const form = $('#geometryForm')
+  form.elements.geometryMode.value = 'fire'
+  form.elements.geometryName.value = `fire_${(state.config?.objects?.items?.length || 0) + 1}`
+  form.elements.geometryShape.value = 'ellipsoid'
+  form.elements.geometrySizeX.value = 25
+  form.elements.geometrySizeY.value = 25
+  form.elements.geometrySizeZ.value = 10
+  form.elements.mediumPositionX.value = state.config.scene.x / 2
+  form.elements.mediumPositionY.value = state.config.scene.y / 2
+  form.elements.mediumPositionZ.value = 0
+  form.elements.mediumExtinction.value = 1.2
+  form.elements.mediumScatteringAlbedo.value = 0.72
+  form.elements.mediumAsymmetry.value = 0.55
+  form.elements.mediumTemperature.value = 1100
+  form.elements.mediumEmissionScale.value = 1
+}
+
+function setWaterDefaults() {
+  const form = $('#geometryForm')
+  form.elements.geometryMode.value = 'water'
+  form.elements.geometryName.value = `water_${(state.config?.objects?.items?.length || 0) + 1}`
+  form.elements.geometryShape.value = 'cube'
+  form.elements.geometrySizeX.value = Math.max(1, Number(state.config?.scene?.x) || 60)
+  form.elements.geometrySizeY.value = 0.01
+  form.elements.geometrySizeZ.value = Math.max(1, Number(state.config?.scene?.y) || 60)
+  form.elements.geometryDetail.value = 2
+  form.elements.waterPositionX.value = Math.max(1, Number(state.config?.scene?.x) || 60) / 2
+  form.elements.waterPositionY.value = Math.max(1, Number(state.config?.scene?.y) || 60) / 2
+  form.elements.waterPositionZ.value = 0.01
+  form.elements.waterOffsetX.value = 0
+  form.elements.waterOffsetY.value = 0
+  form.elements.waterOffsetZ.value = 0
+}
+
+function showMediumDialog() {
+  if (!state.inputPath) { toast('无法添加参与介质', '请先新建或打开工程', 'error'); return }
+  if (state.mode !== 'eVoxelRT') { toast('参与介质不可用', '请先切换到体元辐射传输', 'error'); return }
+  const form = $('#geometryForm')
+  form.reset()
+  setMediumDefaults('fire')
+  updateGeometryDialog()
+  $('#geometryDialog').hidden = false
+  setTimeout(() => form.elements.geometryName.focus(), 0)
+}
+
+function hideGeometryDialog() {
+  $('#geometryDialog').hidden = true
+}
+
+function objNumber(value) {
+  const rounded = Math.abs(value) < 5e-9 ? 0 : value
+  return Number(rounded.toFixed(7)).toString()
+}
+
+function surfaceGeometryObj(values) {
+  const sizeYUp = values.mode === 'fire' ? values.sizeZ : values.sizeY
+  const sizeZDepth = values.mode === 'fire' ? values.sizeY : values.sizeZ
+  const geometry = values.shape === 'cube'
+    ? new THREE.BoxGeometry(values.sizeX, sizeYUp, sizeZDepth, values.detail, values.detail, values.detail)
+    : new THREE.SphereGeometry(1, Math.max(8, values.detail * 8), Math.max(4, values.detail * 4))
+  if (values.shape === 'cube') geometry.translate(0, sizeYUp / 2, 0)
+  else {
+    geometry.scale(values.sizeX / 2, sizeYUp / 2, sizeZDepth / 2)
+    geometry.translate(0, sizeYUp / 2, 0)
+  }
+  const triangles = geometry.index ? geometry.toNonIndexed() : geometry
+  const positions = triangles.getAttribute('position')
+  const lines = [
+    '# StreamSim generated OBJ',
+    '# generation: geometry',
+    `# envelope: ${values.shape} ${values.sizeX} ${values.sizeY} ${values.sizeZ}`,
+    `o ${values.name}`, `g ${values.name}`, 's off'
+  ]
+  for (let index = 0; index < positions.count; index += 1) {
+    lines.push(`v ${objNumber(positions.getX(index))} ${objNumber(positions.getY(index))} ${objNumber(positions.getZ(index))}`)
+  }
+  for (let index = 0; index < positions.count; index += 3) lines.push(`f ${index + 1} ${index + 2} ${index + 3}`)
+  if (triangles !== geometry) triangles.dispose()
+  geometry.dispose()
+  return `${lines.join('\n')}\n`
+}
+
+function waterSurfaceObj(values) {
+  const detail = Math.max(1, values.detail)
+  const geometry = values.shape === 'cube'
+    ? new THREE.PlaneGeometry(values.sizeX, values.sizeZ, detail, detail)
+    : new THREE.CircleGeometry(1, Math.max(16, detail * 16))
+  geometry.rotateX(-Math.PI / 2)
+  if (values.shape === 'ellipsoid') geometry.scale(values.sizeX / 2, 1, values.sizeZ / 2)
+  const triangles = geometry.index ? geometry.toNonIndexed() : geometry
+  const positions = triangles.getAttribute('position')
+  const lines = [
+    '# StreamSim generated water surface OBJ',
+    '# generation: water-surface',
+    `# extent: ${values.sizeX} ${values.sizeZ}`,
+    `o ${values.name}`, `g ${values.name}`, 's off'
+  ]
+  for (let index = 0; index < positions.count; index += 1) {
+    lines.push(`v ${objNumber(positions.getX(index))} ${objNumber(positions.getY(index))} ${objNumber(positions.getZ(index))}`)
+  }
+  for (let index = 0; index < positions.count; index += 3) lines.push(`f ${index + 1} ${index + 2} ${index + 3}`)
+  if (triangles !== geometry) triangles.dispose()
+  geometry.dispose()
+  return `${lines.join('\n')}\n`
+}
+
+function normalizeVector([x, y, z]) {
+  const length = Math.hypot(x, y, z) || 1
+  return [x / length, y / length, z / length]
+}
+
+function crossVector(a, b) {
+  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+
+function chaosNormal(random, orientation) {
+  const azimuth = random() * Math.PI * 2
+  if (orientation === 'horizontal') {
+    const tilt = (random() * 2 - 1) * Math.PI / 12
+    return [Math.sin(tilt) * Math.cos(azimuth), Math.cos(tilt), Math.sin(tilt) * Math.sin(azimuth)]
+  }
+  if (orientation === 'vertical') {
+    const elevation = (random() * 2 - 1) * Math.PI / 12
+    return [Math.cos(elevation) * Math.cos(azimuth), Math.sin(elevation), Math.cos(elevation) * Math.sin(azimuth)]
+  }
+  const y = random() * 2 - 1
+  const horizontal = Math.sqrt(Math.max(0, 1 - y * y))
+  return [horizontal * Math.cos(azimuth), y, horizontal * Math.sin(azimuth)]
+}
+
+function chaosCenter(random, values) {
+  if (values.shape === 'cube') return [(random() - 0.5) * values.sizeX, random() * values.sizeY, (random() - 0.5) * values.sizeZ]
+  const direction = chaosNormal(random, 'spherical')
+  const radius = Math.cbrt(random())
+  return [direction[0] * radius * values.sizeX / 2, values.sizeY / 2 + direction[1] * radius * values.sizeY / 2, direction[2] * radius * values.sizeZ / 2]
+}
+
+function insideEnvelope(point, values) {
+  if (values.shape === 'cube') return Math.abs(point[0]) <= values.sizeX / 2 && point[1] >= 0 && point[1] <= values.sizeY && Math.abs(point[2]) <= values.sizeZ / 2
+  const x = point[0] / (values.sizeX / 2)
+  const y = (point[1] - values.sizeY / 2) / (values.sizeY / 2)
+  const z = point[2] / (values.sizeZ / 2)
+  return x * x + y * y + z * z <= 1 + 1e-7
+}
+
+function chaosGeometryObj(values) {
+  const count = chaosTriangleCount(values)
+  if (!Number.isFinite(count) || count < 1) throw new Error('计算得到的面元数量必须大于 0')
+  if (count > 200000) throw new Error(`预计生成 ${count.toLocaleString('zh-CN')} 个面元，超过 200,000 上限；请降低 LAI/LAD 或增大单个面元面积`)
+  const random = seededRandom(values.seed)
+  const radius = Math.sqrt(4 * values.facetArea / (3 * Math.sqrt(3)))
+  const angles = [0, Math.PI * 2 / 3, Math.PI * 4 / 3]
+  const lines = [
+    '# StreamSim generated OBJ', '# generation: geometry-chaos',
+    `# envelope: ${values.shape} ${values.sizeX} ${values.sizeY} ${values.sizeZ}`,
+    `# facet-area: ${values.facetArea}`, `# triangle-count: ${count}`,
+    `o ${values.name}`, `g ${values.name}_chaos`, 's off'
+  ]
+  let generated = 0
+  for (let triangle = 0; triangle < count; triangle += 1) {
+    let points = null
+    for (let attempt = 0; attempt < 80 && !points; attempt += 1) {
+      const center = chaosCenter(random, values)
+      const normal = chaosNormal(random, values.orientation)
+      const reference = Math.abs(normal[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0]
+      const axisU = normalizeVector(crossVector(reference, normal))
+      const axisV = normalizeVector(crossVector(normal, axisU))
+      const candidate = angles.map((angle) => [
+        center[0] + radius * (Math.cos(angle) * axisU[0] + Math.sin(angle) * axisV[0]),
+        center[1] + radius * (Math.cos(angle) * axisU[1] + Math.sin(angle) * axisV[1]),
+        center[2] + radius * (Math.cos(angle) * axisU[2] + Math.sin(angle) * axisV[2])
+      ])
+      if (candidate.every((point) => insideEnvelope(point, values))) points = candidate
+    }
+    if (!points) throw new Error(`第 ${triangle + 1} 个面元无法放入包络；请减小单个面元面积或增大几何尺寸`)
+    for (const point of points) lines.push(`v ${objNumber(point[0])} ${objNumber(point[1])} ${objNumber(point[2])}`)
+    const first = generated * 3 + 1
+    lines.push(`f ${first} ${first + 1} ${first + 2}`)
+    generated += 1
+  }
+  return `${lines.join('\n')}\n`
+}
+
+function preparePendingObject(result, content, metadata = {}) {
+  const object = new OBJLoader().parse(content)
+  const meshNames = []
+  object.traverse((child) => { if (child.isMesh) { const name = child.name || child.material?.name || `mesh_${meshNames.length + 1}`; if (!meshNames.includes(name)) meshNames.push(name) } })
+  if (!meshNames.length) throw new Error('OBJ 中没有可用 mesh')
+  const box = new THREE.Box3().setFromObject(object)
+  const size = box.getSize(new THREE.Vector3())
+  const center = box.getCenter(new THREE.Vector3())
+  const scale = 8 / Math.max(size.x, size.y, size.z, .001)
+  object.position.sub(center).multiplyScalar(scale)
+  object.scale.setScalar(scale)
+  object.position.y += size.y * scale / 2
+  state.pendingObject = { source: { ...result, content }, object, meshNames, dimensions: metadata.dimensions || [size.x, size.y, size.z], ...metadata }
+}
+
+async function generateGeometryObject(event) {
+  event.preventDefault()
+  const submit = $('#geometryForm button[type="submit"]')
+  try {
+    submit.disabled = true
+    ensureProjectState()
+    const values = geometryValues()
+    if (state.config.objects.items.some((item) => item.name === values.name)) throw new Error(`对象名称已存在：${values.name}`)
+    const medium = values.mode === 'fire'
+    if (medium && state.mode !== 'eVoxelRT') throw new Error('火焰对象当前只支持体元辐射传输')
+    const content = values.mode === 'chaos'
+      ? chaosGeometryObj(values)
+      : values.mode === 'water' ? waterSurfaceObj(values) : surfaceGeometryObj(values)
+    const source = new OBJLoader().parse(content)
+    const meshNames = []
+    source.traverse((child) => { if (child.isMesh) { const name = child.name || child.material?.name || `mesh_${meshNames.length + 1}`; if (!meshNames.includes(name)) meshNames.push(name) } })
+    disposeObject(source)
+    if (!meshNames.length) throw new Error('生成结果中没有可用三角面元')
+    const type = values.mode === 'fire' ? 'Fire' : values.mode === 'chaos' ? 'Vegetation' : values.mode === 'water' ? 'Water' : 'Building'
+    const imported = await api.importObj({ name: `PRIM_${values.name}.obj`, content })
+    const distribution = {
+      ...defaultDistribution({ type }), mode: 'single', basis: 'count', count: 1, scaleMin: 1, scaleMax: 1,
+      // Position files and the editor both expose scene X/Y as horizontal and Z as height.
+      ...(medium ? { minX: values.positionX, maxX: values.positionX, minY: values.positionY, maxY: values.positionY, z: values.positionZ } : {}),
+      ...(type === 'Water' ? {
+        minX: values.waterPositionX, maxX: values.waterPositionX,
+        minY: values.waterPositionY, maxY: values.waterPositionY,
+        z: values.waterPositionZ,
+        offsetX: values.waterOffsetX, offsetY: values.waterOffsetY, offsetZ: values.waterOffsetZ
+      } : {})
+    }
+    const instances = generateDistribution(distribution)
+    const savedDistribution = await api.saveDistribution({ path: imported.positionPath, name: values.name, instances })
+    const spectralName = type === 'Fire' ? `${values.name}_fire_spectrum` : type === 'Vegetation' ? 'green_leaf' : type === 'Water' ? 'water_surface' : 'concrete'
+    const thermalName = type === 'Fire' ? `${values.name}_fire_temperature` : type === 'Vegetation' ? 'vegetation_temperature' : type === 'Water' ? 'water_temperature' : 'building_temperature'
+    const canopyName = type === 'Fire' ? `${values.name}_fire_medium` : type === 'Vegetation' ? 'canopy_default' : 'rigid_body'
+    if (medium) {
+      upsertByName(state.config.spectra, {
+        name: spectralName, label: `${values.name} · 火焰介质`,
+        model: 'custom', reflectance: '0', transmittance: '0', refTir: 0, tauTir: 0, params: {}
+      })
+      upsertByName(state.config.thermals, {
+        name: thermalName, label: `${values.name} · 固定温度`,
+        sunlitTemperature: values.temperature, shadedTemperature: values.temperature
+      })
+      upsertByName(state.config.canopies, {
+        name: canopyName, label: `${values.name} · 火焰`,
+        structureType: values.mode, lai: 0, density: 0, hc: values.sizeZ, G: 0,
+        LIDFa: 0, LIDFb: 0, hspot: 0, leafwidth: 0,
+        extinction: values.extinction, scatteringAlbedo: values.scatteringAlbedo,
+        asymmetry: values.asymmetry, emissionScale: values.emissionScale,
+        fixedTemperature: values.temperature
+      })
+    }
+    const item = {
+      name: values.name, type,
+      materialName: type === 'Vegetation' || medium ? 'leaf_c3' : type === 'Water' ? 'water_set' : 'soil_dry', canopyName,
+      fileName: imported.path, positionFile: savedDistribution.path,
+      shape: values.shape, dimensions: [values.sizeX, values.sizeY, values.sizeZ],
+      meshes: meshNames.map((name) => ({ name, spectralName, thermalName })),
+      distribution, instanceCount: 1, sourceKind: 'prim',
+      ...(medium ? { medium: { kind: values.mode, radiationOnly: true, coordinateOrder: 'XYZ' } } : {}),
+      generation: { type: values.mode === 'fire' ? '火焰' : values.mode === 'chaos' ? '几何体混沌' : values.mode === 'water' ? '水体' : '几何体', shape: values.shape, parameters: values }
+    }
+    state.config.objects.items.push(item)
+    state.config.objects.count = state.config.objects.items.length
+    state.config.objects.names = state.config.objects.items.map((entry) => entry.name)
+    state.project.configuration = state.config
+    state.xmlDirty = true
+    if (!(await saveXml(true))) throw new Error('PRIM 原型保存失败')
+    hideGeometryDialog()
+    state.panel = 'objects'
+    state.selectedObjectIndex = state.config.objects.items.length - 1
+    $$('.tree-item').forEach((button) => button.classList.toggle('active', button.dataset.panel === 'objects'))
+    refreshFromState(false)
+    await loadActualScene(state.config)
+    renderInspector()
+    showObjectAttributeDialog(state.selectedObjectIndex)
+    const triangleCount = values.mode === 'chaos' ? chaosTriangleCount(values) : surfaceTriangleCount(values)
+    addLog(`${medium ? '参与介质' : 'PRIM 原型'}已生成并加入场景：${values.name}${medium ? ' · 仅体元辐射传输' : ` · ${triangleCount} 个三角面元`}`, 'success')
+    toast(medium ? '参与介质对象已创建' : 'PRIM 原型生成完成', `${values.name} · 已显示在场景中`)
+  } catch (error) { toast('几何体生成失败', error.message, 'error') }
+  finally { submit.disabled = false }
+}
+
 async function importObj() {
   if (!state.inputPath) { toast('无法导入 OBJ', '请先新建或打开工程', 'error'); return }
   const result = await api.chooseObj()
   if (!result) return
   try {
     const content = sanitizeObjContent(result.content)
-    const object = new OBJLoader().parse(content)
-    const meshNames = []
-    object.traverse((child) => { if (child.isMesh) { const name = child.name || child.material?.name || `mesh_${meshNames.length + 1}`; if (!meshNames.includes(name)) meshNames.push(name) } })
-    if (!meshNames.length) throw new Error('OBJ 中没有可用 mesh')
-    const box = new THREE.Box3().setFromObject(object), size = box.getSize(new THREE.Vector3()), center = box.getCenter(new THREE.Vector3()), scale = 8 / Math.max(size.x, size.y, size.z, .001)
-    object.position.sub(center).multiplyScalar(scale); object.scale.setScalar(scale); object.position.y += size.y * scale / 2
-    state.pendingObject = { source: { ...result, content }, object, meshNames, dimensions: [size.x, size.y, size.z] }
+    preparePendingObject(result, content)
     showMaterialDialog()
   } catch (error) { toast('OBJ 解析失败', error.message, 'error') }
 }
@@ -1061,7 +2921,13 @@ function upsertByName(list, value) {
 
 function physicalFromForm(values, type) {
   let params
-  if (type === 'Vegetation') {
+  if (type === 'Wood') {
+    params = {
+      method: 1, rss: 1000000000, cs: Math.max(1, Number(values.soilCs)), rhos: Math.max(1, Number(values.soilRhos)),
+      lambdas: Math.max(0.001, Number(values.soilLambdas)), Tsoil: Number(values.soilTsoil), SMC: 0, Satwater: 0,
+      convectiveScale: Math.max(0.1, Number(values.woodConvectiveScale))
+    }
+  } else if (type === 'Vegetation') {
     params = {
       Vcmax: Number(values.bioVcmax), m: Number(values.bioM), BallBerry: Number(values.bioBallBerry), Type: Number(values.bioType),
       kV: Number(values.bioKV), Rdparam: Number(values.bioRdparam), Tparam: values.bioTparam, Tyear: Number(values.bioTyear),
@@ -1069,14 +2935,21 @@ function physicalFromForm(values, type) {
       stressfactor: Number(values.bioStressfactor), Tcor: Number(values.bioTcor)
     }
   } else if (type === 'Water') {
-    params = { rss: Number(values.waterRss), heatCapacity: Number(values.waterHeatCapacity), mixingDepth: Number(values.waterMixingDepth), evaporationCoefficient: Number(values.waterEvaporationCoefficient) }
+    params = {
+      rss: Math.max(0, Number(values.waterRss)), heatCapacity: Math.max(1, Number(values.waterHeatCapacity)),
+      mixingDepth: Math.max(0.01, Number(values.waterMixingDepth)), evaporationCoefficient: Math.max(0, Math.min(1, Number(values.waterEvaporationCoefficient))),
+      brdfModel: Number(values.waterBrdfModel) === 1 ? 1 : 0, refractiveIndex: Math.max(1, Number(values.waterRefractiveIndex)),
+      slopeVariance: Math.max(0, Number(values.waterSlopeVariance)), diffuseFraction: Math.max(0, Math.min(1, Number(values.waterDiffuseFraction)))
+    }
   } else {
     params = {
       method: Number(values.soilMethod), rss: Number(values.soilRss), cs: Number(values.soilCs), rhos: Number(values.soilRhos),
       lambdas: Number(values.soilLambdas), Tsoil: Number(values.soilTsoil), SMC: Number(values.soilSMC), Satwater: Number(values.soilSatwater)
     }
   }
-  return { name: values.materialName, type, params }
+  return type === 'Wood'
+    ? { name: values.materialName, type: 'Vegetation', energyModel: 'wood', params }
+    : { name: values.materialName, type, params }
 }
 
 function presetSelect(label, id, name, options) {
@@ -1087,28 +2960,88 @@ function presetText(label, name, value, attrs = '') {
   return `<label class="dialog-field"><span>${escapeHtml(label)}</span><input class="input" name="${name}" value="${escapeHtml(value)}" ${attrs}></label>`
 }
 
-function renderPresetParameterFields(spectralModel = 'custom') {
+function splitSpectrumValues(value, fallback) {
+  const values = String(value ?? '').split(',').map((entry) => entry.trim()).filter(Boolean)
+  return values.length ? values : [String(fallback)]
+}
+
+function configuredSpectralBands() {
+  const bands = String(state.config?.sensor?.bands || '').split(/[\s,;]+/).map((entry) => entry.trim()).filter(Boolean)
+  return bands.length ? bands : ['默认波段']
+}
+
+function presetSpectrumFields(label, name, value, fallback, useConfiguredBands = false) {
+  const sourceValues = splitSpectrumValues(value, fallback)
+  const bands = useConfiguredBands ? configuredSpectralBands() : []
+  const fieldCount = bands.length > 1 ? bands.length : 1
+  return Array.from({ length: fieldCount }, (_, index) => {
+    const entry = sourceValues[index] ?? sourceValues[0] ?? String(fallback)
+    const fieldLabel = fieldCount > 1 ? `${label}（${bands[index]} nm）` : label
+    return presetText(fieldLabel, `${name}Value`, entry, 'type="number" min="0" max="1" step="any" required')
+  }).join('')
+}
+
+function currentSpectrumValues(name) {
+  return $$(`#presetParameterFields [name="${name}Value"]`).map((input) => input.value.trim()).filter(Boolean).join(',')
+}
+
+function presetList(kind) {
+  if (kind === 'spectrum') return state.config.spectra
+  if (kind === 'thermal') return state.config.thermals
+  if (kind === 'canopy') return state.config.canopies
+  return state.config.materials
+}
+
+function renderPresetParameterFields(spectralModel = 'custom', item = null) {
   const kind = $('#presetKind').value
   const target = $('#presetParameterFields')
   if (kind === 'spectrum') {
-    const models = [['custom', '自定义'], ['Prospect', 'PROSPECT'], ['BSM', 'BSM']]
+    const current = item || {}
+    const models = [['custom', '自定义（面板数据）'], ['Prospect', 'PROSPECT 模型'], ['BSM', 'BSM 模型'], ['file', '导入波谱 TXT']]
     const modelOptions = models.map(([value, label]) => `<option value="${value}" ${value === spectralModel ? 'selected' : ''}>${label}</option>`).join('')
+    const modelDefault = createMaterialPresets().spectra.find((entry) => entry.model === spectralModel) || createMaterialPresets().spectra[0]
+    const defaults = { ...(modelDefault.params || {}), ...(current.params || {}) }
     let parameters = ''
     if (spectralModel === 'Prospect') {
-      parameters = `${physicalInput('Cab', 'paramCab', 40, 0.1)}${physicalInput('Cw', 'paramCw', 0.01, 0.001)}${physicalInput('Cdm', 'paramCdm', 0.01, 0.001)}${physicalInput('Cs', 'paramCs', 0, 0.001)}${physicalInput('N', 'paramN', 1.5, 0.1)}`
+      parameters = `${physicalInput('Cab', 'paramCab', defaults.Cab, 0.1)}${physicalInput('Cw', 'paramCw', defaults.Cw, 0.001)}${physicalInput('Cdm', 'paramCdm', defaults.Cdm, 0.001)}${physicalInput('Cs', 'paramCs', defaults.Cs, 0.001)}${physicalInput('N', 'paramN', defaults.N, 0.1)}`
     } else if (spectralModel === 'BSM') {
-      parameters = `${physicalInput('土壤含水量 SMC', 'paramSMC', 25, 0.1)}${physicalInput('亮度', 'paramBSMBrightness', 0.5, 0.1)}${physicalInput('纬度参数', 'paramBSMlat', 0, 0.1)}${physicalInput('经度参数', 'paramBSMlon', 0, 0.1)}`
+      parameters = `${physicalInput('土壤含水量 SMC', 'paramSMC', defaults.SMC, 0.1)}${physicalInput('亮度', 'paramBSMBrightness', defaults.BSMBrightness, 0.1)}${physicalInput('纬度参数', 'paramBSMlat', defaults.BSMlat, 0.1)}${physicalInput('经度参数', 'paramBSMlon', defaults.BSMlon, 0.1)}`
+    } else if (spectralModel === 'file') {
+      parameters = spectrumFileImportFields('preset', current.fileName || '')
     }
-    target.innerHTML = `${presetSelect('光谱模型', 'presetSpectralModel', 'spectralModel', modelOptions)}${presetText('反射率', 'reflectance', spectralModel === 'Prospect' ? '0.08' : '0.20', 'required')}${presetText('透射率', 'transmittance', spectralModel === 'Prospect' ? '0.04' : '0.0', 'required')}${physicalInput('TIR 反射率', 'refTir', 0.05, 0.01)}${physicalInput('TIR 透射率', 'tauTir', 0, 0.01)}${parameters}`
-    $('#presetSpectralModel').addEventListener('change', (event) => renderPresetParameterFields(event.target.value))
+    target.innerHTML = `${presetSelect('光谱模型', 'presetSpectralModel', 'spectralModel', modelOptions)}${presetSpectrumFields('反射率', 'reflectance', current.reflectance, spectralModel === 'Prospect' ? '0.08' : '0.20', spectralModel === 'custom')}${presetSpectrumFields('透射率', 'transmittance', current.transmittance, spectralModel === 'Prospect' ? '0.04' : '0.0', spectralModel === 'custom')}${physicalInput('TIR 反射率', 'refTir', current.refTir ?? 0.05, 0.01)}${physicalInput('TIR 透射率', 'tauTir', current.tauTir ?? 0, 0.01)}${parameters}${physicalTextureFields(current.physicalTexture)}`
+    $('#presetSpectralModel').addEventListener('change', (event) => {
+      const preservedParams = { ...(current.params || {}) }
+      $$(`#presetParameterFields [name^="param"]`).forEach((input) => preservedParams[input.name.slice(5)] = Number(input.value))
+      renderPresetParameterFields(event.target.value, {
+        ...current,
+        model: event.target.value,
+        reflectance: currentSpectrumValues('reflectance'),
+        transmittance: currentSpectrumValues('transmittance'),
+        refTir: Number($('#presetParameterFields [name="refTir"]').value),
+        tauTir: Number($('#presetParameterFields [name="tauTir"]').value),
+        fileName: $('#presetParameterFields [name="fileName"]')?.value || '',
+        physicalTexture: physicalTextureFromValues(Object.fromEntries(new FormData($('#presetForm')).entries())),
+        params: preservedParams
+      })
+    })
+    if (spectralModel === 'file') bindSpectrumFileInput('preset', '#presetForm')
     return
   }
   if (kind === 'thermal') {
-    target.innerHTML = `${physicalInput('阳面温度（K）', 'sunlitTemperature', 305, 0.1)}${physicalInput('阴面温度（K）', 'shadedTemperature', 295, 0.1)}`
+    target.innerHTML = `${physicalInput('阳面温度（K）', 'sunlitTemperature', item?.sunlitTemperature ?? 305, 0.1)}${physicalInput('阴面温度（K）', 'shadedTemperature', item?.shadedTemperature ?? 295, 0.1)}`
     return
   }
-  const typeOptions = [['Vegetation', '植被生理生化'], ['Soil', '土壤表面物化'], ['Water', '水体物性']].map(([value, label]) => `<option value="${value}" ${value === state.presetPhysicalType ? 'selected' : ''}>${label}</option>`).join('')
-  const defaults = createMaterialPresets().materials.find((item) => item.type === state.presetPhysicalType)?.params || {}
+  if (kind === 'canopy') {
+    const defaults = { ...createMaterialPresets().canopies[0], ...(item || {}) }
+    const structureOptions = [['canopy', '混沌介质（多孔透射）'], ['rigid', '刚体（不透光轮廓）'], ['fire', '火焰（参与介质）']]
+      .map(([value, label]) => `<option value="${value}" ${value === defaults.structureType ? 'selected' : ''}>${label}</option>`).join('')
+    target.innerHTML = `${presetSelect('结构类型', 'presetStructureType', 'structureType', structureOptions)}${physicalInput('叶面积指数 LAI', 'lai', defaults.lai, 0.01)}${physicalInput('叶面积密度 LAD', 'density', defaults.density, 0.01)}${physicalInput('介质高度 hc（m）', 'hc', defaults.hc, 0.01)}${physicalInput('投影系数 G', 'G', defaults.G, 0.01)}${physicalInput('叶倾角参数 LIDFa', 'LIDFa', defaults.LIDFa, 0.01)}${physicalInput('叶倾角参数 LIDFb', 'LIDFb', defaults.LIDFb, 0.01)}${physicalInput('热点参数 hspot', 'hspot', defaults.hspot, 0.01)}${physicalInput('叶宽 leafwidth（m）', 'leafwidth', defaults.leafwidth, 0.01)}${physicalInput('消光系数（m⁻¹）', 'extinction', defaults.extinction ?? 0, 0.01)}${physicalInput('单次散射反照率', 'scatteringAlbedo', defaults.scatteringAlbedo ?? 0, 0.01)}${physicalInput('散射非对称因子', 'asymmetry', defaults.asymmetry ?? 0, 0.01)}${physicalInput('发射倍率', 'emissionScale', defaults.emissionScale ?? 0, 0.01)}${physicalInput('固定温度（K）', 'fixedTemperature', defaults.fixedTemperature ?? 0, 1)}`
+    return
+  }
+  const typeOptions = [['Vegetation', '植被生理生化'], ['Wood', '木质固体热平衡'], ['Soil', '土壤表面物化'], ['Water', '水体物性'], ['Ship', '船舶表面物化']].map(([value, label]) => `<option value="${value}" ${value === state.presetPhysicalType ? 'selected' : ''}>${label}</option>`).join('')
+  const baseDefaults = createMaterialPresets().materials.find((entry) => state.presetPhysicalType === 'Wood' ? entry.energyModel === 'wood' : entry.type === state.presetPhysicalType)?.params || {}
+  const defaults = { ...baseDefaults, ...(item?.params || {}) }
   let parameters
   if (state.presetPhysicalType === 'Vegetation') {
     parameters = [
@@ -1121,39 +3054,75 @@ function renderPresetParameterFields(spectralModel = 'custom') {
       physicalInput('温度校正', 'bioTcor', defaults.Tcor, 1)
     ].join('')
   } else if (state.presetPhysicalType === 'Water') {
-    parameters = `${physicalInput('表面阻力 rss', 'waterRss', defaults.rss, 1)}${physicalInput('体积热容', 'waterHeatCapacity', defaults.heatCapacity, 1)}${physicalInput('混合深度', 'waterMixingDepth', defaults.mixingDepth, 0.1)}${physicalInput('蒸发系数', 'waterEvaporationCoefficient', defaults.evaporationCoefficient, 0.1)}`
+    parameters = `${physicalInput('表面阻力 rss', 'waterRss', defaults.rss, 1)}${physicalInput('体积热容', 'waterHeatCapacity', defaults.heatCapacity, 1)}${physicalInput('混合深度', 'waterMixingDepth', defaults.mixingDepth, 0.1)}${physicalInput('蒸发系数', 'waterEvaporationCoefficient', defaults.evaporationCoefficient, 0.1)}${physicalInput('辐射模型（0 Lambert / 1 Cox–Munk）', 'waterBrdfModel', defaults.brdfModel, 1)}${physicalInput('水体折射率', 'waterRefractiveIndex', defaults.refractiveIndex, 0.001)}${physicalInput('水面坡度方差（0 随风速）', 'waterSlopeVariance', defaults.slopeVariance, 0.001)}${physicalInput('漫反射比例', 'waterDiffuseFraction', defaults.diffuseFraction, 0.01)}`
+  } else if (state.presetPhysicalType === 'Wood') {
+    parameters = `${physicalInput('比热容 cs（J·kg⁻¹·K⁻¹）', 'soilCs', defaults.cs, 1)}${physicalInput('密度 rhos（kg·m⁻³）', 'soilRhos', defaults.rhos, 1)}${physicalInput('导热率 λ（W·m⁻¹·K⁻¹）', 'soilLambdas', defaults.lambdas, 0.01)}${physicalInput('对流换热倍率', 'woodConvectiveScale', defaults.convectiveScale ?? 1, 0.1)}${physicalInput('初始温度（℃）', 'soilTsoil', defaults.Tsoil, 0.1)}<div class="notice">木质固体不计算光合作用和蒸腾，温度由辐射、对流、导热与热储存共同求解。</div>`
   } else {
     parameters = `${physicalInput('方法', 'soilMethod', defaults.method, 1)}${physicalInput('表面阻力 rss', 'soilRss', defaults.rss, 1)}${physicalInput('比热容 cs', 'soilCs', defaults.cs, 1)}${physicalInput('密度 rhos', 'soilRhos', defaults.rhos, 1)}${physicalInput('导热率 λ', 'soilLambdas', defaults.lambdas, 0.01)}${physicalInput('初始温度', 'soilTsoil', defaults.Tsoil, 0.1)}${physicalInput('土壤含水量 SMC', 'soilSMC', defaults.SMC, 0.1)}${physicalInput('饱和含水量', 'soilSatwater', defaults.Satwater, 0.01)}`
   }
   target.innerHTML = `${presetSelect('物化类型', 'presetPhysicalType', 'physicalType', typeOptions)}${parameters}`
-  $('#presetPhysicalType').addEventListener('change', (event) => { state.presetPhysicalType = event.target.value; renderPresetParameterFields() })
+  $('#presetPhysicalType').addEventListener('change', (event) => {
+    state.presetPhysicalType = event.target.value
+    renderPresetParameterFields('custom')
+  })
 }
 
-function showPresetDialog(kind = 'spectrum') {
-  if (!state.inputPath) { toast('无法新增材质属性', '请先新建或打开工程', 'error'); return }
+function showPresetDialog(kind = 'spectrum', index = -1) {
+  if (!state.inputPath) { toast('无法编辑材质属性', '请先新建或打开工程', 'error'); return }
   $('#presetForm').reset()
+  const list = presetList(kind)
+  const item = Number.isInteger(index) && index >= 0 ? list[index] : null
+  state.editingPreset = item ? { kind, index } : null
   $('#presetKind').value = kind
-  $('#presetName').value = ''
-  $('#presetLabel').value = ''
-  state.presetPhysicalType = 'Vegetation'
-  renderPresetParameterFields()
+  $('#presetKind').disabled = Boolean(item)
+  $('#presetName').readOnly = Boolean(item)
+  $('#presetName').value = item?.name || ''
+  $('#presetLabel').value = item?.label || ''
+  state.presetPhysicalType = item?.energyModel === 'wood' ? 'Wood' : (item?.type || 'Vegetation')
+  $('#presetDialogTitle').textContent = item ? `修改材质属性 · ${item.label || item.name}` : '新增材质属性'
+  $('#presetSubmitBtn').innerHTML = item ? '<svg><use href="#i-save"/></svg>保存修改' : '<svg><use href="#i-plus"/></svg>加入预设库'
+  renderPresetParameterFields(item?.model || 'custom', item)
   $('#presetDialog').hidden = false
-  setTimeout(() => $('#presetName').focus(), 0)
+  setTimeout(() => (item ? $('#presetParameterFields .input, #presetParameterFields .select') : $('#presetName'))?.focus(), 0)
 }
 
-function hidePresetDialog() { $('#presetDialog').hidden = true }
+function hidePresetDialog() {
+  $('#presetDialog').hidden = true
+  $('#presetKind').disabled = false
+  $('#presetName').readOnly = false
+  state.editingPreset = null
+}
 
 function presetFromForm(values) {
-  const name = uniqueName(values.presetName, 'material')
+  const editing = state.editingPreset
+  const existing = editing ? presetList(editing.kind)[editing.index] : null
+  const name = existing?.name || uniqueName(values.presetName, 'material')
   const label = String(values.presetLabel || '').trim() || name
-  if (values.presetKind === 'spectrum') {
+  const kind = editing?.kind || values.presetKind
+  if (kind === 'spectrum') {
     return {
       list: state.config.spectra,
-      item: { name, label, model: values.spectralModel, reflectance: values.reflectance, transmittance: values.transmittance, refTir: Number(values.refTir), tauTir: Number(values.tauTir), params: { Cab: Number(values.paramCab), Cw: Number(values.paramCw), Cdm: Number(values.paramCdm), Cs: Number(values.paramCs), N: Number(values.paramN), SMC: Number(values.paramSMC), BSMBrightness: Number(values.paramBSMBrightness), BSMlat: Number(values.paramBSMlat), BSMlon: Number(values.paramBSMlon) } }
+      item: { name, label, model: values.spectralModel, fileName: values.fileName || '', reflectance: values.reflectance, transmittance: values.transmittance, refTir: Number(values.refTir), tauTir: Number(values.tauTir), physicalTexture: physicalTextureFromValues(values), params: { Cab: Number(values.paramCab), Cw: Number(values.paramCw), Cdm: Number(values.paramCdm), Cs: Number(values.paramCs), N: Number(values.paramN), SMC: Number(values.paramSMC), BSMBrightness: Number(values.paramBSMBrightness), BSMlat: Number(values.paramBSMlat), BSMlon: Number(values.paramBSMlon) } }
     }
   }
-  if (values.presetKind === 'thermal') {
+  if (kind === 'thermal') {
     return { list: state.config.thermals, item: { name, label, sunlitTemperature: Number(values.sunlitTemperature), shadedTemperature: Number(values.shadedTemperature) } }
+  }
+  if (kind === 'canopy') {
+    return {
+      list: state.config.canopies,
+      item: {
+        name, label,
+        structureType: ['canopy', 'rigid', 'fire', 'fog'].includes(values.structureType) ? values.structureType : 'canopy',
+        lai: Number(values.lai), density: Number(values.density), hc: Number(values.hc), G: Number(values.G),
+        LIDFa: Number(values.LIDFa), LIDFb: Number(values.LIDFb), hspot: Number(values.hspot), leafwidth: Number(values.leafwidth),
+        extinction: Math.max(0, Number(values.extinction) || 0),
+        scatteringAlbedo: Math.max(0, Math.min(1, Number(values.scatteringAlbedo) || 0)),
+        asymmetry: Math.max(-0.99, Math.min(0.99, Number(values.asymmetry) || 0)),
+        emissionScale: Math.max(0, Number(values.emissionScale) || 0),
+        fixedTemperature: Math.max(0, Number(values.fixedTemperature) || 0)
+      }
+    }
   }
   return { list: state.config.materials, item: { ...physicalFromForm({ ...values, materialName: name }, values.physicalType), label } }
 }
@@ -1161,21 +3130,38 @@ function presetFromForm(values) {
 async function savePreset(event) {
   event.preventDefault()
   const submit = $('#presetForm button[type="submit"]')
-  const values = Object.fromEntries(new FormData($('#presetForm')).entries())
+  const formData = new FormData($('#presetForm'))
+  const values = Object.fromEntries(formData.entries())
+  values.presetKind = state.editingPreset?.kind || values.presetKind
+  if (values.presetKind === 'spectrum') {
+    values.reflectance = formData.getAll('reflectanceValue').map(String).join(',')
+    values.transmittance = formData.getAll('transmittanceValue').map(String).join(',')
+    if (values.spectralModel === 'file' && !values.fileName) { toast('请先导入波谱文件', '需要包含波长行和反射率行', 'error'); return }
+  }
   const { list, item } = presetFromForm(values)
-  if (list.some((entry) => entry.name === item.name)) { toast('名称已存在', `请更换内部名称：${item.name}`, 'error'); return }
+  const editingIndex = state.editingPreset?.index ?? -1
+  if (list.some((entry, index) => index !== editingIndex && entry.name === item.name)) { toast('名称已存在', `请更换内部名称：${item.name}`, 'error'); return }
+  const previous = editingIndex >= 0 ? list[editingIndex] : null
+  let applied = false
   try {
     submit.disabled = true
     ensureProjectState()
-    list.push(item)
+    if (editingIndex >= 0) list[editingIndex] = item
+    else list.push(item)
+    applied = true
     state.project.configuration = state.config
     state.xmlDirty = true
     $('#unsavedMark').hidden = false
-    if (!(await saveXml(true))) { list.pop(); throw new Error('预设保存失败') }
+    if (!(await saveXml(true))) throw new Error('材质属性保存失败')
     hidePresetDialog(); refreshFromState(false); renderInspector()
-    addLog(`材质预设已加入工程：${item.name}`, 'success')
-  } catch (error) { toast('新增材质属性失败', error.message, 'error') }
-  finally { submit.disabled = false }
+    addLog(`${editingIndex >= 0 ? '材质属性已修改' : '材质预设已加入工程'}：${item.name}`, 'success')
+  } catch (error) {
+    if (applied) {
+      if (editingIndex >= 0) list[editingIndex] = previous
+      else list.pop()
+    }
+    toast(editingIndex >= 0 ? '修改材质属性失败' : '新增材质属性失败', error.message, 'error')
+  } finally { submit.disabled = false }
 }
 
 async function saveImportedObject(event) {
@@ -1183,46 +3169,88 @@ async function saveImportedObject(event) {
   const pending = state.pendingObject
   if (!pending) return
   const submit = $('#materialForm button[type="submit"]')
+  let stage = '读取 OBJ 属性'
+  let previousObject = null
+  let objectIndex = -1
+  let insertedObject = false
   try {
     submit.disabled = true
     ensureProjectState()
-    const values = Object.fromEntries(new FormData($('#materialForm')).entries())
+    const formData = new FormData($('#materialForm'))
+    const values = Object.fromEntries(formData.entries())
+    values.reflectance = formData.getAll('reflectanceValue').map(String).join(',')
+    values.transmittance = formData.getAll('transmittanceValue').map(String).join(',')
+    if (values.spectralModel === 'file' && !values.fileName) throw new Error('请先导入波谱文件')
+    stage = '复制 OBJ 到工程'
     const imported = await api.importObj({ name: `${uniqueName(values.objectName, 'object')}.obj`, content: pending.source.content })
-    const distribution = defaultDistribution({ type: values.objectType })
+    stage = '生成实例分布'
+    const distribution = defaultDistribution({ type: values.objectType, dimensions: pending.dimensions })
     const instances = generateDistribution(distribution)
+    stage = '保存实例位置文件'
     const savedDistribution = await api.saveDistribution({ path: imported.positionPath, name: values.objectName, instances })
-    const spectrum = { name: values.spectralName, model: values.spectralModel, reflectance: values.reflectance, transmittance: values.transmittance, refTir: Number(values.refTir), tauTir: Number(values.tauTir), params: { Cab: values.paramCab, Cw: values.paramCw, Cdm: values.paramCdm, Cs: values.paramCs, N: values.paramN, SMC: values.paramSMC, BSMBrightness: values.paramBSMBrightness, BSMlat: values.paramBSMlat, BSMlon: values.paramBSMlon } }
+    stage = '校验 Mesh 属性映射'
+    const spectrum = { name: values.spectralName, model: values.spectralModel, fileName: values.fileName || '', reflectance: values.reflectance, transmittance: values.transmittance, refTir: Number(values.refTir), tauTir: Number(values.tauTir), physicalTexture: physicalTextureFromValues(values), params: { Cab: values.paramCab, Cw: values.paramCw, Cdm: values.paramCdm, Cs: values.paramCs, N: values.paramN, SMC: values.paramSMC, BSMBrightness: values.paramBSMBrightness, BSMlat: values.paramBSMlat, BSMlon: values.paramBSMlon } }
     const thermal = { name: values.thermalName, sunlitTemperature: Number(values.sunlitTemperature), shadedTemperature: Number(values.shadedTemperature) }
     const spectralSelections = $$('.mesh-spectrum'), thermalSelections = $$('.mesh-thermal')
+    const physicalSelections = $$('.mesh-physical'), canopySelections = $$('.mesh-canopy')
     const physicalType = physicalTypeForObject(values.objectType)
     const physical = state.config.materials.find((item) => item.name === values.materialPreset) || physicalFromForm(values, physicalType)
     if (spectralSelections.some((select) => select.value === '__new__')) upsertByName(state.config.spectra, spectrum)
     if (thermalSelections.some((select) => select.value === '__new__')) upsertByName(state.config.thermals, thermal)
-    if (values.materialPreset === '__new__') upsertByName(state.config.materials, physical)
-    const meshes = pending.meshNames.map((name, index) => ({ name, spectralName: spectralSelections[index].value === '__new__' ? spectrum.name : spectralSelections[index].value, thermalName: thermalSelections[index].value === '__new__' ? thermal.name : thermalSelections[index].value }))
+    if (values.materialPreset === '__new__' || physicalSelections.some((select) => select.value === '__new__')) upsertByName(state.config.materials, physical)
+    const defaultCanopy = values.objectType === 'Fire' ? 'fire_medium' : values.objectType === 'Vegetation' ? 'tree_leaf_canopy' : 'rigid_body'
+    const meshes = pending.meshNames.map((name, index) => ({
+      name,
+      spectralName: spectralSelections[index].value === '__new__' ? spectrum.name : spectralSelections[index].value,
+      thermalName: thermalSelections[index].value === '__new__' ? thermal.name : thermalSelections[index].value,
+      materialName: physicalSelections[index].value === '__new__' ? physical.name : physicalSelections[index].value,
+      canopyName: canopySelections[index]?.value || defaultCanopy
+    }))
     if (!physical?.name || !state.config.materials.some((entry) => entry.name === physical.name)) throw new Error('物化属性未定义')
     for (const mesh of meshes) {
       if (!state.config.spectra.some((entry) => entry.name === mesh.spectralName)) throw new Error('光谱属性不存在：' + mesh.spectralName)
       if (!state.config.thermals.some((entry) => entry.name === mesh.thermalName)) throw new Error('温度属性不存在：' + mesh.thermalName)
+      const meshPhysical = state.config.materials.find((entry) => entry.name === mesh.materialName)
+      if (!meshPhysical || meshPhysical.type !== physicalType) throw new Error('Mesh 物化属性无效：' + mesh.materialName)
+      if (!state.config.canopies.some((entry) => entry.name === mesh.canopyName)) throw new Error('Mesh 结构属性不存在：' + mesh.canopyName)
     }
-    const item = { name: values.objectName, type: values.objectType, materialName: physical.name, canopyName: 'canopy_default', fileName: imported.path, positionFile: savedDistribution.path, shape: 'cube', dimensions: pending.dimensions, meshes, distribution, instanceCount: instances.length }
+    const item = { name: values.objectName, type: values.objectType, materialName: meshes[0]?.materialName || physical.name, canopyName: meshes[0]?.canopyName || defaultCanopy, fileName: imported.path, positionFile: savedDistribution.path, shape: pending.shape || 'cube', dimensions: pending.dimensions, meshes, distribution, instanceCount: instances.length, ...(isMobileAgentType(values.objectType) ? { movement: defaultMovement(values.objectType) } : {}), ...(pending.generation ? { generation: pending.generation } : {}) }
     const existing = state.config.objects.items.findIndex((entry) => entry.name === item.name)
-    if (existing >= 0) state.config.objects.items[existing] = item
-    else state.config.objects.items.push(item)
-    const itemIndex = existing >= 0 ? existing : state.config.objects.items.length - 1
+    objectIndex = existing >= 0 ? existing : state.config.objects.items.length
+    if (existing >= 0) {
+      previousObject = state.config.objects.items[existing]
+      state.config.objects.items[existing] = item
+    } else {
+      state.config.objects.items.push(item)
+      insertedObject = true
+    }
+    const itemIndex = objectIndex
     state.config.objects.count = state.config.objects.items.length
     state.config.objects.names = state.config.objects.items.map((entry) => entry.name)
     state.project.configuration = state.config
     state.xmlDirty = true
-    if (!(await saveXml(true))) throw new Error('工程配置保存失败')
+    stage = '保存 project.json'
+    if (!(await saveXml(true))) throw state.lastSaveError || new Error('工程配置保存失败')
 
+    stage = '刷新三维场景'
     disposeObject(pending.object); state.pendingObject = null
     hideMaterialDialog(false); refreshFromState(false); await loadActualScene(state.config)
     state.panel = 'objects'; state.selectedObjectIndex = itemIndex
     $$('.tree-item').forEach((button) => button.classList.toggle('active', button.dataset.panel === 'objects'))
     renderInspector(); await showObjectDialog(itemIndex)
     addLog(`OBJ 属性已加入工程：${imported.path}`, 'success'); toast('OBJ 属性配置完成', `${item.name} · 请继续设置实例分布`)
-  } catch (error) { toast('OBJ 材质保存失败', error.message, 'error') }
+  } catch (error) {
+    if (objectIndex >= 0) {
+      if (insertedObject) state.config.objects.items.splice(objectIndex, 1)
+      else if (previousObject) state.config.objects.items[objectIndex] = previousObject
+      state.config.objects.count = state.config.objects.items.length
+      state.config.objects.names = state.config.objects.items.map((entry) => entry.name)
+      if (state.project) state.project.configuration = state.config
+    }
+    const message = `${stage}失败：${error.message}`
+    toast('OBJ 导入失败', message, 'error')
+    addLog(message, 'error')
+  }
   finally { submit.disabled = false }
 }
 
@@ -1240,24 +3268,32 @@ function renderObjectAttributeSummary() {
   $('#objectAttributeSummary').textContent = material ? `${material.label || material.name} · ${summary}` : summary
 }
 
-function renderObjectAttributeOptions(useCurrent = false) {
+function renderObjectAttributeOptions(useCurrent = false, resetBindings = false) {
   const item = state.config?.objects?.items?.[state.editingAttributeIndex]
   if (!item) return
   const form = $('#objectAttributeForm')
   const type = form.elements.objectType.value
   const physicalType = physicalTypeForObject(type)
   const materials = state.config.materials.filter((entry) => entry.type === physicalType)
-  const preferredMaterial = { Vegetation: 'leaf_c3', Soil: 'soilset', Building: 'soil_dry', Other: 'soilset', Water: 'water_set' }[type]
-  const currentMaterial = useCurrent ? form.elements.materialName.value : item.materialName
+  const preferredMaterial = { Vegetation: 'leaf_c3', Fire: 'leaf_c3', Soil: 'soilset', Building: 'soil_dry', Human: 'soil_dry', Vehicle: 'soil_dry', Ship: 'ship_material', Other: 'soilset', Water: 'water_set' }[type]
+  const currentMaterial = resetBindings ? preferredMaterial : useCurrent ? form.elements.materialName.value : item.materialName
   form.elements.materialName.innerHTML = bindingOptionList(materials, currentMaterial, preferredMaterial)
-  form.elements.canopyName.innerHTML = bindingOptionList(state.config.canopies || [], item.canopyName, 'canopy_default')
+  const preferredCanopy = type === 'Fire' ? 'fire_medium' : type === 'Vegetation' ? 'canopy_default' : 'rigid_body'
+  const currentCanopy = resetBindings ? preferredCanopy : item.canopyName
+  form.elements.canopyName.innerHTML = bindingOptionList(state.config.canopies || [], currentCanopy, preferredCanopy)
+  const preferredSpectrum = { Vegetation: 'green_leaf', Fire: 'fire_medium', Soil: 'soil', Building: 'concrete', Human: 'human_surface', Vehicle: 'vehicle_surface', Ship: 'ship_surface', Other: 'concrete', Water: 'water_surface' }[type]
+  const preferredThermal = { Vegetation: 'vegetation_temperature', Fire: 'fire_temperature', Soil: 'soil_temperature', Building: 'building_temperature', Human: 'human_temperature', Vehicle: 'vehicle_temperature', Ship: 'ship_temperature', Other: 'building_temperature', Water: 'water_temperature' }[type]
 
   const currentMeshes = useCurrent
-    ? $$('#objectAttributeMeshRows tr').map((row) => ({ name: row.dataset.meshName, spectralName: row.querySelector('.attribute-spectrum').value, thermalName: row.querySelector('.attribute-thermal').value }))
-    : (item.meshes?.length ? item.meshes : [{ name: item.name, spectralName: item.spectralName, thermalName: item.thermalName }])
-  const preferredSpectrum = { Vegetation: 'green_leaf', Soil: 'soil', Building: 'concrete', Other: 'concrete', Water: 'water_surface' }[type]
-  const preferredThermal = { Vegetation: 'vegetation_temperature', Soil: 'soil_temperature', Building: 'building_temperature', Other: 'building_temperature', Water: 'water_temperature' }[type]
-  $('#objectAttributeMeshRows').innerHTML = currentMeshes.map((mesh) => `<tr data-mesh-name="${escapeHtml(mesh.name)}"><td title="${escapeHtml(mesh.name)}">${escapeHtml(mesh.name)}</td><td><select class="select attribute-spectrum">${bindingOptionList(state.config.spectra, mesh.spectralName, document.querySelector("#spectralPreset").value || preferredSpectrum)}</select></td><td><select class="select attribute-thermal">${bindingOptionList(state.config.thermals, mesh.thermalName, document.querySelector("#thermalPreset").value || preferredThermal)}</select></td></tr>`).join('')
+    ? $$('#objectAttributeMeshRows tr').map((row) => ({
+      name: row.dataset.meshName,
+      spectralName: resetBindings ? preferredSpectrum : row.querySelector('.attribute-spectrum').value,
+      thermalName: resetBindings ? preferredThermal : row.querySelector('.attribute-thermal').value,
+      materialName: resetBindings ? preferredMaterial : row.querySelector('.attribute-physical').value,
+      canopyName: resetBindings ? preferredCanopy : row.querySelector('.attribute-canopy').value
+    }))
+    : (item.meshes?.length ? item.meshes : [{ name: item.name, spectralName: item.spectralName, thermalName: item.thermalName, materialName: item.materialName, canopyName: item.canopyName }])
+  $('#objectAttributeMeshRows').innerHTML = currentMeshes.map((mesh) => `<tr data-mesh-name="${escapeHtml(mesh.name)}"><td title="${escapeHtml(mesh.name)}">${escapeHtml(mesh.name)}</td><td><select class="select attribute-spectrum">${bindingOptionList(state.config.spectra, mesh.spectralName, preferredSpectrum)}</select></td><td><select class="select attribute-thermal">${bindingOptionList(state.config.thermals, mesh.thermalName, preferredThermal)}</select></td><td><select class="select attribute-physical">${bindingOptionList(materials, mesh.materialName || item.materialName, preferredMaterial)}</select></td><td><select class="select attribute-canopy">${bindingOptionList(state.config.canopies || [], mesh.canopyName || item.canopyName, preferredCanopy)}</select></td></tr>`).join('')
   renderObjectAttributeSummary()
 }
 
@@ -1296,19 +3332,32 @@ async function saveObjectAttributes(event) {
   const meshes = $$('#objectAttributeMeshRows tr').map((row) => ({
     name: row.dataset.meshName,
     spectralName: row.querySelector('.attribute-spectrum').value,
-    thermalName: row.querySelector('.attribute-thermal').value
+    thermalName: row.querySelector('.attribute-thermal').value,
+    materialName: row.querySelector('.attribute-physical').value,
+    canopyName: row.querySelector('.attribute-canopy').value
   }))
   try {
     submit.disabled = true
+    if (type === 'Fire' && state.mode !== 'eVoxelRT') throw new Error('火焰对象当前只支持体元辐射传输')
     if (!material || material.type !== physicalTypeForObject(type)) throw new Error('所选物化属性与对象类型不匹配')
-    if (!canopy) throw new Error('所选冠层属性不存在')
+    if (!canopy) throw new Error('所选结构参数不存在')
+    if (type === 'Fire' && canopy.structureType !== 'fire') throw new Error('火焰对象必须绑定火焰结构参数')
     if (!meshes.length) throw new Error('OBJ 没有可配置的 Mesh')
     for (const mesh of meshes) {
       if (!state.config.spectra.some((entry) => entry.name === mesh.spectralName)) throw new Error('光谱属性不存在：' + mesh.spectralName)
       if (!state.config.thermals.some((entry) => entry.name === mesh.thermalName)) throw new Error('温度属性不存在：' + mesh.thermalName)
+      const meshMaterial = state.config.materials.find((entry) => entry.name === mesh.materialName)
+      if (!meshMaterial || meshMaterial.type !== physicalTypeForObject(type)) throw new Error(`Mesh“${mesh.name}”物化属性无效`)
+      const meshCanopy = state.config.canopies.find((entry) => entry.name === mesh.canopyName)
+      if (!meshCanopy) throw new Error(`Mesh“${mesh.name}”结构属性不存在`)
+      if (type === 'Fire' && meshCanopy.structureType !== 'fire') throw new Error(`Mesh“${mesh.name}”必须绑定火焰结构属性`)
     }
-    const previous = { type: item.type, materialName: item.materialName, canopyName: item.canopyName, meshes: item.meshes }
+    const previous = { type: item.type, materialName: item.materialName, canopyName: item.canopyName, meshes: item.meshes, medium: item.medium, movement: item.movement }
     Object.assign(item, { type, materialName, canopyName, meshes })
+    if (type === 'Fire') item.medium = { kind: 'fire', radiationOnly: true }
+    else delete item.medium
+    if (isMobileAgentType(type)) item.movement = { ...defaultMovement(type), ...(item.movement || {}), enabled: Boolean(item.movement?.enabled), mode: 'random' }
+    else delete item.movement
     ensureProjectState().configuration = state.config
     state.xmlDirty = true
     if (!(await saveXml(true))) { Object.assign(item, previous); throw new Error('工程配置保存失败') }
@@ -1344,6 +3393,8 @@ function updateDistributionFormState(form) {
   form.elements.distributionBasis.disabled = !usesPopulation
   form.elements.distributionCount.disabled = !usesPopulation
   form.elements.distributionDensity.disabled = !usesPopulation
+  form.elements.distributionCount.readOnly = usesPopulation && basis === 'density'
+  form.elements.distributionDensity.readOnly = usesPopulation && basis === 'count'
   form.elements.distributionPoints.closest('.distribution-points').hidden = mode !== 'manual'
 
   let detail
@@ -1356,8 +3407,10 @@ function updateDistributionFormState(form) {
     distribution.basis = basis
     distribution.count = finiteNumber(form.elements.distributionCount.value, distribution.count)
     distribution.density = finiteNumber(form.elements.distributionDensity.value, distribution.density)
+    distribution.densityUnit = 'hectare'
     const count = distributionTargetCount(distribution)
-    detail = `${mode === 'grid' ? '规则网格' : '纯随机'} · 将生成 ${count} 个实例`
+    const areaHectares = distributionArea(distribution) / SQUARE_METERS_PER_HECTARE
+    detail = `${mode === 'grid' ? '规则网格' : '纯随机'} · ${areaHectares.toFixed(2)} 公顷 × ${distribution.density} 个/公顷 · 将生成 ${count} 个实例`
   }
   $('#objectDistributionStatus').textContent = `${detail}；保存后覆盖该 OBJ 自己的位置文件。`
 }
@@ -1380,9 +3433,30 @@ async function showObjectDialog(index) {
   }
   state.selectedObjectIndex = index
   setDistributionForm(form, distribution || defaultDistribution(item))
+  setMovementForm(form, item.movement, item.type)
   updateDistributionFormState(form)
+  updateMovementFormState(form)
   renderInspector()
   $('#objectDialog').hidden = false
+}
+
+async function importDistributionTxt(file) {
+  if (!file) return
+  try {
+    if (file.size > 5 * 1024 * 1024) throw new Error('TXT 文件不能超过 5 MB')
+    const form = $('#objectForm')
+    const defaultZ = finiteNumber(form.elements.distributionZ.value, 0)
+    const points = parseDistributionPointsText(await file.text(), defaultZ)
+    form.elements.distributionMode.value = 'manual'
+    form.elements.distributionPoints.value = distributionPointsText(points)
+    updateDistributionFormState(form)
+    $('#objectDistributionStatus').textContent = `已导入 ${file.name} · ${points.length} 个实例；保存后写入 positions 文件。`
+    toast('自定义分布已导入', `${file.name} · ${points.length} 个实例`)
+  } catch (error) {
+    toast('TXT 导入失败', error.message, 'error')
+  } finally {
+    $('#distributionTxtFile').value = ''
+  }
 }
 
 function hideObjectDialog() {
@@ -1408,6 +3482,9 @@ async function saveSceneObject(event) {
     item.name = nextName
     item.positionFile = saved.path
     item.distribution = distribution
+    const movement = movementFromForm(form)
+    if (movement) item.movement = movement
+    else delete item.movement
     item.instanceCount = instances.length
     state.config.objects.count = state.config.objects.items.length
     state.config.objects.names = state.config.objects.items.map((entry) => entry.name)
@@ -1455,30 +3532,88 @@ function builtInOutputPath() {
 }
 
 async function runSimulation() {
-  if (!state.inputPath) { toast("无法运行", "请先打开任意场景的 Input.xml", "error"); return }
+  if (!state.inputPath) { toast("无法运行", "请先打开场景工程的 project.json", "error"); return }
   if (state.running || (state.xmlDirty && !(await saveXml()))) return
   try {
-    state.startedAt = Date.now(); state.outputDir = state.config?.outDir || state.outputDir
+    state.startedAt = Date.now(); state.progress = 1; state.progressStage = '正在启动计算引擎'; state.outputDir = state.config?.outDir || state.outputDir
     const response = await api.run({ mode: state.mode, executable: state.executable, inputPath: state.inputPath })
     state.pid = response.pid; setRunning(true)
-  } catch (error) { addLog(error.message, 'error'); toast('无法启动模拟', error.message, 'error'); setRunning(false) }
+  } catch (error) {
+    addLog(error.message, 'error'); toast('无法启动模拟', error.message, 'error')
+    state.progress = 0; state.progressStage = '启动失败'; setRunning(false); renderRunProgress(Date.now() - state.startedAt)
+  }
+}
+
+const simulationModeLabels = {
+  eFacetRT: '面元辐射传输', eFacetEB: '面元能量平衡',
+  eVoxelRT: '体元辐射传输', eVoxelEB: '体元辐射传输与能量平衡',
+  eRaytracing: '简单光线追踪'
+}
+
+function simulationMethodSummary() {
+  if (!['eFacetEB', 'eVoxelEB'].includes(state.mode)) return ''
+  const soil = t(['瞬时能量平衡', '热惯性动态模型', '温度廓线传导模型'][state.config?.control?.soilTemperatureMethod ?? 2])
+  const vegetation = (state.config?.control?.vegetationTemperatureMethod ?? 0) === 0
+    ? 'Ball–Berry 经验法' : 'Farquhar 机制法'
+  return t(`温度方法：土壤=${soil}；植被=${vegetation}`)
+}
+
+function normalizedEngineLog(text) {
+  const translations = [
+    [/Preparing CPU raster buffers/i, '准备面元计算缓冲区'],
+    [/Creating Vulkan device and GPU buffers/i, '初始化 GPU 与计算缓冲区'],
+    [/(GPU )?visibility graph/i, '构建面元可见性图'],
+    [/(CPU |GPU )?sunlight (visibility )?raster/i, '计算太阳光照比例'],
+    [/(CPU |GPU )?(Jacobi )?radiosity solve/i, '计算辐射传输'],
+    [/diffuse baseline and direct-light enhancement/i, '计算漫射基线与直射增强'],
+    [/(Vulkan GPU|CPU) complete/i, '面元辐射传输计算完成']
+  ]
+  return String(text || '').replace(/\r/g, '').split('\n').filter(Boolean).flatMap((source) => {
+    const line = source.trim()
+    if (!line || /^(cube|OBJ placement)/i.test(line)) return []
+    const progress = line.match(/^PROGRESS\s+([0-9]+)\s+(.+)$/i)
+    if (progress) {
+      let stage = progress[2]
+      for (const [pattern, replacement] of translations) if (pattern.test(stage)) { stage = replacement; break }
+      setSimulationProgress(progress[1], stage)
+      return [`进度 ${progress[1]}% · ${stage}`]
+    }
+    const processResult = line.match(/^PROCESS\s+(.+)$/i)
+    if (processResult) return [`过程结果 · ${processResult[1]}`]
+    const primaryResult = line.match(/^RESULT\s+(.+)$/i)
+    if (primaryResult) return [`主结果 · ${primaryResult[1]}`]
+    const observation = line.match(/^(?:OBSERVATION|Angle Info:)\s*(.*)$/i)
+    if (observation) return [`观测角度 · ${observation[1].replaceAll('_', ' ').trim()}`]
+    const time = line.match(/^Time Info:\s*t_?(.*)$/i)
+    if (time) return time[1] ? [`时间节点 · ${time[1]}`] : []
+    return [line]
+  }).join('\n')
 }
 
 function handleSimulationEvent(event) {
-  if (event.type === 'started') { state.pid = event.pid; setRunning(true); addLog(`启动进程 PID ${event.pid}`, 'success'); addLog(event.command, 'command') }
-  else if (event.type === 'stdout') addLog(event.text)
+  if (event.type === 'started') {
+    if (!state.startedAt) state.startedAt = Date.now()
+    state.progress = 1
+    state.progressStage = '正在启动计算引擎'
+    state.pid = event.pid; setRunning(true)
+    addLog(t(`开始模拟 · ${t(simulationModeLabels[state.mode] || state.mode)} · PID ${event.pid}`), 'success')
+    const methods = simulationMethodSummary()
+    if (methods) addLog(methods)
+    addLog(`输出：图像=${state.config?.sensor?.image ? '是' : '否'}；辐射过程=${state.config?.sensor?.radiationProcess ? '是' : '否'}；能量过程=${state.config?.sensor?.energyProcess ? '是' : '否'}`)
+  }
+  else if (event.type === 'stdout') {
+    const message = normalizedEngineLog(event.text)
+    if (message) addLog(message)
+  }
   else if (event.type === 'stderr' || event.type === 'error') addLog(event.text, 'error')
   else if (event.type === 'closed') {
     const success = event.code === 0
-    const engineName = state.mode === 'eFacetRT' || state.mode === 'eFacetEB' ? 'HiStream Facet' : 'HiStream'
+    state.progress = success ? 100 : state.progress
+    state.progressStage = success ? '模拟完成' : '模拟异常结束'
     addLog(success ? `模拟完成，耗时 ${(event.elapsed / 1000).toFixed(2)} 秒` : `模拟已结束，退出码 ${event.code}${event.signal ? `，信号 ${event.signal}` : ''}`, success ? 'success' : 'error')
-    toast(success ? '模拟完成' : '模拟结束', success ? `${engineName} 已正常完成计算` : `退出码：${event.code}`, success ? '' : 'error'); setRunning(false)
+    if (!success) toast('模拟结束', '退出码：' + event.code, 'error'); setRunning(false); renderRunProgress(event.elapsed)
     if (success) {
       state.outputDir = state.config?.outDir || state.outputDir
-      showResults(state.config?.sensor?.image ? 'image' : '3d').catch((error) => {
-        $('#resultStatus').textContent = error.message
-        toast('结果读取失败', error.message, 'error')
-      })
     }
   }
 }
@@ -1513,68 +3648,262 @@ function grayscaleResultPixels(bytes, width, height) {
   return canvas
 }
 
+function thermalHotspotPixels(bytes, width, height) {
+  const canvas = document.createElement('canvas')
+  canvas.width = width; canvas.height = height
+  const context = canvas.getContext('2d')
+  const image = context.createImageData(width, height)
+  for (let index = 0; index < bytes.length; index += 1) {
+    const strength = bytes[index] / 255
+    if (strength <= 0) continue
+    const offset = index * 4
+    image.data[offset] = 255
+    image.data[offset + 1] = Math.round(214 * (1 - strength))
+    image.data[offset + 2] = Math.round(40 * (1 - strength))
+    image.data[offset + 3] = Math.round(160 + strength * 95)
+  }
+  context.putImageData(image, 0, 0)
+  return canvas
+}
+
 function resultRasterFromEnvi(result) {
   const width = result.previewWidth, height = result.previewHeight
   const bytes = decodeResultPixels(result)
-  return { width, height, bytes, textureCanvas: grayscaleResultPixels(bytes, width, height) }
+  const textureCanvas = grayscaleResultPixels(bytes, width, height)
+  if (result.hotspotPixels) {
+    const hotspotBytes = Uint8Array.from(atob(result.hotspotPixels), (character) => character.charCodeAt(0))
+    textureCanvas.getContext('2d').drawImage(thermalHotspotPixels(hotspotBytes, width, height), 0, 0)
+  }
+  return { width, height, bytes, textureCanvas }
 }
 
 function resultViewActions(allow3D = true) {
   if (!allow3D) return ''
-  return '<div class="result-view-actions"><button class="button ghost result-2d-btn" id="result2dBtn" type="button">二维图像</button><button class="button ghost result-3d-btn" id="result3dBtn" type="button">三维显示</button></div>'
+  return '<div class="result-view-actions"><button class="button ghost result-2d-btn" id="result2dBtn" type="button">二维图像</button><button class="button ghost result-3d-btn" id="result3dBtn" type="button">三维分析</button></div>'
 }
 
-function resultLayerList(result) {
-  if (!result || result.bands <= 1) return ''
-  const names = result.bandNames || []
-  return `<div class="result-layer-list" aria-label="波段图层">${Array.from({ length: result.bands }, (_, index) => `<button class="result-layer ${index === result.band ? 'active' : ''}" type="button" data-band="${index}"><span>图层 ${index + 1}</span><small>${escapeHtml(names[index] || `波段 ${index + 1}`)}</small></button>`).join('')}</div>`
+function formatColorbarValue(value) {
+  if (!Number.isFinite(Number(value))) return '—'
+  const numeric = Number(value)
+  if (numeric === 0) return '0'
+  const absolute = Math.abs(numeric)
+  return absolute >= 10000 || absolute < .001 ? numeric.toExponential(3) : numeric.toPrecision(5)
+}
+
+function resultColorbar(label, minimum, maximum, palette = 'spectral') {
+  const text = String(label || '数值')
+  const match = text.match(/^(.*?)\s*\[([^\]]+)\]\s*$/)
+  const title = match ? `${match[1]} · ${match[2]}` : text
+  const paletteClass = ['gray', 'hotspot', 'red', 'green', 'blue'].includes(palette) ? palette : ''
+  return `<div class="result-colorbar ${paletteClass}" role="img" aria-label="${escapeHtml(title)} 色标"><div class="result-colorbar-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div><div class="result-colorbar-scale"><div class="result-colorbar-gradient"></div><div class="result-colorbar-labels"><span>${escapeHtml(formatColorbarValue(minimum))}</span><span>${escapeHtml(formatColorbarValue(maximum))}</span></div></div></div>`
+}
+
+function resultBandWavelength(result, index) {
+  const name = String(result.bandNames?.[index] || '')
+  const labelled = Number(name.match(/@\s*([0-9.]+)\s*nm/i)?.[1])
+  if (Number.isFinite(labelled)) return labelled
+  const configured = sensorBandValues(state.config?.sensor || {})
+  return configured.length === result.bands && Number.isFinite(configured[index]) ? configured[index] : null
+}
+
+function resultBandLabel(result, index) {
+  return result.bandNames?.[index] || `波段 ${index + 1}`
+}
+
+function resultOpticalBands(result) {
+  if (!result) return []
+  const all = Array.from({ length: result.bands }, (_, index) => ({ index, wavelength: resultBandWavelength(result, index) }))
+  const knownOptical = all.filter((item) => Number.isFinite(item.wavelength) && item.wavelength <= 2500)
+  return knownOptical.length ? knownOptical : all.slice(0, Math.min(5, all.length))
+}
+
+function defaultColorBands(result) {
+  if (!result || result.bands < 3) return null
+  const optical = resultOpticalBands(result)
+  if (optical.length < 3) return null
+  if (!optical.every((item) => Number.isFinite(item.wavelength))) return [optical[2].index, optical[1].index, optical[0].index]
+  const closest = (target) => optical.reduce((best, item) => Math.abs(item.wavelength - target) < Math.abs(best.wavelength - target) ? item : best)
+  return [closest(668).index, closest(560).index, closest(475).index]
+}
+
+function normalizedResultDisplay(result, file) {
+  const defaults = defaultColorBands(result)
+  const opticalIndices = new Set(resultOpticalBands(result).map((item) => item.index))
+  const previous = state.resultDisplay[file.path] || {}
+  const validBand = (value, fallback) => Number.isInteger(Number(value)) && Number(value) >= 0 && Number(value) < result.bands ? Number(value) : fallback
+  const channels = [0, 1, 2].map((channel) => {
+    const selected = validBand(previous.channels?.[channel], defaults?.[channel] ?? 0)
+    return opticalIndices.has(selected) ? selected : defaults?.[channel] ?? 0
+  })
+  const gray = validBand(previous.gray, defaults?.[0] ?? result.band ?? 0)
+  const settings = { mode: defaults && previous.mode !== 'gray' ? 'color' : 'gray', channels, gray }
+  state.resultDisplay[file.path] = settings
+  return settings
+}
+
+function resultBandOptions(result, selected, indices = Array.from({ length: result.bands }, (_, index) => index)) {
+  return indices.map((index) => `<option value="${index}" ${index === selected ? 'selected' : ''}>${escapeHtml(resultBandLabel(result, index))}</option>`).join('')
+}
+
+function resultDisplayControls(result, settings) {
+  const colorAvailable = Boolean(defaultColorBands(result))
+  const opticalIndices = resultOpticalBands(result).map((item) => item.index)
+  const colorSelectors = ['红色 R', '绿色 G', '蓝色 B'].map((label, channel) => `<label><span>${label}</span><select class="input result-channel" aria-label="${label}" data-channel="${channel}">${resultBandOptions(result, settings.channels[channel], opticalIndices)}</select></label>`).join('')
+  const selectors = settings.mode === 'color'
+    ? colorSelectors
+    : `<label><span>灰度波段</span><select class="input" id="resultGrayBand" aria-label="灰度波段">${resultBandOptions(result, settings.gray)}</select></label>`
+  return `<div class="result-display-controls"><div class="result-display-modes"><button class="button ghost ${settings.mode === 'color' ? 'active' : ''}" id="resultColorMode" type="button" ${colorAvailable ? '' : 'disabled'}>彩色图像</button><button class="button ghost ${settings.mode === 'gray' ? 'active' : ''}" id="resultGrayMode" type="button">灰度图像</button></div><div class="result-channel-controls">${selectors}</div>${settings.mode === 'color' ? '<small>默认真彩色：红 668 nm、绿 560 nm、蓝 475 nm；也可选择红边或近红外组成假彩色。</small>' : '<small>选择一个波段，以 P2–P98 灰度拉伸显示。</small>'}</div>`
+}
+
+function colorCompositeRaster(rasters) {
+  const width = rasters[0].width, height = rasters[0].height
+  const canvas = document.createElement('canvas')
+  canvas.width = width; canvas.height = height
+  const context = canvas.getContext('2d')
+  const image = context.createImageData(width, height)
+  for (let index = 0; index < width * height; index += 1) {
+    const offset = index * 4
+    image.data[offset] = rasters[0].bytes[index]
+    image.data[offset + 1] = rasters[1].bytes[index]
+    image.data[offset + 2] = rasters[2].bytes[index]
+    image.data[offset + 3] = 255
+  }
+  context.putImageData(image, 0, 0)
+  return { width, height, bytes: rasters[0].bytes, textureCanvas: canvas }
+}
+
+function simulationTimeParts(value) {
+  const text = String(value ?? '').trim()
+  if (!text) return null
+  const julianTime = Number(text)
+  if (Number.isFinite(julianTime)) {
+    let day = Math.floor(julianTime)
+    let minuteOfDay = Math.round((julianTime - day) * 1440)
+    if (minuteOfDay >= 1440) { day += 1; minuteOfDay -= 1440 }
+    if (minuteOfDay < 0) { day -= 1; minuteOfDay += 1440 }
+    return { day, hour: Math.floor(minuteOfDay / 60), minute: minuteOfDay % 60 }
+  }
+  const match = text.match(/DOY\s*(\d+).*?(\d{1,2})[-_:](\d{1,2})/i)
+  return match ? { day: Number(match[1]), hour: Number(match[2]), minute: Number(match[3]) } : null
 }
 
 function displaySimulationTime(value) {
+  const parts = simulationTimeParts(value)
+  if (parts) return `DOY${parts.day} ${String(parts.hour).padStart(2, '0')}:${String(parts.minute).padStart(2, '0')}`
   return String(value || '').replaceAll('_to_', ' → ').replaceAll('_', ' ')
 }
 
-function tiffObservationSelector(currentFile) {
-  const files = state.resultFiles.filter((item) => item.kind === 'tiff')
-  if (!files.length) return ''
-  const buttons = files.map((item) => {
-    const index = state.resultFiles.indexOf(item)
-    const time = item.simulationTime ? 'T=' + displaySimulationTime(item.simulationTime) : item.name
-    const angles = [item.viewZenith && 'VZA ' + item.viewZenith + '°', item.viewAzimuth && 'VAA ' + item.viewAzimuth + '°'].filter(Boolean).join(' · ')
-    return `<button class="result-observation ${item.path === currentFile.path ? 'active' : ''}" type="button" data-result-index="${index}"><span>${escapeHtml(time)}</span><small>${escapeHtml(angles || item.name)}</small></button>`
-  }).join('')
-  return `<div class="result-observation-list" aria-label="模拟时相和观测角度">${buttons}</div>`
-}
-
-function bindTiffObservationSelector() {
-  $$('.result-observation').forEach((button) => button.addEventListener('click', () => openResultFile(state.resultFiles[Number(button.dataset.resultIndex)])))
-}
-function bindResultLayers(file) {
-  $$('.result-layer').forEach((button) => button.addEventListener('click', () => openResultFile(file, Number(button.dataset.band))))
-}
-
 function bindResultViewActions(result, file, raster, image = false) {
-  $('#result3dBtn')?.addEventListener('click', () => showResult3D(raster, file, image ? result : null))
+  $('#result3dBtn')?.addEventListener('click', () => showResult3D(raster, file, result))
   $('#result2dBtn')?.addEventListener('click', () => image ? drawImagePreview(result, file) : result.kind === 'tiff' ? drawTiffPreview(result, file) : drawEnviPreview(result, file))
 }
 
-function drawEnviPreview(result, file, format = 'ENVI') {
+async function drawEnviPreview(result, file, format = 'ENVI') {
+  const previewRequest = ++state.resultPreviewRequest
+  disposeResultViewer()
+  const settings = normalizedResultDisplay(result, file)
+  const selectedBands = settings.mode === 'color' ? settings.channels : [settings.gray]
+  const bandResults = await Promise.all(selectedBands.map((band) => band === result.band ? result : api.readResult(file.path, band)))
+  if (previewRequest !== state.resultPreviewRequest || state.selectedResult?.path !== file.path) return
+  const rasters = bandResults.map(resultRasterFromEnvi)
+  const raster = settings.mode === 'color' ? colorCompositeRaster(rasters) : rasters[0]
+  state.resultRaster = raster
+  const allow3D = format !== 'TIFF' && settings.mode === 'gray'
+  const observationMeta = format === 'TIFF' && file.observationLabel ? '<span>' + escapeHtml(file.observationLabel.replaceAll('_to_', ' → ').replaceAll('_', ' ')) + '</span>' : ''
+  const activeResult = bandResults[0]
+  const layerName = resultBandLabel(result, settings.gray)
+  const displayMinimum = Number.isFinite(Number(activeResult.stretchMinimum)) ? Number(activeResult.stretchMinimum) : Number(activeResult.minimum)
+  const displayMaximum = Number.isFinite(Number(activeResult.stretchMaximum)) ? Number(activeResult.stretchMaximum) : Number(activeResult.maximum)
+  const hotspotCount = settings.mode === 'gray' ? Number(activeResult.hotspotCount) || 0 : 0
+  const hotspotLegend = hotspotCount > 0
+    ? resultColorbar(`高温异常 · ${hotspotCount.toLocaleString('zh-CN')} 像元`, Number(activeResult.hotspotThreshold), Number(activeResult.maximum), 'hotspot') : ''
+  const rawRange = settings.mode === 'gray' && activeResult.thermalBand
+    ? `<span>原始范围 ${formatColorbarValue(activeResult.minimum)} ～ ${formatColorbarValue(activeResult.maximum)}</span>` : ''
+  const grayStretchLabel = activeResult.stretchMode === 'thermal-surface'
+    ? '地表细节 P2–P98（天空与无效零值不参与拉伸）'
+    : 'P2–P98'
+  const colorbars = settings.mode === 'color'
+    ? bandResults.map((bandResult, channel) => resultColorbar(`${['R', 'G', 'B'][channel]} · ${resultBandLabel(result, settings.channels[channel])} · P2–P98`, bandResult.stretchMinimum, bandResult.stretchMaximum, ['red', 'green', 'blue'][channel])).join('')
+    : resultColorbar(`${layerName} · ${grayStretchLabel}`, displayMinimum, displayMaximum, 'gray')
+  const displaySummary = settings.mode === 'color'
+    ? `彩色合成：R ${escapeHtml(resultBandLabel(result, settings.channels[0]))} · G ${escapeHtml(resultBandLabel(result, settings.channels[1]))} · B ${escapeHtml(resultBandLabel(result, settings.channels[2]))}`
+    : `灰度波段：${escapeHtml(layerName)}`
+  $('#resultPreview').innerHTML = `<div class="result-preview-card"><div class="result-image-stage"><canvas class="result-canvas" id="resultCanvas" width="${result.previewWidth}" height="${result.previewHeight}"></canvas><div class="result-north-indicator" aria-label="影像上方为正北"><strong>N</strong><span>↑</span></div></div>${resultDisplayControls(result, settings)}${colorbars}${hotspotLegend}${resultViewActions(allow3D)}<div class="result-meta"><span>${result.width} × ${result.height}</span><span>${format} · ${result.bands} 个独立波段</span><span>上北 · 右东</span><span>${displaySummary}</span>${observationMeta}<span>${settings.mode === 'color' ? '各通道显示 P2–P98' : `灰度显示 ${grayStretchLabel}`}</span>${settings.mode === 'gray' ? `<span>MIN ${displayMinimum.toPrecision(6)}</span><span>MAX ${displayMaximum.toPrecision(6)}</span>` : ''}${rawRange}</div></div>`
+  const canvas = $('#resultCanvas')
+  canvas.getContext('2d').drawImage(raster.textureCanvas, 0, 0)
+  $('#resultColorMode')?.addEventListener('click', () => { settings.mode = 'color'; drawEnviPreview(result, file, format) })
+  $('#resultGrayMode')?.addEventListener('click', () => { settings.mode = 'gray'; drawEnviPreview(result, file, format) })
+  $$('.result-channel').forEach((select) => select.addEventListener('change', () => {
+    settings.channels[Number(select.dataset.channel)] = Number(select.value)
+    drawEnviPreview(result, file, format)
+  }))
+  $('#resultGrayBand')?.addEventListener('change', (event) => {
+    settings.gray = Number(event.target.value)
+    drawEnviPreview(result, file, format)
+  })
+  bindResultViewActions(activeResult, file, raster)
+}
+
+async function drawTiffPreview(result, file) {
+  await drawEnviPreview(result, file, 'TIFF')
+}
+
+function windArrowColor(value, minimum, maximum) {
+  const range = maximum - minimum
+  const normalized = range > 0 ? Math.max(0, Math.min(1, (value - minimum) / range)) : 0.5
+  return `hsl(${(1 - normalized) * 225},82%,42%)`
+}
+
+function drawWindPreview(result, file) {
   disposeResultViewer()
   const raster = resultRasterFromEnvi(result)
   state.resultRaster = raster
-  const allow3D = format !== 'TIFF'
-  const observationSelector = format === 'TIFF' ? tiffObservationSelector(file) : ''
-  const observationMeta = format === 'TIFF' && file.observationLabel ? '<span>' + escapeHtml(file.observationLabel.replaceAll('_to_', ' → ').replaceAll('_', ' ')) + '</span>' : ''
-  $('#resultPreview').innerHTML = `<div class="result-preview-card"><div class="result-image-stage"><canvas class="result-canvas" id="resultCanvas" width="${result.previewWidth}" height="${result.previewHeight}"></canvas></div>${observationSelector}${resultLayerList(result)}${resultViewActions(allow3D)}<div class="result-meta"><span>${result.width} × ${result.height}</span><span>${format} · ${result.bands} 个独立波段图层</span><span>当前图层：${escapeHtml(result.bandNames?.[result.band] || `波段 ${result.band + 1}`)}</span>${observationMeta}<span>MIN ${Number(result.minimum).toPrecision(6)}</span><span>MAX ${Number(result.maximum).toPrecision(6)}</span></div></div>`
-  const canvas = $('#resultCanvas')
-  canvas.getContext('2d').drawImage(raster.textureCanvas, 0, 0)
-  bindResultLayers(file)
-  if (format === 'TIFF') bindTiffObservationSelector()
-  bindResultViewActions(result, file, raster)
-}
-
-function drawTiffPreview(result, file) {
-  drawEnviPreview(result, file, 'TIFF')
+  const previewMax = Math.max(result.previewWidth, result.previewHeight, 1)
+  const displayScale = Math.min(720 / previewMax, Math.max(1, 480 / previewMax))
+  const canvasWidth = Math.max(1, Math.round(result.previewWidth * displayScale))
+  const canvasHeight = Math.max(1, Math.round(result.previewHeight * displayScale))
+  const observationMeta = file.observationLabel
+    ? `<span>${escapeHtml(file.observationLabel.replaceAll('_to_', ' → ').replaceAll('_', ' '))}</span>` : ''
+  $('#resultPreview').innerHTML = `<div class="result-preview-card wind-result-card"><div class="result-image-stage"><canvas class="result-canvas wind-field-canvas" id="windFieldCanvas" width="${canvasWidth}" height="${canvasHeight}" role="img" aria-label="自适应风速箭头图"></canvas><div class="result-north-indicator" aria-label="影像上方为正北"><strong>N</strong><span>↑</span></div></div>${resultColorbar('水平风速 P2–P98 [m/s]', result.stretchMinimum, result.stretchMaximum)}<div class="result-meta"><span>${result.width} × ${result.height}</span><span>上北 · 右东</span><span>自适应箭头 ${Number(result.arrows?.length || 0).toLocaleString('zh-CN')} 个</span><span>每隔 ${result.arrowStep} 个网格采样</span>${observationMeta}<span>色标范围：水平风速 P2–P98</span><span>箭头方向：水平风向</span><span>箭头长度与颜色：水平风速</span></div></div>`
+  const canvas = $('#windFieldCanvas')
+  const context = canvas.getContext('2d')
+  context.imageSmoothingEnabled = true
+  context.globalAlpha = 0.34
+  context.drawImage(raster.textureCanvas, 0, 0, canvasWidth, canvasHeight)
+  context.globalAlpha = 1
+  const spacingX = result.arrowStep * canvasWidth / Math.max(1, result.width)
+  const spacingY = result.arrowStep * canvasHeight / Math.max(1, result.height)
+  const availableLength = Math.max(5, Math.min(spacingX, spacingY) * 0.78)
+  const minimum = Number(result.stretchMinimum)
+  const maximum = Number(result.stretchMaximum)
+  for (const arrow of result.arrows || []) {
+    const [gridX, gridY, u, v, magnitude] = arrow.map(Number)
+    const horizontalSpeed = Math.hypot(u, v)
+    if (!(horizontalSpeed > 1e-8) || !Number.isFinite(magnitude)) continue
+    const normalized = maximum > minimum
+      ? Math.max(0, Math.min(1, (magnitude - minimum) / (maximum - minimum))) : 0.5
+    const length = availableLength * (0.38 + 0.62 * normalized)
+    const dx = u / horizontalSpeed * length
+    const dy = -v / horizontalSpeed * length
+    const centerX = (gridX + 0.5) * canvasWidth / result.width
+    const centerY = (gridY + 0.5) * canvasHeight / result.height
+    const startX = centerX - dx * 0.5, startY = centerY - dy * 0.5
+    const endX = centerX + dx * 0.5, endY = centerY + dy * 0.5
+    const angle = Math.atan2(dy, dx)
+    const headLength = Math.max(2.5, Math.min(7, length * 0.32))
+    context.beginPath()
+    context.moveTo(startX, startY)
+    context.lineTo(endX, endY)
+    context.moveTo(endX, endY)
+    context.lineTo(endX - headLength * Math.cos(angle - Math.PI / 6), endY - headLength * Math.sin(angle - Math.PI / 6))
+    context.moveTo(endX, endY)
+    context.lineTo(endX - headLength * Math.cos(angle + Math.PI / 6), endY - headLength * Math.sin(angle + Math.PI / 6))
+    context.strokeStyle = windArrowColor(magnitude, minimum, maximum)
+    context.lineWidth = Math.max(1.1, Math.min(2.1, availableLength * 0.09))
+    context.lineCap = 'round'
+    context.lineJoin = 'round'
+    context.stroke()
+  }
 }
 
 function rasterFromImage(image) {
@@ -1610,6 +3939,7 @@ async function drawImagePreview(result, file) {
 }
 
 function disposeResultViewer() {
+  $('#resultPreview')?.classList.remove('analysis-preview')
   if (!resultViewer) return
   resultViewer.resizeObserver?.disconnect()
   resultViewer.controls.dispose()
@@ -1642,8 +3972,10 @@ function showResult3D(raster, file, sourceResult = null) {
   if (!raster) return
   disposeResultViewer()
   const rasterResult = ['envi', 'tiff'].includes(sourceResult?.kind) ? sourceResult : null
-  const bandLayers = rasterResult ? resultLayerList(rasterResult) : ''
-  $('#resultPreview').innerHTML = `<div class="result-preview-card result-3d-card"><div class="result-3d-viewport" id="result3dViewport"></div>${resultViewActions()}${bandLayers}<div class="result-meta"><span>${raster.width} × ${raster.height}</span><span>整幅图像三维显示</span><span>高度按像素亮度映射</span></div></div>`
+  const rasterLabel = rasterResult?.bandNames?.[rasterResult.band] || '像素亮度'
+  const rasterMinimum = rasterResult?.minimum ?? 0
+  const rasterMaximum = rasterResult?.maximum ?? 255
+  $('#resultPreview').innerHTML = `<div class="result-preview-card result-3d-card"><div class="result-3d-viewport" id="result3dViewport"></div>${resultColorbar(rasterLabel, rasterMinimum, rasterMaximum, 'gray')}${resultViewActions()}<div class="result-meta"><span>${raster.width} × ${raster.height}</span><span>整幅图像三维分析</span><span>高度按像素亮度映射</span></div></div>`
   const host = $('#result3dViewport')
   const resultScene = new THREE.Scene()
   resultScene.background = new THREE.Color(0xf7f9fc)
@@ -1689,7 +4021,7 @@ function showResult3D(raster, file, sourceResult = null) {
   texture.minFilter = THREE.NearestFilter
   texture.magFilter = THREE.NearestFilter
   texture.generateMipmaps = false
-  const surface = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ map: texture, roughness: .88, metalness: .02, side: THREE.DoubleSide }))
+  const surface = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ map: texture, roughness: .88, metalness: .02, side: THREE.DoubleSide, transparent: false, opacity: 1, depthTest: true, depthWrite: true, alphaTest: 0, alphaToCoverage: false }))
   surface.castShadow = surface.receiveShadow = true
   resultScene.add(surface)
   const base = new THREE.Mesh(new THREE.PlaneGeometry(width, depth), new THREE.MeshBasicMaterial({ color: 0xe6edf5, transparent: true, opacity: .8, side: THREE.DoubleSide }))
@@ -1709,7 +4041,6 @@ function showResult3D(raster, file, sourceResult = null) {
   resizeResultViewer()
   controls3d.update()
   $('#result3dBtn').classList.add('active')
-  if (rasterResult) bindResultLayers(file)
   $('#result2dBtn').addEventListener('click', () => rasterResult ? (rasterResult.kind === 'tiff' ? drawTiffPreview(rasterResult, file) : drawEnviPreview(rasterResult, file)) : drawImagePreview(sourceResult, file))
 
 }
@@ -1804,7 +4135,7 @@ function showFacet3D(result, file, metric = 'radiosity', side = 'both') {
   const rawPositions = Array.isArray(result.vertexPositions) ? result.vertexPositions : []
   const hasGeometry = rawPositions.length >= result.facetCount * 9
   const sideDescription = side === 'both' ? '三维表面取正反面较大值' : side === 'front' ? '显示正面值' : '显示背面值'
-  $('#resultPreview').innerHTML = `<div class="result-preview-card result-3d-card"><div class="result-3d-viewport" id="result3dViewport"></div>${facetControls(result, selected.id, side)}${facetViewActions()}<div class="result-meta"><span>${escapeHtml(samplingLabel)} · ${valueCount.toLocaleString('zh-CN')} 个面值</span><span>颜色：${escapeHtml(selected.label)}</span><span>${sideDescription}</span><span>MIN ${Number(stats.minimum).toPrecision(6)} · MAX ${Number(stats.maximum).toPrecision(6)}</span>${hasGeometry ? '<span>真实 OBJ 面元空间位置</span>' : '<span>旧结果无几何坐标，使用面元序号排列</span>'}</div></div>`
+  $('#resultPreview').innerHTML = `<div class="result-preview-card result-3d-card"><div class="result-3d-viewport" id="result3dViewport"></div>${resultColorbar(selected.label, stats.minimum, stats.maximum)}${facetControls(result, selected.id, side)}${facetViewActions()}<div class="result-meta"><span>${escapeHtml(samplingLabel)} · ${valueCount.toLocaleString('zh-CN')} 个面值</span><span>颜色：${escapeHtml(selected.label)}</span><span>${sideDescription}</span><span>MIN ${Number(stats.minimum).toPrecision(6)} · MAX ${Number(stats.maximum).toPrecision(6)}</span>${hasGeometry ? '<span>真实 OBJ 面元空间位置</span>' : '<span>旧结果无几何坐标，使用面元序号排列</span>'}</div></div>`
   const host = $('#result3dViewport')
   const resultScene = new THREE.Scene()
   resultScene.background = new THREE.Color(0xf7f9fc)
@@ -1854,7 +4185,7 @@ function showFacet3D(result, file, metric = 'radiosity', side = 'both') {
     const geometry = new THREE.BufferGeometry()
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
     geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3))
-    const surface = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide, toneMapped: false }))
+    const surface = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide, toneMapped: false, transparent: false, opacity: 1, depthTest: true, depthWrite: true, alphaTest: 0, alphaToCoverage: false }))
     surface.castShadow = surface.receiveShadow = true
     resultScene.add(surface)
     const groundWidth = Math.max(.5, spanX * modelScale), groundDepth = Math.max(.5, spanZ * modelScale)
@@ -1870,7 +4201,7 @@ function showFacet3D(result, file, metric = 'radiosity', side = 'both') {
     const rows = Math.max(1, Math.ceil(indices.length / columns))
     const sideLength = 22, cell = sideLength / Math.max(columns, rows)
     const geometry = new THREE.BoxGeometry(Math.max(.04, cell * .72), 1, Math.max(.04, cell * .72))
-    const bars = new THREE.InstancedMesh(geometry, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: .82, metalness: .02 }), indices.length)
+    const bars = new THREE.InstancedMesh(geometry, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: .82, metalness: .02, transparent: false, opacity: 1, depthTest: true, depthWrite: true, alphaTest: 0, alphaToCoverage: false }), indices.length)
     const matrix = new THREE.Matrix4(), color = new THREE.Color()
     indices.forEach((index, position) => {
       const value = Number(selected.values[index]), normalized = colorForValue(value, color)
@@ -1896,6 +4227,593 @@ function showFacet3D(result, file, metric = 'radiosity', side = 'both') {
   resizeResultViewer(); controls3d.update(); $('#facet3dBtn').classList.add('active'); bindFacetControls(result, file, selected.id, side)
 }
 
+function showVoxel3D(result, file, metric = result.metrics?.[0]?.id) {
+  disposeResultViewer()
+  const selected = result.metrics.find((item) => item.id === metric) || result.metrics[0]
+  if (!selected || !Array.isArray(result.voxelPositions) || !result.voxelCount) {
+    emptyResultPreview('体元过程结果为空', '没有可显示的体元位置或过程变量。')
+    return
+  }
+  let valueMinimum = Infinity, valueMaximum = -Infinity
+  let minimum = [Infinity, Infinity, Infinity], maximum = [-Infinity, -Infinity, -Infinity]
+  for (let voxel = 0; voxel < result.voxelCount; voxel += 1) {
+    const value = Number(selected.values[voxel])
+    if (Number.isFinite(value)) { valueMinimum = Math.min(valueMinimum, value); valueMaximum = Math.max(valueMaximum, value) }
+    for (let axis = 0; axis < 3; axis += 1) {
+      const position = Number(result.voxelPositions[voxel * 3 + axis])
+      if (Number.isFinite(position)) { minimum[axis] = Math.min(minimum[axis], position); maximum[axis] = Math.max(maximum[axis], position) }
+    }
+  }
+  if (!Number.isFinite(valueMinimum)) valueMinimum = valueMaximum = 0
+  const sourceCount = Math.max(result.voxelCount, Number(result.sourceVoxelCount) || result.voxelCount)
+  const sampleLabel = sourceCount > result.voxelCount
+    ? `体元过多：原始 ${sourceCount.toLocaleString('zh-CN')} 个，显示 ${result.voxelCount.toLocaleString('zh-CN')} 个`
+    : `完整显示 ${result.voxelCount.toLocaleString('zh-CN')} 个体元`
+  const metricButtons = result.metrics.map((item) => `<button class="button ghost facet-metric ${item.id === selected.id ? 'active' : ''}" type="button" data-metric="${escapeHtml(item.id)}">${escapeHtml(item.label)}</button>`).join('')
+  const soilProfileAction = result.soilProfile
+    ? '<button class="button ghost" id="soilProfile3dBtn" type="button">多层土壤温度</button>' : ''
+  $('#resultPreview').innerHTML = `<div class="result-preview-card result-3d-card"><div class="result-3d-viewport" id="result3dViewport"></div>${resultColorbar(selected.label, valueMinimum, valueMaximum)}<div class="facet-controls"><div><span>显示指标</span>${metricButtons}</div></div><div class="result-view-actions"><button class="button ghost facet-3d-btn active" id="facet3dBtn" type="button">体元过程</button>${soilProfileAction}</div><div class="result-meta"><span>${escapeHtml(sampleLabel)}</span><span>颜色：${escapeHtml(selected.label)}</span><span>MIN ${Number(valueMinimum).toPrecision(6)} · MAX ${Number(valueMaximum).toPrecision(6)}</span><span>${escapeHtml(result.time || '静态辐射场')}</span></div></div>`
+
+  const host = $('#result3dViewport')
+  const resultScene = new THREE.Scene()
+  resultScene.background = new THREE.Color(0xf7f9fc)
+  resultScene.add(new THREE.HemisphereLight(0xe8f1fb, 0xb8c8d8, 1.8))
+  const span = maximum.map((value, axis) => Math.max(.001, value - minimum[axis]))
+  const modelScale = 20 / Math.max(...span)
+  const center = minimum.map((value, axis) => (value + maximum[axis]) / 2)
+  // 略微覆盖相邻体元，消除斜视角和抗锯齿造成的地形接缝。
+  const boxSize = Math.max(.025, Number(result.voxelSize || 1) * modelScale * 1.002)
+  const geometry = new THREE.BoxGeometry(boxSize, boxSize, boxSize)
+  // A concrete white vertex base guarantees that per-instance colors are not
+  // multiplied by a missing/black geometry color on different WebGL drivers.
+  const vertexCount = geometry.getAttribute('position').count
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(vertexCount * 3).fill(1), 3))
+  const material = new THREE.MeshBasicMaterial({ color: 0xffffff, vertexColors: true, transparent: false, opacity: 1, depthTest: true, depthWrite: true, alphaTest: 0, alphaToCoverage: false, toneMapped: false })
+  const voxels = new THREE.InstancedMesh(geometry, material, result.voxelCount)
+  const matrix = new THREE.Matrix4(), color = new THREE.Color()
+  const valueRange = valueMaximum - valueMinimum
+  for (let voxel = 0; voxel < result.voxelCount; voxel += 1) {
+    const x = (Number(result.voxelPositions[voxel * 3]) - center[0]) * modelScale
+    const y = (Number(result.voxelPositions[voxel * 3 + 1]) - minimum[1]) * modelScale
+    const z = (Number(result.voxelPositions[voxel * 3 + 2]) - center[2]) * modelScale
+    matrix.makeTranslation(x, y, z); voxels.setMatrixAt(voxel, matrix)
+    const value = Number(selected.values[voxel])
+    const normalized = Number.isFinite(value) ? (valueRange ? (value - valueMinimum) / valueRange : .5) : 0
+    color.setHSL((1 - normalized) * .67, Number.isFinite(value) ? .82 : 0, Number.isFinite(value) ? .5 : .16)
+    voxels.setColorAt(voxel, color)
+  }
+  voxels.instanceMatrix.needsUpdate = true
+  if (voxels.instanceColor) voxels.instanceColor.needsUpdate = true
+  material.needsUpdate = true
+  resultScene.add(voxels)
+  const groundWidth = Math.max(.5, span[0] * modelScale), groundDepth = Math.max(.5, span[2] * modelScale)
+  const grid = new THREE.GridHelper(Math.max(groundWidth, groundDepth) * 1.08, 22, 0x7895b5, 0xb8c6d6)
+  grid.position.y = -.02; grid.scale.x = groundWidth / Math.max(groundWidth, groundDepth); grid.scale.z = groundDepth / Math.max(groundWidth, groundDepth); grid.material.opacity = .25; grid.material.transparent = true
+  resultScene.add(grid)
+  const camera3d = new THREE.PerspectiveCamera(42, 1, .01, 300)
+  camera3d.position.set(Math.max(16, groundWidth * 1.2), Math.max(12, span[1] * modelScale + 7), Math.max(16, groundDepth * 1.2))
+  const controls3d = new OrbitControls(camera3d, host)
+  controls3d.enableDamping = true; controls3d.dampingFactor = .08; controls3d.maxPolarAngle = Math.PI * .49; controls3d.minDistance = .5; controls3d.maxDistance = 300
+  controls3d.target.set(0, Math.max(.5, span[1] * modelScale * .35), 0)
+  resultViewer = { host, scene: resultScene, camera: camera3d, controls: controls3d, renderer: new THREE.WebGLRenderer({ antialias: true, alpha: true }) }
+  resultViewer.renderer.setPixelRatio(Math.min(devicePixelRatio, 2)); resultViewer.renderer.outputColorSpace = THREE.SRGBColorSpace
+  host.append(resultViewer.renderer.domElement)
+  resultViewer.resizeObserver = new ResizeObserver(resizeResultViewer); resultViewer.resizeObserver.observe(host)
+  resizeResultViewer(); controls3d.update()
+  $$('.facet-metric').forEach((button) => button.addEventListener('click', () => showVoxel3D(result, file, button.dataset.metric)))
+  $('#facet3dBtn')?.addEventListener('click', () => showVoxel3D(result, file, selected.id))
+  $('#soilProfile3dBtn')?.addEventListener('click', () => showSoilProfile3D(result, file))
+}
+
+function soilProfileDepthLabel(depth, unit) {
+  const numeric = Number(depth)
+  if (!Number.isFinite(numeric)) return '未知深度'
+  if (unit === 'm') {
+    if (numeric === 0) return '表层 0 m'
+    if (numeric < .1) return `${formatColorbarValue(numeric * 100)} cm`
+  }
+  return `${formatColorbarValue(numeric)} ${unit || ''}`.trim()
+}
+
+function showSoilProfile3D(result, file, selectedLayers = null) {
+  const profile = result.soilProfile
+  if (!profile || !Array.isArray(profile.values) || !profile.layerCount ||
+      !Array.isArray(result.voxelPositions) || !result.voxelCount) {
+    emptyResultPreview('土壤温度剖面为空', '当前结果没有多层土壤温度数据。')
+    return
+  }
+  disposeResultViewer()
+  const allLayers = Array.from({ length: profile.layerCount }, (_, layer) => layer)
+  const visibleLayers = selectedLayers instanceof Set
+    ? new Set([...selectedLayers].filter((layer) => allLayers.includes(layer)))
+    : new Set(allLayers)
+  if (!visibleLayers.size) visibleLayers.add(0)
+
+  let valueMinimum = Infinity, valueMaximum = -Infinity
+  let minimumX = Infinity, maximumX = -Infinity, minimumZ = Infinity, maximumZ = -Infinity
+  const validIndices = Array.from({ length: profile.layerCount }, () => [])
+  for (let layer = 0; layer < profile.layerCount; layer += 1) {
+    const values = Array.isArray(profile.values[layer]) ? profile.values[layer] : []
+    for (let voxel = 0; voxel < Math.min(result.voxelCount, values.length); voxel += 1) {
+      // JSON serializes binary NaN/NoData as null.  Number(null) is 0, which
+      // previously drew every vegetation/building voxel as a false cold spot
+      // through all soil layers.
+      const rawValue = values[voxel]
+      if (typeof rawValue !== 'number' || !Number.isFinite(rawValue)) continue
+      const value = rawValue
+      validIndices[layer].push(voxel)
+      valueMinimum = Math.min(valueMinimum, value)
+      valueMaximum = Math.max(valueMaximum, value)
+      const x = Number(result.voxelPositions[voxel * 3])
+      const z = Number(result.voxelPositions[voxel * 3 + 2])
+      if (Number.isFinite(x)) { minimumX = Math.min(minimumX, x); maximumX = Math.max(maximumX, x) }
+      if (Number.isFinite(z)) { minimumZ = Math.min(minimumZ, z); maximumZ = Math.max(maximumZ, z) }
+    }
+  }
+  if (!Number.isFinite(valueMinimum) || !Number.isFinite(minimumX) || !Number.isFinite(minimumZ)) {
+    emptyResultPreview('土壤温度剖面为空', '该过程结果中没有有效的土壤体元温度。')
+    return
+  }
+
+  const depthButtons = allLayers.map((layer) => {
+    const label = soilProfileDepthLabel(profile.depths?.[layer] ?? layer, profile.depthUnit)
+    return `<button class="button ghost soil-profile-layer ${visibleLayers.has(layer) ? 'active' : ''}" type="button" data-layer="${layer}">L${layer + 1} · ${escapeHtml(label)}</button>`
+  }).join('')
+  const metricButtons = result.metrics.map((item) => `<button class="button ghost facet-metric" type="button" data-metric="${escapeHtml(item.id)}">${escapeHtml(item.label)}</button>`).join('')
+  const sourceCount = Math.max(result.voxelCount, Number(result.sourceVoxelCount) || result.voxelCount)
+  const soilCount = validIndices.reduce((maximum, indices) => Math.max(maximum, indices.length), 0)
+  const unitLabel = profile.temperatureUnit === 'degC' ? '°C' : profile.temperatureUnit
+  const activeLayerList = allLayers.filter((layer) => visibleLayers.has(layer))
+  const maximumInstances = 320000
+  const maximumPerLayer = Math.max(1, Math.floor(maximumInstances / activeLayerList.length))
+  const displayIndices = new Map(activeLayerList.map((layer) => {
+    const source = validIndices[layer]
+    if (source.length <= maximumPerLayer) return [layer, source]
+    return [layer, Array.from({ length: maximumPerLayer }, (_, index) =>
+      source[Math.min(source.length - 1, Math.floor(index * source.length / maximumPerLayer))])]
+  }))
+  const instanceCount = [...displayIndices.values()].reduce((sum, indices) => sum + indices.length, 0)
+  const displaySamplingLabel = instanceCount < activeLayerList.reduce((sum, layer) => sum + validIndices[layer].length, 0)
+    ? `当前显示 ${instanceCount.toLocaleString('zh-CN')} 个分层单元（均匀抽样）` : ''
+  $('#resultPreview').innerHTML = `<div class="result-preview-card result-3d-card"><div class="result-3d-viewport" id="result3dViewport"></div>${resultColorbar(`土壤温度 [${unitLabel}]`, valueMinimum, valueMaximum)}<div class="facet-controls"><div><span>土层开关</span>${depthButtons}</div></div><div class="result-view-actions"><button class="button ghost" id="facet3dBtn" type="button">体元过程</button><button class="button ghost active" id="soilProfile3dBtn" type="button">多层土壤温度</button></div><div class="result-meta"><span>${profile.layerCount} 层温度剖面 · ${soilCount.toLocaleString('zh-CN')} 个有效土壤体元</span><span>深度：${escapeHtml((profile.depths || []).map((depth) => soilProfileDepthLabel(depth, profile.depthUnit)).join('、'))}</span><span>统一色标：${formatColorbarValue(valueMinimum)} ～ ${formatColorbarValue(valueMaximum)} ${escapeHtml(unitLabel)}</span><span>垂向等距展开，标签为真实土层深度</span>${displaySamplingLabel ? `<span>${escapeHtml(displaySamplingLabel)}</span>` : ''}<span>${sourceCount > result.voxelCount ? `原始 ${sourceCount.toLocaleString('zh-CN')} 个体元中抽样显示` : escapeHtml(result.time || '静态温度场')}</span></div></div>`
+
+  const host = $('#result3dViewport')
+  const resultScene = new THREE.Scene()
+  resultScene.background = new THREE.Color(0xf7f9fc)
+  resultScene.add(new THREE.HemisphereLight(0xe8f1fb, 0xb8c8d8, 1.8))
+  const spanX = Math.max(.001, maximumX - minimumX)
+  const spanZ = Math.max(.001, maximumZ - minimumZ)
+  const modelScale = 20 / Math.max(spanX, spanZ)
+  const centerX = (minimumX + maximumX) / 2
+  const centerZ = (minimumZ + maximumZ) / 2
+  const layerGap = Math.max(.8, Math.min(1.5, 10 / Math.max(1, profile.layerCount - 1)))
+  const cellSize = Math.max(.025, Number(result.voxelSize || 1) * modelScale * 1.002)
+  const cellHeight = Math.max(.025, cellSize * .07)
+  const geometry = new THREE.BoxGeometry(cellSize, cellHeight, cellSize)
+  const vertexCount = geometry.getAttribute('position').count
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(vertexCount * 3).fill(1), 3))
+  const material = new THREE.MeshBasicMaterial({ color: 0xffffff, vertexColors: true, toneMapped: false })
+  const layers = new THREE.InstancedMesh(geometry, material, instanceCount)
+  const matrix = new THREE.Matrix4(), color = new THREE.Color()
+  const valueRange = valueMaximum - valueMinimum
+  let instance = 0
+  for (const layer of activeLayerList) {
+    const y = (profile.layerCount - 1 - layer) * layerGap
+    for (const voxel of displayIndices.get(layer)) {
+      const x = (Number(result.voxelPositions[voxel * 3]) - centerX) * modelScale
+      const z = (Number(result.voxelPositions[voxel * 3 + 2]) - centerZ) * modelScale
+      matrix.makeTranslation(x, y, z)
+      layers.setMatrixAt(instance, matrix)
+      const value = Number(profile.values[layer][voxel])
+      const normalized = valueRange ? (value - valueMinimum) / valueRange : .5
+      color.setHSL((1 - normalized) * .67, .82, .5)
+      layers.setColorAt(instance, color)
+      instance += 1
+    }
+    const gridSize = Math.max(spanX, spanZ) * modelScale * 1.04
+    const grid = new THREE.GridHelper(gridSize, 20, 0x7895b5, 0xb8c6d6)
+    grid.position.y = y - cellHeight
+    grid.scale.x = spanX / Math.max(spanX, spanZ)
+    grid.scale.z = spanZ / Math.max(spanX, spanZ)
+    grid.material.opacity = .16
+    grid.material.transparent = true
+    resultScene.add(grid)
+  }
+  layers.instanceMatrix.needsUpdate = true
+  if (layers.instanceColor) layers.instanceColor.needsUpdate = true
+  resultScene.add(layers)
+
+  const groundWidth = Math.max(.5, spanX * modelScale)
+  const groundDepth = Math.max(.5, spanZ * modelScale)
+  const stackHeight = Math.max(layerGap, (profile.layerCount - 1) * layerGap)
+  const camera3d = new THREE.PerspectiveCamera(42, 1, .01, 300)
+  camera3d.position.set(Math.max(16, groundWidth * 1.2), Math.max(14, stackHeight * 1.2 + 6), Math.max(16, groundDepth * 1.2))
+  const controls3d = new OrbitControls(camera3d, host)
+  controls3d.enableDamping = true; controls3d.dampingFactor = .08; controls3d.maxPolarAngle = Math.PI * .52; controls3d.minDistance = .5; controls3d.maxDistance = 300
+  controls3d.target.set(0, stackHeight * .45, 0)
+  resultViewer = { host, scene: resultScene, camera: camera3d, controls: controls3d, renderer: new THREE.WebGLRenderer({ antialias: true, alpha: true }) }
+  resultViewer.renderer.setPixelRatio(Math.min(devicePixelRatio, 2)); resultViewer.renderer.outputColorSpace = THREE.SRGBColorSpace
+  host.append(resultViewer.renderer.domElement)
+  resultViewer.resizeObserver = new ResizeObserver(resizeResultViewer); resultViewer.resizeObserver.observe(host)
+  resizeResultViewer(); controls3d.update()
+
+  $$('.soil-profile-layer').forEach((button) => button.addEventListener('click', () => {
+    const next = new Set(visibleLayers)
+    const layer = Number(button.dataset.layer)
+    if (next.has(layer) && next.size > 1) next.delete(layer)
+    else next.add(layer)
+    showSoilProfile3D(result, file, next)
+  }))
+  $$('.facet-metric').forEach((button) => button.addEventListener('click', () => showVoxel3D(result, file, button.dataset.metric)))
+  $('#facet3dBtn')?.addEventListener('click', () => showVoxel3D(result, file))
+  $('#soilProfile3dBtn')?.addEventListener('click', () => showSoilProfile3D(result, file, visibleLayers))
+}
+
+function parseCsvRows(content) {
+  const rows = []
+  let row = [], cell = '', quoted = false
+  const source = String(content || '').replace(/^\uFEFF/, '')
+  for (let index = 0; index <= source.length; index += 1) {
+    const character = source[index] ?? '\n'
+    if (quoted) {
+      if (character === '"' && source[index + 1] === '"') { cell += '"'; index += 1 }
+      else if (character === '"') quoted = false
+      else cell += character
+    } else if (character === '"') quoted = true
+    else if (character === ',') { row.push(cell); cell = '' }
+    else if (character === '\n') {
+      row.push(cell.replace(/\r$/, '')); cell = ''
+      if (row.some((value) => value !== '')) rows.push(row)
+      row = []
+    } else cell += character
+  }
+  if (rows.length < 2) return []
+  const headers = rows[0].map((value) => value.trim())
+  return rows.slice(1).map((values) => Object.fromEntries(headers.map((header, index) => [header, values[index] ?? ''])))
+}
+
+function fileAngleToken(file, key) {
+  const match = String(file || '').match(new RegExp(`(?:^|_)${key}=([^_.]+(?:\\.[^_.]+)?)(?=_|\\.|$)`, 'i'))
+  return match ? Number(match[1]) : NaN
+}
+
+function csvNumeric(value) {
+  return String(value ?? '').trim() === '' ? NaN : Number(value)
+}
+
+function statisticsRows(content) {
+  const latest = new Map()
+  for (const source of parseCsvRows(content)) {
+    const row = {
+      file: source.file || '', mode: source.mode || 'Unknown', time: source.time || '',
+      vza: csvNumeric(source.vza), vaa: csvNumeric(source.vaa), bandIndex: csvNumeric(source.band_index),
+      bandName: source.band_name || `Band ${Number(source.band_index) + 1}`,
+      count: csvNumeric(source.count), min: csvNumeric(source.min), max: csvNumeric(source.max),
+      mean: csvNumeric(source.mean), stddev: csvNumeric(source.stddev)
+    }
+    row.sza = fileAngleToken(row.file, 'SZA')
+    row.saa = fileAngleToken(row.file, 'SAA')
+    if (!Number.isFinite(row.vza)) row.vza = fileAngleToken(row.file, 'VZA')
+    if (!Number.isFinite(row.vaa)) row.vaa = fileAngleToken(row.file, 'VAA')
+    if (!Number.isFinite(row.bandIndex)) continue
+    // VZA=0 is a single physical direction: VAA has no meaning at nadir.
+    // Keeping the latest equivalent nadir row also hides stale records from
+    // statistics files produced by older append-only engine builds.
+    const directionKey = Math.abs(row.vza) < 1e-6
+      ? `nadir\u0000${row.mode}\u0000${row.time}\u0000${row.sza}\u0000${row.saa}`
+      : row.file
+    latest.set(`${directionKey}\u0000${row.bandIndex}`, row)
+  }
+  return [...latest.values()]
+}
+
+function uniqueValues(rows, getter, sorter = (a, b) => String(a).localeCompare(String(b), 'zh-CN', { numeric: true })) {
+  return [...new Map(rows.map((row) => { const value = getter(row); return [String(value), value] })).values()].sort(sorter)
+}
+
+function analysisOption(value, label, selected) {
+  return `<option value="${escapeHtml(value)}" ${String(value) === String(selected) ? 'selected' : ''}>${escapeHtml(label)}</option>`
+}
+
+function analysisSelect(label, id, values, selected, labeler = (value) => value) {
+  return `<label><span>${escapeHtml(label)}</span><select class="input analysis-control" id="${id}">${values.map((value) => analysisOption(value, labeler(value), selected)).join('')}</select></label>`
+}
+
+function statisticBandKey(row) { return `${row.bandIndex}|${row.bandName}` }
+function statisticAngleKey(row) { return `${row.vza}|${row.vaa}` }
+function statisticBandLabel(key) { const [index, ...name] = String(key).split('|'); return `${name.join('|')}（图层 ${Number(index) + 1}）` }
+function statisticAngleLabel(key) { const [vza, vaa] = String(key).split('|'); return `VZA ${formatColorbarValue(vza)}° / VAA ${formatColorbarValue(vaa)}°` }
+
+function statisticQuantity(row) {
+  const name = String(row?.bandName || '').toLowerCase()
+  if (name.includes('reflectance') || name.includes('反射率')) return 'reflectance'
+  if (name.includes('brightness temperature') || name.includes('亮温')) return 'brightnessTemperature'
+  if (name.includes('radiance') || name.includes('辐亮度')) return 'radiance'
+  if (name.includes('temperature') || name.includes('温度')) return 'temperature'
+  return 'value'
+}
+
+const statisticQuantityLabels = {
+  reflectance: '反射率 [-]', brightnessTemperature: '亮温 [K]',
+  radiance: '光谱辐亮度', temperature: '温度 [K]', value: '结果值'
+}
+
+function statisticValueLabel(row) {
+  return statisticQuantityLabels[statisticQuantity(row)] || '结果值'
+}
+
+function statisticTimeOrder(value) {
+  const parts = simulationTimeParts(value)
+  if (parts) return parts.day * 1440 + parts.hour * 60 + parts.minute
+  const text = String(value || '')
+  const timestamp = Date.parse(text.replaceAll('_to_', ' '))
+  return Number.isFinite(timestamp) ? timestamp : Number.MAX_SAFE_INTEGER
+}
+
+function numericBandPosition(row) {
+  const numbers = String(row.bandName).match(/\d+(?:\.\d+)?/g)
+  return numbers?.length ? Number(numbers[numbers.length - 1]) : row.bandIndex + 1
+}
+
+function lineAnalysisSvg(series, xLabel, yLabel, xFormatter = formatColorbarValue) {
+  const points = series.flatMap((item) => item.points).filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
+  if (!points.length) return '<div class="analysis-empty">当前筛选条件没有可绘制的数据。</div>'
+  const width = 820, height = 440, left = 76, right = 28, top = 28, bottom = 62
+  let xMin = Math.min(...points.map((point) => point.x)), xMax = Math.max(...points.map((point) => point.x))
+  let yMin = Math.min(...points.map((point) => point.y)), yMax = Math.max(...points.map((point) => point.y))
+  if (xMin === xMax) { xMin -= .5; xMax += .5 }
+  if (yMin === yMax) { const pad = Math.max(.001, Math.abs(yMin) * .05); yMin -= pad; yMax += pad }
+  else { const pad = (yMax - yMin) * .08; yMin -= pad; yMax += pad }
+  const x = (value) => left + (value - xMin) / (xMax - xMin) * (width - left - right)
+  const y = (value) => top + (yMax - value) / (yMax - yMin) * (height - top - bottom)
+  const colors = ['#246fd3', '#ef8c28', '#20a36a', '#9b5de5']
+  const grid = Array.from({ length: 6 }, (_, index) => {
+    const ratio = index / 5
+    const gx = left + ratio * (width - left - right), gy = top + ratio * (height - top - bottom)
+    const xv = xMin + ratio * (xMax - xMin), yv = yMax - ratio * (yMax - yMin)
+    return `<line x1="${gx}" y1="${top}" x2="${gx}" y2="${height - bottom}"/><line x1="${left}" y1="${gy}" x2="${width - right}" y2="${gy}"/><text x="${gx}" y="${height - bottom + 24}" text-anchor="middle">${escapeHtml(xFormatter(xv, index))}</text><text x="${left - 12}" y="${gy + 4}" text-anchor="end">${escapeHtml(formatColorbarValue(yv))}</text>`
+  }).join('')
+  const paths = series.map((item, seriesIndex) => {
+    const sorted = [...item.points].filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y)).sort((a, b) => a.x - b.x)
+    const color = colors[seriesIndex % colors.length]
+    const path = sorted.map((point, index) => `${index ? 'L' : 'M'}${x(point.x).toFixed(2)},${y(point.y).toFixed(2)}`).join(' ')
+    const dots = sorted.map((point) => `<circle cx="${x(point.x)}" cy="${y(point.y)}" r="4"><title>${escapeHtml(point.label || `${xFormatter(point.x)} · ${formatColorbarValue(point.y)}`)}</title></circle>`).join('')
+    return `<g style="--series-color:${color}"><path class="analysis-series-line" d="${path}"/>${dots}</g>`
+  }).join('')
+  const legend = series.length > 1 ? `<div class="analysis-legend">${series.map((item, index) => `<span><i style="background:${colors[index % colors.length]}"></i>${escapeHtml(item.name)}</span>`).join('')}</div>` : ''
+  return `<div class="analysis-chart-wrap"><svg class="analysis-chart" viewBox="0 0 ${width} ${height}" role="img"><g class="analysis-grid">${grid}</g><line class="analysis-axis" x1="${left}" y1="${height - bottom}" x2="${width - right}" y2="${height - bottom}"/><line class="analysis-axis" x1="${left}" y1="${top}" x2="${left}" y2="${height - bottom}"/><text class="analysis-axis-title" x="${(left + width - right) / 2}" y="${height - 12}" text-anchor="middle">${escapeHtml(xLabel)}</text><text class="analysis-axis-title" transform="translate(18 ${(top + height - bottom) / 2}) rotate(-90)" text-anchor="middle">${escapeHtml(yLabel)}</text>${paths}</svg>${legend}</div>`
+}
+
+function angularDistance(a, b) { return Math.abs(((Number(a) - Number(b) + 540) % 360) - 180) }
+
+function signedPlaneZenith(row, perpendicular = false) {
+  if (!Number.isFinite(row.vza) || !Number.isFinite(row.vaa)) return null
+  if (Math.abs(row.vza) < 1e-6) return 0
+  if (Math.abs(row.vza / 5 - Math.round(row.vza / 5)) > 1e-5) return null
+  const solarAzimuth = Number.isFinite(row.saa) ? row.saa : Number(state.config?.light?.azimuth || 0)
+  const positive = solarAzimuth + (perpendicular ? 90 : 0)
+  if (angularDistance(row.vaa, positive) < 1e-3) return row.vza
+  if (angularDistance(row.vaa, positive + 180) < 1e-3) return -row.vza
+  return null
+}
+
+function polarAnalysisSvg(rows, valueLabel) {
+  const points = rows.filter((row) => Number.isFinite(row.vza) && Number.isFinite(row.vaa) && Number.isFinite(row.mean))
+  if (!points.length) return '<div class="analysis-empty">当前筛选条件没有半球观测数据。</div>'
+  const width = 820, height = 460, cx = 410, cy = 220, radius = 178
+  const minimum = Math.min(...points.map((row) => row.mean)), maximum = Math.max(...points.map((row) => row.mean))
+  const range = maximum - minimum
+  const guides = [30, 60, 90].map((angle) => `<circle cx="${cx}" cy="${cy}" r="${radius * angle / 90}"/><text x="${cx + 5}" y="${cy - radius * angle / 90 + 14}">${angle}°</text>`).join('')
+  const axes = [0, 90, 180, 270].map((azimuth) => {
+    const radians = (azimuth - 90) * Math.PI / 180
+    const x = cx + Math.cos(radians) * radius, y = cy + Math.sin(radians) * radius
+    const labels = { 0: 'N / 0°', 90: 'E / 90°', 180: 'S / 180°', 270: 'W / 270°' }
+    return `<line x1="${cx}" y1="${cy}" x2="${x}" y2="${y}"/><text x="${cx + Math.cos(radians) * (radius + 28)}" y="${cy + Math.sin(radians) * (radius + 28) + 4}" text-anchor="middle">${labels[azimuth]}</text>`
+  }).join('')
+  const dots = points.map((row) => {
+    const radians = (row.vaa - 90) * Math.PI / 180, distance = Math.min(1, row.vza / 90) * radius
+    const normalized = range ? (row.mean - minimum) / range : .5
+    const color = `hsl(${(1 - normalized) * 225},82%,50%)`
+    return `<circle class="analysis-polar-point" cx="${cx + Math.cos(radians) * distance}" cy="${cy + Math.sin(radians) * distance}" r="5" fill="${color}"><title>VZA ${formatColorbarValue(row.vza)}° · VAA ${formatColorbarValue(row.vaa)}° · ${valueLabel} ${formatColorbarValue(row.mean)}</title></circle>`
+  }).join('')
+  return `<div class="analysis-chart-wrap"><svg class="analysis-chart analysis-polar" viewBox="0 0 ${width} ${height}" role="img"><g class="analysis-polar-grid">${guides}${axes}</g>${dots}</svg>${resultColorbar(`${valueLabel} · 整幅图像均值`, minimum, maximum)}</div>`
+}
+
+function scatterAnalysisSvg(sourcePoints) {
+  const points = sourcePoints
+    .map((point) => ({ x: Number(point[0]), y: Number(point[1]) }))
+    .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
+  if (!points.length) return '<div class="analysis-empty">没有可绘制的有效像元。</div>'
+  const width = 680, height = 520, left = 78, right = 28, top = 28, bottom = 62
+  const sortedValues = points.flatMap((point) => [point.x, point.y]).sort((a, b) => a - b)
+  const percentile = (fraction) => {
+    const position = (sortedValues.length - 1) * fraction
+    const lower = Math.floor(position), upper = Math.ceil(position)
+    if (lower === upper) return sortedValues[lower]
+    const weight = position - lower
+    return sortedValues[lower] * (1 - weight) + sortedValues[upper] * weight
+  }
+  let minimum = percentile(.02)
+  let maximum = percentile(.98)
+  if (minimum === maximum) { const pad = Math.max(.001, Math.abs(minimum) * .05); minimum -= pad; maximum += pad }
+  else { const pad = (maximum - minimum) * .05; minimum -= pad; maximum += pad }
+  const x = (value) => left + (value - minimum) / (maximum - minimum) * (width - left - right)
+  const y = (value) => top + (maximum - value) / (maximum - minimum) * (height - top - bottom)
+  const grid = Array.from({ length: 6 }, (_, index) => {
+    const ratio = index / 5
+    const gx = left + ratio * (width - left - right), gy = top + ratio * (height - top - bottom)
+    const value = minimum + ratio * (maximum - minimum)
+    const reverseValue = maximum - ratio * (maximum - minimum)
+    return `<line x1="${gx}" y1="${top}" x2="${gx}" y2="${height - bottom}"/><line x1="${left}" y1="${gy}" x2="${width - right}" y2="${gy}"/><text x="${gx}" y="${height - bottom + 24}" text-anchor="middle">${escapeHtml(formatColorbarValue(value))}</text><text x="${left - 12}" y="${gy + 4}" text-anchor="end">${escapeHtml(formatColorbarValue(reverseValue))}</text>`
+  }).join('')
+  const dots = points.map((point) => `<circle cx="${x(point.x).toFixed(2)}" cy="${y(point.y).toFixed(2)}" r="2"><title>A ${escapeHtml(formatColorbarValue(point.x))} · B ${escapeHtml(formatColorbarValue(point.y))}</title></circle>`).join('')
+  return `<div class="analysis-chart-wrap"><svg class="analysis-chart change-scatter-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="图像 A 与图像 B 像元散点图"><defs><clipPath id="changeScatterClip"><rect x="${left}" y="${top}" width="${width - left - right}" height="${height - top - bottom}"/></clipPath></defs><g class="analysis-grid">${grid}</g><line class="analysis-reference-line" x1="${x(minimum)}" y1="${y(minimum)}" x2="${x(maximum)}" y2="${y(maximum)}"/><line class="analysis-axis" x1="${left}" y1="${height - bottom}" x2="${width - right}" y2="${height - bottom}"/><line class="analysis-axis" x1="${left}" y1="${top}" x2="${left}" y2="${height - bottom}"/><text class="analysis-axis-title" x="${(left + width - right) / 2}" y="${height - 12}" text-anchor="middle">图像 A 像元值</text><text class="analysis-axis-title" transform="translate(18 ${(top + height - bottom) / 2}) rotate(-90)" text-anchor="middle">图像 B 像元值</text><g class="change-scatter-points" clip-path="url(#changeScatterClip)">${dots}</g></svg></div>`
+}
+
+function changeResultFiles() {
+  return state.resultFiles.filter((file) => file.kind === 'tiff')
+}
+
+function changeFileLabel(file) {
+  return file?.observationLabel ? `${file.name} · ${file.observationLabel}` : file?.name || ''
+}
+
+function changeDifferenceColorbar(limit) {
+  return `<div class="result-colorbar change-colorbar" role="img" aria-label="B 减 A 差值色标"><div class="result-colorbar-title">B − A · P2–P98</div><div class="result-colorbar-scale"><div class="result-colorbar-gradient"></div><div class="result-colorbar-labels"><span>${escapeHtml(formatColorbarValue(-limit))}</span><span>0</span><span>${escapeHtml(formatColorbarValue(limit))}</span></div></div></div>`
+}
+
+function bindChangeAnalysisControls() {
+  const update = (key, value) => {
+    state.analysisSelection.change = {
+      ...(state.analysisSelection.change || {}),
+      [key]: value,
+      ...(['firstPath', 'secondPath'].includes(key) ? { band: '0' } : {})
+    }
+    renderChangeAnalysis()
+  }
+  $('#changeFirst')?.addEventListener('change', (event) => update('firstPath', event.target.value))
+  $('#changeSecond')?.addEventListener('change', (event) => update('secondPath', event.target.value))
+  $('#changeBand')?.addEventListener('change', (event) => update('band', event.target.value))
+  $('#changeSwap')?.addEventListener('click', () => {
+    const selection = state.analysisSelection.change || {}
+    state.analysisSelection.change = { ...selection, firstPath: selection.secondPath, secondPath: selection.firstPath }
+    renderChangeAnalysis()
+  })
+}
+
+async function renderChangeAnalysis() {
+  disposeResultViewer()
+  const requestId = ++state.changeAnalysisRequest
+  const files = changeResultFiles()
+  const previous = state.analysisSelection.change || {}
+  const first = files.find((file) => file.path === previous.firstPath) || files[0]
+  const second = files.find((file) => file.path === previous.secondPath && file.path !== first?.path)
+    || files.find((file) => file.path !== first?.path)
+  const pairChanged = first?.path !== previous.firstPath || second?.path !== previous.secondPath
+  const band = pairChanged ? 0 : Math.max(0, Math.floor(Number(previous.band) || 0))
+  state.analysisSelection.change = { firstPath: first?.path || '', secondPath: second?.path || '', band: String(band) }
+  renderResultFiles()
+  const fileValues = files.map((file) => file.path)
+  const fileLabel = (path) => changeFileLabel(files.find((file) => file.path === path))
+  const controls = `${analysisSelect('图像 A（基准）', 'changeFirst', fileValues, first?.path || '', fileLabel)}${analysisSelect('图像 B（对比）', 'changeSecond', fileValues, second?.path || '', fileLabel)}${analysisSelect('波段', 'changeBand', [band], band, (value) => `图层 ${Number(value) + 1}`)}<button class="button ghost change-swap" id="changeSwap" type="button">交换 A / B</button>`
+  const preview = $('#resultPreview')
+  preview.classList.add('analysis-preview')
+  preview.innerHTML = `<div class="result-preview-card analysis-card change-analysis-card"><div class="analysis-controls change-controls">${controls}</div><div id="changeAnalysisOutput" class="change-analysis-output"><div class="analysis-empty">${files.length < 2 ? '至少需要两个 TIFF 图像结果。' : '正在计算逐像元差异…'}</div></div></div>`
+  preview.scrollTop = 0
+  bindChangeAnalysisControls()
+  if (!first || !second) {
+    $('#resultStatus').textContent = '变化分析至少需要两个 TIFF 图像结果'
+    return
+  }
+
+  $('#resultStatus').textContent = `正在比较 ${first.name} 与 ${second.name}...`
+  try {
+    const result = await api.compareResults(first.path, second.path, band, 4000)
+    if (requestId !== state.changeAnalysisRequest || state.analysisType !== 'change') return
+    const bandSelect = $('#changeBand')
+    bandSelect.innerHTML = Array.from({ length: result.bands }, (_, index) => analysisOption(index, `${result.bandNames[index] || `波段 ${index + 1}`}（图层 ${index + 1}）`, result.band)).join('')
+    const correlation = Number.isFinite(result.correlation) ? formatColorbarValue(result.correlation) : '—'
+    $('#changeAnalysisOutput').innerHTML = `<div class="change-metrics"><div><span>有效像元</span><strong>${Number(result.validPixels).toLocaleString('zh-CN')}</strong></div><div><span>平均差值</span><strong>${escapeHtml(formatColorbarValue(result.meanDifference))}</strong></div><div><span>MAE</span><strong>${escapeHtml(formatColorbarValue(result.mae))}</strong></div><div><span>RMSE</span><strong>${escapeHtml(formatColorbarValue(result.rmse))}</strong></div><div><span>相关系数 R</span><strong>${escapeHtml(correlation)}</strong></div><div><span>差值范围</span><strong>${escapeHtml(formatColorbarValue(result.differenceMinimum))} ～ ${escapeHtml(formatColorbarValue(result.differenceMaximum))}</strong></div></div><div class="change-figures"><section><h4>差异图（B − A）</h4><div class="change-difference-stage"><canvas class="result-canvas change-difference-canvas" id="changeDifferenceCanvas" width="${result.previewWidth}" height="${result.previewHeight}"></canvas></div>${changeDifferenceColorbar(result.differenceLimit)}</section><section><h4>像元散点图</h4>${scatterAnalysisSvg(result.scatter)}</section></div><div class="result-meta"><span>${result.width} × ${result.height}</span><span>${escapeHtml(result.bandNames[result.band] || `波段 ${result.band + 1}`)}</span><span>显示范围 P2–P98，统计使用全部有效像元</span><span>散点抽样 ${Number(result.scatter.length).toLocaleString('zh-CN')} 个</span></div>`
+    const source = atob(result.differencePixels || '')
+    const bytes = Uint8ClampedArray.from(source, (character) => character.charCodeAt(0))
+    const canvas = $('#changeDifferenceCanvas')
+    const context = canvas.getContext('2d')
+    const image = context.createImageData(result.previewWidth, result.previewHeight)
+    image.data.set(bytes)
+    context.putImageData(image, 0, 0)
+    $('#resultStatus').textContent = `变化分析 · ${result.bandNames[result.band] || `波段 ${result.band + 1}`} · B − A`
+  } catch (error) {
+    if (requestId !== state.changeAnalysisRequest) return
+    $('#changeAnalysisOutput').innerHTML = `<div class="analysis-empty">${escapeHtml(error.message)}</div>`
+    $('#resultStatus').textContent = error.message
+  }
+}
+
+function bindAnalysisControls(rows) {
+  $$('.analysis-control').forEach((control) => control.addEventListener('change', () => {
+    state.analysisSelection[state.analysisType] = Object.fromEntries($$('.analysis-control').map((item) => [item.id, item.value]))
+    renderStatisticsAnalysis(rows, state.analysisType)
+  }))
+}
+
+function renderStatisticsAnalysis(rows, type = state.analysisType) {
+  disposeResultViewer()
+  state.analysisRows = rows
+  const selection = state.analysisSelection[type] || {}
+  const modes = uniqueValues(rows, (row) => row.mode)
+  const expectedMode = String(state.mode || '').replace(/^e/, '')
+  const mode = modes.find((value) => value.toLowerCase() === expectedMode.toLowerCase()) || modes[0]
+  const modeRows = rows.filter((row) => row.mode === mode)
+  const bandKeys = uniqueValues(modeRows, statisticBandKey, (a, b) => Number(a.split('|')[0]) - Number(b.split('|')[0]))
+  const times = uniqueValues(modeRows, (row) => row.time, (a, b) => statisticTimeOrder(a) - statisticTimeOrder(b))
+  const angleKeys = uniqueValues(modeRows, statisticAngleKey, (a, b) => Number(a.split('|')[0]) - Number(b.split('|')[0]) || Number(a.split('|')[1]) - Number(b.split('|')[1]))
+  const band = bandKeys.includes(selection.analysisBand) ? selection.analysisBand : bandKeys[0]
+  const time = times.includes(selection.analysisTime) ? selection.analysisTime : times[0]
+  const angle = angleKeys.includes(selection.analysisAngle) ? selection.analysisAngle : angleKeys[0]
+  let controls = '', chart = '', description = ''
+
+  if (type === 'angle') {
+    const candidates = modeRows.filter((row) => statisticBandKey(row) === band && row.time === time)
+    const mainRows = candidates.map((row) => ({ row, signed: signedPlaneZenith(row, false) })).filter((item) => item.signed != null)
+    const perpendicularRows = candidates.map((row) => ({ row, signed: signedPlaneZenith(row, true) })).filter((item) => item.signed != null)
+    const planeFiles = new Set([...mainRows, ...perpendicularRows].map((item) => item.row.file))
+    const hasHemisphere = Boolean(state.config?.sensor?.hemisphere) || candidates.length >= 100
+    const hemisphereRows = hasHemisphere ? candidates.filter((row) => !planeFiles.has(row.file)) : []
+    const available = [...(mainRows.length ? ['main'] : []), ...(hemisphereRows.length ? ['hemisphere'] : [])]
+    const anglePlot = available.includes(selection.analysisAnglePlot) ? selection.analysisAnglePlot : available[0] || 'main'
+    const selectedBandRow = candidates[0] || modeRows.find((row) => statisticBandKey(row) === band)
+    const valueLabel = statisticValueLabel(selectedBandRow)
+    const plotControl = available.length > 1 ? analysisSelect('显示方式', 'analysisAnglePlot', available, anglePlot, (value) => ({ main: '太阳主平面', hemisphere: '半球极坐标' }[value])) : ''
+    controls = `${analysisSelect('波段', 'analysisBand', bandKeys, band, statisticBandLabel)}${analysisSelect('时刻', 'analysisTime', times, time, (value) => value ? displaySimulationTime(value) : '静态')}${plotControl}`
+    if (anglePlot === 'hemisphere') chart = polarAnalysisSvg(hemisphereRows, valueLabel)
+    else {
+      chart = lineAnalysisSvg([{ name: '太阳主平面', points: mainRows.map(({ row, signed }) => ({ x: signed, y: row.mean, label: `观测天顶角 ${signed}° · ${valueLabel}均值 ${formatColorbarValue(row.mean)}` })) }], '观测天顶角 [°]', `${valueLabel} · 整幅图像均值`)
+    }
+    description = `角度分析 · ${statisticBandLabel(band)} · ${time ? displaySimulationTime(time) : '静态'} · 整幅图像均值`
+  } else if (type === 'band') {
+    const anglesAtTime = uniqueValues(modeRows.filter((row) => row.time === time), statisticAngleKey, (a, b) => Number(a.split('|')[0]) - Number(b.split('|')[0]) || Number(a.split('|')[1]) - Number(b.split('|')[1]))
+    const selectedAngle = anglesAtTime.includes(angle) ? angle : anglesAtTime[0]
+    const candidates = modeRows.filter((row) => row.time === time && statisticAngleKey(row) === selectedAngle)
+    controls = `${analysisSelect('观测角', 'analysisAngle', anglesAtTime, selectedAngle, statisticAngleLabel)}${analysisSelect('时刻', 'analysisTime', times, time, (value) => value ? displaySimulationTime(value) : '静态')}`
+    const wavelengthRanges = [
+      { label: '光学波段（≤ 2500 nm）', rows: candidates.filter((row) => numericBandPosition(row) <= 2500) },
+      { label: '热红外波段（> 2500 nm）', rows: candidates.filter((row) => numericBandPosition(row) > 2500) }
+    ].filter((range) => range.rows.length)
+    chart = wavelengthRanges.map((range) => {
+      const quantities = uniqueValues(range.rows, statisticQuantity)
+      const valueLabel = quantities.length === 1 ? (statisticQuantityLabels[quantities[0]] || '结果值') : '结果值'
+      const figure = lineAnalysisSvg([{ name: range.label, points: range.rows.map((row) => ({ x: numericBandPosition(row), y: row.mean, label: `${row.bandName} · 整幅图像均值 ${formatColorbarValue(row.mean)}` })) }], '波长 [nm]', `${valueLabel} · 整幅图像均值`)
+      return `<section class="analysis-chart-section"><h4>${range.label}</h4>${figure}</section>`
+    }).join('')
+    description = `波段分析 · ${statisticAngleLabel(selectedAngle)} · ${time ? displaySimulationTime(time) : '静态'} · 整幅图像均值`
+  } else {
+    const selectedRows = modeRows.filter((row) => statisticBandKey(row) === band && statisticAngleKey(row) === angle).sort((a, b) => statisticTimeOrder(a.time) - statisticTimeOrder(b.time))
+    const selectedBandRow = selectedRows[0] || modeRows.find((row) => statisticBandKey(row) === band)
+    const valueLabel = statisticValueLabel(selectedBandRow)
+    controls = `${analysisSelect('波段', 'analysisBand', bandKeys, band, statisticBandLabel)}${analysisSelect('观测角', 'analysisAngle', angleKeys, angle, statisticAngleLabel)}`
+    chart = lineAnalysisSvg([{ name: '时间变化', points: selectedRows.map((row) => ({ x: statisticTimeOrder(row.time), y: row.mean, label: `${displaySimulationTime(row.time)} · ${valueLabel}均值 ${formatColorbarValue(row.mean)}` })) }], '模拟时刻', `${valueLabel} · 整幅图像均值`, (value) => {
+      const row = selectedRows.reduce((closest, item) => !closest || Math.abs(statisticTimeOrder(item.time) - value) < Math.abs(statisticTimeOrder(closest.time) - value) ? item : closest, null)
+      return row ? displaySimulationTime(row.time) : ''
+    })
+    description = `时间分析 · ${statisticBandLabel(band)} · ${statisticAngleLabel(angle)} · 整幅图像均值`
+  }
+  const preview = $('#resultPreview')
+  preview.classList.add('analysis-preview')
+  preview.innerHTML = `<div class="result-preview-card analysis-card"><div class="analysis-controls">${controls}</div>${chart}<div class="result-meta"><span>${escapeHtml(description)}</span><span>鼠标停留在数据点上可查看精确值</span></div></div>`
+  preview.scrollTop = 0
+  requestAnimationFrame(() => { preview.scrollTop = 0 })
+  bindAnalysisControls(rows)
+}
+
+function drawStatisticsAnalysis(result) {
+  const rows = statisticsRows(result.content)
+  if (!rows.length) {
+    emptyResultPreview('统计结果为空', '请先运行图像模拟，系统会自动生成带模型后缀的统计 CSV。')
+    return
+  }
+  renderStatisticsAnalysis(rows, state.analysisType)
+}
+
 
 async function openResultFile(file, band = 0) {
   if (!file) return
@@ -1915,40 +4833,74 @@ async function openResultFile(file, band = 0) {
       delete result.radiosity; delete result.lightEnhancement; delete result.sunlit
       result = { ...result, kind: 'facet', path: file.path, metrics }
     }
-    if (result.kind === 'envi') drawEnviPreview(result, file)
-    else if (result.kind === 'tiff') drawTiffPreview(result, file)
+    if (result.kind === 'envi') await drawEnviPreview(result, file)
+    else if (result.kind === 'wind') drawWindPreview(result, file)
+    else if (result.kind === 'tiff') await drawTiffPreview(result, file)
     else if (result.kind === 'facet') showFacet3D(result, file)
+    else if (result.kind === 'voxel') showVoxel3D(result, file)
     else if (result.kind === 'image') await drawImagePreview(result, file)
+    else if (result.kind === 'text' && state.resultView === 'analysis' && state.analysisType !== '3d') drawStatisticsAnalysis(result)
     else if (result.kind === 'text') { disposeResultViewer(); state.resultRaster = null; $('#resultPreview').innerHTML = `<div class="result-preview-card"><pre class="result-text">${escapeHtml(result.content)}</pre><button class="button ghost result-open-external" type="button">用系统程序打开</button></div>` }
     else { disposeResultViewer(); state.resultRaster = null; $('#resultPreview').innerHTML = `<div class="empty-editor"><svg><use href="#i-layers"/></svg><h3>暂不支持内置预览</h3><p>可在资源管理器中定位并使用外部程序打开该文件。</p><button class="button ghost result-open-external" type="button">用系统程序打开</button></div>` }
     $('#resultPreview').querySelector('.result-open-external')?.addEventListener('click', () => api.openPath(file.path))
-    $('#resultStatus').textContent = result.kind === 'envi' ? `ENVI 浮点影像 · ${file.name}` : result.kind === 'tiff' ? `TIFF 栅格影像 · ${file.name}` : result.kind === 'facet' ? `面元结果 · ${file.name}` : result.kind === 'image' ? `图像结果 · ${file.name}` : file.name
+    $('#resultStatus').textContent = result.kind === 'envi' ? `ENVI 浮点影像 · ${file.name}` : result.kind === 'wind' ? `自适应风速箭头图 · ${file.name}` : result.kind === 'tiff' ? `TIFF 栅格影像 · ${file.name}` : result.kind === 'facet' ? `面元结果 · ${file.name}` : result.kind === 'text' && state.resultView === 'analysis' ? `${({ angle: '角度', band: '波段', time: '时间' })[state.analysisType] || ''}统计分析 · ${file.name}` : result.kind === 'image' ? `图像结果 · ${file.name}` : file.name
   } catch (error) {
     emptyResultPreview('结果读取失败', error.message)
     $('#resultStatus').textContent = error.message
   }
 }
 
+function threeDimensionalOutputEnabled() {
+  const energyMode = state.mode === 'eFacetEB' || state.mode === 'eVoxelEB'
+  return energyMode
+    ? Boolean(state.config?.sensor?.radiationProcess || state.config?.sensor?.energyProcess)
+    : Boolean(state.config?.sensor?.radiationProcess)
+}
+
 function resultFilesForView() {
-  return state.resultFiles.filter((file) => state.resultView === '3d'
-    ? file.kind === 'facet'
-    : ['tiff', 'envi', 'image'].includes(file.kind))
+  if (state.resultView === 'image') return state.resultFiles.filter((file) => ['tiff', 'envi', 'image'].includes(file.kind))
+  if (state.analysisType === 'change') return changeResultFiles()
+  if (state.analysisType === '3d') return threeDimensionalOutputEnabled() ? state.resultFiles.filter((file) => ['facet', 'process'].includes(file.kind)) : []
+  return state.resultFiles.filter((file) => file.kind === 'text' && /(?:^|[\\/])result_statistics(?:_[a-z0-9-]+)?\.csv$/i.test(file.path))
 }
 
 function updateResultViewHeader() {
-  const is3d = state.resultView === '3d'
-  $('#resultDialogTitle').textContent = is3d ? '三维展示' : '图像结果'
-  $('#resultImageTab').classList.toggle('active', !is3d)
-  $('#result3dTab').classList.toggle('active', is3d)
+  const analysis = state.resultView === 'analysis'
+  $('#resultDialogTitle').textContent = analysis ? '分析' : '图像结果'
+  $('#resultImageTab').classList.toggle('active', !analysis)
+  $('#resultAnalysisTab').classList.toggle('active', analysis)
+  $('#resultAnalysisTabs').hidden = !analysis
+  const tabs = { angle: '#angleAnalysisTab', band: '#bandAnalysisTab', time: '#timeAnalysisTab', change: '#changeAnalysisTab', '3d': '#threeAnalysisTab' }
+  for (const [type, selector] of Object.entries(tabs)) $(selector).classList.toggle('active', analysis && state.analysisType === type)
 }
 
 async function setResultView(view, openFirst = true) {
   disposeResultViewer()
   state.resultRaster = null
-  state.resultView = view === '3d' ? '3d' : 'image'
+  state.resultView = view === 'analysis' ? 'analysis' : 'image'
   state.selectedResult = null
   updateResultViewHeader()
   renderResultFiles()
+  if (state.resultView === 'analysis' && state.analysisType === 'change') {
+    if (openFirst) await renderChangeAnalysis()
+    return
+  }
+  const first = resultFilesForView()[0]
+  if (openFirst && first) await openResultFile(first)
+}
+
+async function setAnalysisType(type, openFirst = true) {
+  disposeResultViewer()
+  state.resultRaster = null
+  state.resultView = 'analysis'
+  state.analysisType = ['angle', 'band', 'time', 'change', '3d'].includes(type) ? type : 'angle'
+  state.selectedResult = null
+  updateResultViewHeader()
+  renderResultFiles()
+  if (state.analysisType === 'change') {
+    if (openFirst) await renderChangeAnalysis()
+    return
+  }
   const first = resultFilesForView()[0]
   if (openFirst && first) await openResultFile(first)
 }
@@ -1956,18 +4908,32 @@ async function setResultView(view, openFirst = true) {
 function renderResultFiles() {
   const visibleFiles = resultFilesForView()
   if (!visibleFiles.length) {
-    const is3d = state.resultView === '3d'
-    $('#resultFiles').innerHTML = `<div class="result-empty-list">${is3d ? '尚无面元三维结果。' : '尚无图像结果。'}<br>请先运行模拟，然后点击“刷新”。</div>`
-    emptyResultPreview(is3d ? '尚无三维结果' : '尚无图像结果', is3d ? '面元计算完成后可在这里查看温度、辐射度和能量通量。' : '逐时 TIFF 会按实际时间和观测角度显示在这里。')
+    const analysis = state.resultView === 'analysis'
+    const is3d = analysis && state.analysisType === '3d'
+    const processDisabled = is3d && !threeDimensionalOutputEnabled()
+    const analysisLabel = ({ angle: '角度', band: '波段', time: '时间', change: '变化', '3d': '三维' })[state.analysisType]
+    document.querySelector('#resultFiles').innerHTML = `<div class="result-empty-list">${processDisabled ? '当前模式未启用过程输出。' : analysis ? `尚无${analysisLabel}分析结果。` : '尚无图像结果。'}<br>${processDisabled ? '请在仿真模拟中启用对应的过程输出。' : '请先运行模拟，然后点击刷新。'}</div>`
+    emptyResultPreview(processDisabled ? '尚无三维结果' : analysis ? `尚无${analysisLabel}分析数据` : '尚无图像结果', processDisabled ? '只有启用当前模式对应的过程输出，才会生成三维结果。' : is3d ? '面元或体元计算完成后可查看辐射度和能量通量。' : analysis ? '生成图像时会同步生成统计文件，用于角度、波段和时间分析。' : (state.mode === 'eFacetEB' || state.mode === 'eVoxelEB' ? 'TIFF 按模拟时间和观测角度排列。' : 'TIFF 按太阳角度和观测角度排列。'))
     return
   }
   $('#resultFiles').innerHTML = visibleFiles.map((file) => {
     const index = state.resultFiles.indexOf(file)
-    const extension = file.kind === 'envi' ? 'ENVI' : file.kind === 'tiff' ? 'TIFF' : file.kind === 'facet' ? 'FACET' : file.name.split('.').pop()
+    const changeSelection = state.analysisSelection.change || {}
+    const changeRole = state.resultView === 'analysis' && state.analysisType === 'change'
+      ? (file.path === changeSelection.firstPath ? 'A' : file.path === changeSelection.secondPath ? 'B' : '') : ''
+    const extension = changeRole || (file.resultType === 'wind' ? 'WIND' : file.kind === 'envi' ? 'ENVI' : file.kind === 'tiff' ? 'TIFF' : file.kind === 'facet' ? 'FACET' : file.kind === 'text' ? 'CSV' : file.name.split('.').pop())
     const time = new Date(file.modifiedAt).toLocaleString('zh-CN', { hour12: false })
-    return `<button class="result-file" data-index="${index}"><span class="result-file-icon">${escapeHtml(extension)}</span><span><strong title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</strong><small>${file.observationLabel ? escapeHtml(file.observationLabel.replaceAll('_to_', ' → ').replaceAll('_', ' ')) + ' · ' : ''}${formatBytes(file.size)} · ${time}</small></span></button>`
+    return `<button class="result-file ${changeRole ? 'active' : ''}" data-index="${index}"><span class="result-file-icon">${escapeHtml(extension)}</span><span><strong title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</strong><small>${file.observationLabel ? escapeHtml(file.observationLabel.replaceAll('_to_', ' → ').replaceAll('_', ' ')) + ' · ' : ''}${formatBytes(file.size)} · ${time}</small></span></button>`
   }).join('')
-  $$('.result-file').forEach((button) => button.addEventListener('click', () => openResultFile(state.resultFiles[Number(button.dataset.index)])))
+  $$('.result-file').forEach((button) => button.addEventListener('click', () => {
+    const file = state.resultFiles[Number(button.dataset.index)]
+    if (state.resultView === 'analysis' && state.analysisType === 'change') {
+      const selection = state.analysisSelection.change || {}
+      if (file.path !== selection.firstPath) state.analysisSelection.change = { ...selection, secondPath: file.path, band: '0' }
+      renderResultFiles()
+      renderChangeAnalysis()
+    } else openResultFile(file)
+  }))
 }
 
 async function refreshResults(openFirst = false) {
@@ -1977,16 +4943,38 @@ async function refreshResults(openFirst = false) {
   state.resultFiles = result.files
   $('#resultDirectory').textContent = result.directory
   renderResultFiles()
+  if (state.resultView === 'analysis' && state.analysisType === 'change') {
+    await renderChangeAnalysis()
+    return
+  }
   const visibleFiles = resultFilesForView()
   const selected = state.selectedResult && visibleFiles.find((file) => file.path === state.selectedResult.path)
   if (selected) await openResultFile(selected)
   else if (openFirst && visibleFiles.length) await openResultFile(visibleFiles[0])
 }
 
-async function showResults(view = 'image') {
+async function deleteAllResults() {
+  try {
+    const kind = state.resultView === 'analysis' && state.analysisType === '3d' ? '3d' : 'image'
+    const result = await api.deleteResults(state.outputDir, kind)
+    disposeResultViewer()
+    state.selectedResult = null
+    state.resultRaster = null
+    await refreshResults(false)
+    $('#resultStatus').textContent = '已删除 ' + result.deleted + (kind === '3d' ? ' 个三维输出' : ' 个 TIFF 图像结果')
+    addLog('已删除 ' + result.deleted + (kind === '3d' ? ' 个三维输出' : ' 个 TIFF 图像结果'), 'success')
+    toast(kind === '3d' ? '三维结果已删除' : '图像结果已删除', result.deleted + ' 个文件')
+  } catch (error) {
+    toast('删除结果失败', error.message, 'error')
+  }
+}
+
+async function showResults(view = 'image', analysisType = null) {
   if (!state.inputPath) { toast('无法查看结果', '请先新建或打开工程', 'error'); return }
   $('#resultDialog').hidden = false
-  state.resultView = view === '3d' ? '3d' : 'image'
+  if (view === '3d') { state.resultView = 'analysis'; state.analysisType = '3d' }
+  else if (view === 'analysis') { state.resultView = 'analysis'; if (analysisType) state.analysisType = analysisType }
+  else state.resultView = 'image'
   state.selectedResult = null
   updateResultViewHeader()
   try {
@@ -2061,18 +5049,27 @@ $$('.tree-item').forEach((button) => button.addEventListener('click', () => { st
 $$('#viewStyle button').forEach((button) => button.addEventListener('click', () => { $$('#viewStyle button').forEach((item) => item.classList.toggle('active', item === button)); applyViewStyle(button.dataset.style) }))
 $('#gridBtn').addEventListener('click', () => { if (!grid) return; grid.visible = !grid.visible; $('#gridBtn').classList.toggle('active', grid.visible) })
 $('#voxelBtn').addEventListener('click', () => { if (!voxelPreview) return; voxelPreview.visible = !voxelPreview.visible; $('#voxelBtn').classList.toggle('active', voxelPreview.visible) })
-$('#fitBtn').addEventListener('click', fitCamera); $('#openXmlBtn').addEventListener('click', chooseXml); $('#drawerOpenBtn').addEventListener('click', chooseXml); $('#saveXmlBtn').addEventListener('click', saveXml); $('#importObjBtn').addEventListener('click', importObj); $('#runBtn').addEventListener('click', runSimulation); $('#stopBtn').addEventListener('click', () => api.stop())
+$('#fitBtn').addEventListener('click', fitCamera); $('#openXmlBtn').addEventListener('click', chooseXml); $('#drawerOpenBtn').addEventListener('click', chooseXml); $('#saveXmlBtn').addEventListener('click', saveXml); $('#runBtn').addEventListener('click', runSimulation); $('#stopBtn').addEventListener('click', () => api.stop())
 $('#newProjectBtn').addEventListener('click', showProjectDialog)
 $('#closeProjectBtn').addEventListener('click', hideProjectDialog)
 $('#projectDialog').addEventListener('click', (event) => { if (event.target === $('#projectDialog')) hideProjectDialog() })
 $('#projectForm').addEventListener('submit', createProject)
+$('#closeGeometryBtn').addEventListener('click', hideGeometryDialog)
+$('#geometryDialog').addEventListener('click', (event) => { if (event.target === $('#geometryDialog')) hideGeometryDialog() })
+$('#geometryForm').addEventListener('input', updateGeometryDialog)
+$('#geometryForm').addEventListener('change', (event) => {
+  if (event.target.name === 'geometryMode' && event.target.value === 'fire') setMediumDefaults('fire')
+  if (event.target.name === 'geometryMode' && event.target.value === 'water') setWaterDefaults()
+  updateGeometryDialog()
+})
+$('#geometryForm').addEventListener('submit', generateGeometryObject)
 $('#closeMaterialBtn').addEventListener('click', () => hideMaterialDialog(true))
 $('#materialDialog').addEventListener('click', (event) => { if (event.target === $('#materialDialog')) hideMaterialDialog(true) })
 $('#materialForm').addEventListener('submit', saveImportedObject)
 $('#closeObjectAttributeBtn').addEventListener('click', hideObjectAttributeDialog)
 $('#objectAttributeDialog').addEventListener('click', (event) => { if (event.target === $('#objectAttributeDialog')) hideObjectAttributeDialog() })
 $('#objectAttributeForm').addEventListener('submit', saveObjectAttributes)
-$('#objectAttributeType').addEventListener('change', () => renderObjectAttributeOptions(true))
+$('#objectAttributeType').addEventListener('change', () => renderObjectAttributeOptions(true, true))
 $('#objectAttributeMaterial').addEventListener('change', renderObjectAttributeSummary)
 $('#closeObjectBtn').addEventListener('click', hideObjectDialog)
 $('#objectDialog').addEventListener('click', (event) => { if (event.target === $('#objectDialog')) hideObjectDialog() })
@@ -2083,13 +5080,22 @@ $('#objectForm').addEventListener('input', (event) => {
   else if (event.target.name === 'distributionDensity') syncDistributionPopulation(form, 'density')
   else if (['distributionMinX', 'distributionMaxX', 'distributionMinY', 'distributionMaxY'].includes(event.target.name)) syncDistributionPopulation(form, form.elements.distributionBasis.value)
   updateDistributionFormState(form)
+  updateMovementFormState(form)
 })
 $('#objectForm').addEventListener('change', (event) => {
   const form = $('#objectForm')
   if (event.target.name === 'distributionBasis') syncDistributionPopulation(form, event.target.value)
   updateDistributionFormState(form)
+  updateMovementFormState(form)
 })
-$('#spectralModel').addEventListener('change', renderModelParameters)
+$('#distributionTxtFile').addEventListener('change', (event) => importDistributionTxt(event.target.files?.[0]))
+$('#spectralModel').addEventListener('change', () => {
+  const reflectance = materialSpectrumValues('reflectance') || '0.20'
+  const transmittance = materialSpectrumValues('transmittance') || '0.0'
+  const fileName = $('#materialForm [name="fileName"]')?.value || ''
+  renderModelParameters(fileName)
+  renderMaterialSpectrumValueFields(reflectance, transmittance)
+})
 document.querySelector("#spectralPreset").addEventListener("change", () => { applySpectrumPreset(); renderMeshMaterialRows() })
 document.querySelector("#thermalPreset").addEventListener("change", () => { applyThermalPreset(); renderMeshMaterialRows() })
 $('#materialObjectType').addEventListener('change', () => {
@@ -2097,7 +5103,7 @@ $('#materialObjectType').addEventListener('change', () => {
   $('#spectralModel').value = type === 'Vegetation' ? 'Prospect' : type === 'Soil' ? 'BSM' : 'custom'
   renderModelParameters(); renderSpectrumPresetOptions(); renderThermalPresetOptions(); renderPhysicalPresetOptions(); renderMeshMaterialRows()
 })
-$('#physicalMaterialPreset').addEventListener('change', renderPhysicalParameters)
+$('#physicalMaterialPreset').addEventListener('change', () => { renderPhysicalParameters(); renderMeshMaterialRows() })
 $('#closePresetBtn').addEventListener('click', hidePresetDialog)
 $('#presetDialog').addEventListener('click', (event) => { if (event.target === $('#presetDialog')) hidePresetDialog() })
 $('#presetKind').addEventListener('change', () => { state.presetPhysicalType = 'Vegetation'; renderPresetParameterFields() })
@@ -2107,20 +5113,26 @@ $('#presetForm').addEventListener('submit', savePreset)
 $('#engineBtn').addEventListener('click', async () => { if (state.mode === 'eFacetRT' || state.mode === 'eFacetEB') { toast('HiStream Facet 引擎', state.executable); return } const path = await api.chooseExecutable(); if (path) { state.executable = path; state.executableExists = true; setRunning(false); addLog(`HiStream 引擎：${path}`, 'success') } })
 $('#openOutputBtn').addEventListener('click', () => showResults('image'))
 $('#openImageResultsTopBtn').addEventListener('click', () => showResults('image'))
-$('#open3dResultsTopBtn').addEventListener('click', () => showResults('3d'))
+$('#open3dResultsTopBtn').addEventListener('click', () => showResults('analysis'))
 $('#resultImageTab').addEventListener('click', () => setResultView('image'))
-$('#result3dTab').addEventListener('click', () => setResultView('3d'))
+$('#resultAnalysisTab').addEventListener('click', () => setResultView('analysis'))
+$('#angleAnalysisTab').addEventListener('click', () => setAnalysisType('angle'))
+$('#bandAnalysisTab').addEventListener('click', () => setAnalysisType('band'))
+$('#timeAnalysisTab').addEventListener('click', () => setAnalysisType('time'))
+$('#changeAnalysisTab').addEventListener('click', () => setAnalysisType('change'))
+$('#threeAnalysisTab').addEventListener('click', () => setAnalysisType('3d'))
 $('#closeResultBtn').addEventListener('click', hideResults)
 $('#resultDialog').addEventListener('click', (event) => { if (event.target === $('#resultDialog')) hideResults() })
+$('#resultDeleteAllBtn').addEventListener('click', deleteAllResults)
 $('#resultRefreshBtn').addEventListener('click', async () => { try { await refreshResults(true) } catch (error) { toast('刷新结果失败', error.message, 'error') } })
 $('#resultFolderBtn').addEventListener('click', async () => { try { await api.openPath(state.outputDir) } catch (error) { toast('无法打开输出目录', error.message, 'error') } })
 $('#clearLogBtn').addEventListener('click', () => { $('#consoleOutput').innerHTML = ''; state.logCount = 0; $('#logCount').textContent = '0' })
 $('#xmlBtn').addEventListener('click', () => { $('#xmlDrawer').hidden = false }); $('#closeXmlBtn').addEventListener('click', () => { $('#xmlDrawer').hidden = true })
 $('#xmlDrawer').addEventListener('click', (event) => { if (event.target === $('#xmlDrawer')) $('#xmlDrawer').hidden = true })
 $('#xmlEditor').addEventListener('input', () => { state.xmlText = $('#xmlEditor').value; state.xmlDirty = true; $('#unsavedMark').hidden = false; $('#xmlStatus').textContent = '有未保存的修改' })
-$('#applyXmlBtn').addEventListener('click', async () => { try { state.config = ensureMaterialPresets(parseXml(state.xmlText)); if (await saveXml()) { refreshFromState(); loadActualScene(state.config); renderInspector(); $('#xmlDrawer').hidden = true } } catch (error) { toast('XML 格式错误', error.message, 'error') } })
-window.addEventListener('keydown', (event) => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); saveXml() } if (event.key === 'F5') { event.preventDefault(); runSimulation() } if (event.key === 'Escape') { if (!$('#resultDialog').hidden) hideResults(); else if (!$('#objectAttributeDialog').hidden) hideObjectAttributeDialog(); else if (!$('#objectDialog').hidden) hideObjectDialog(); else if (!$('#materialDialog').hidden) hideMaterialDialog(true); else if (!$('#presetDialog').hidden) hidePresetDialog(); else if (!$('#projectDialog').hidden) hideProjectDialog(); else if (!$('#xmlDrawer').hidden) $('#xmlDrawer').hidden = true } })
-setInterval(() => { if (state.running) { const seconds = (Date.now() - state.startedAt) / 1000; $('#elapsed').textContent = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(Math.floor(seconds % 60)).padStart(2, '0')}.${Math.floor((seconds % 1) * 10)}` } }, 100)
+$('#applyXmlBtn').addEventListener('click', async () => { try { const project = parseProjectJson(state.xmlText); const mode = project.mode; state.project = project; state.config = ensureMaterialPresets(project.configuration); selectMode(mode); if (await saveXml()) { refreshFromState(); loadActualScene(state.config); renderInspector(); $('#xmlDrawer').hidden = true } } catch (error) { toast('JSON 格式错误', error.message, 'error') } })
+window.addEventListener('keydown', (event) => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); saveXml() } if (event.key === 'F5') { event.preventDefault(); runSimulation() } if (event.key === 'Escape') { if (!$('#resultDialog').hidden) hideResults(); else if (!$('#objectAttributeDialog').hidden) hideObjectAttributeDialog(); else if (!$('#objectDialog').hidden) hideObjectDialog(); else if (!$('#materialDialog').hidden) hideMaterialDialog(true); else if (!$('#geometryDialog').hidden) hideGeometryDialog(); else if (!$('#presetDialog').hidden) hidePresetDialog(); else if (!$('#projectDialog').hidden) hideProjectDialog(); else if (!$('#xmlDrawer').hidden) $('#xmlDrawer').hidden = true } })
+setInterval(() => { if (state.running) renderRunProgress() }, 250)
 
 async function init() {
   state.config = defaultConfig(); generateWorld(state.config); updateSun(state.config); fitCamera(); renderInspector(); resize()
@@ -2129,8 +5141,10 @@ async function init() {
     state.executable = defaults.executable; state.executableExists = defaults.executableExists; state.radiosityExecutable = defaults.radiosityExecutable; state.radiosityExecutableExists = defaults.radiosityExecutableExists; state.platform = defaults.platform; setRunning(false)
     addLog(`GPU Radiosity：${defaults.radiosityExecutable}`, defaults.radiosityExecutableExists ? 'success' : 'error')
     addLog(`默认 HiStream：${defaults.executable}`, 'success'); addLog(`Three.js ${defaults.versions.three} · Node ${defaults.versions.node}`)
+    if (defaults.projectFile) loadXml(await api.openProject(defaults.projectFile))
   } catch (error) { state.executableExists = false; setEngineState('桌面桥接不可用', error.message, ''); addLog(error.message, 'error') }
   api.onSimulationEvent(handleSimulationEvent)
 }
 
+startLocalization({ onChange: () => renderInspector() })
 init()
