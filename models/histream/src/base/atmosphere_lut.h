@@ -241,11 +241,11 @@ inline bool atmosphereSkyPixelZenith(int pixelX, int pixelY,
         std::cos(zenith),
         std::sin(zenith) * std::sin(azimuth)};
     const glm::vec3 forward = -glm::normalize(cameraOut);
-    const glm::vec3 north{1.0f, 0.0f, 0.0f};
-    glm::vec3 up = north - glm::dot(north, forward) * forward;
+    const glm::vec3 worldUp{0.0f, 1.0f, 0.0f};
+    glm::vec3 up = worldUp - glm::dot(worldUp, forward) * forward;
     if (glm::dot(up, up) < 1.0e-12f) {
-        const glm::vec3 worldUp{0.0f, 1.0f, 0.0f};
-        up = worldUp - glm::dot(worldUp, forward) * forward;
+        const glm::vec3 north{1.0f, 0.0f, 0.0f};
+        up = north - glm::dot(north, forward) * forward;
     }
     up = glm::normalize(up);
     glm::vec3 right = glm::cross(forward, up);

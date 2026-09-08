@@ -34,6 +34,30 @@ glm::vec3 observationCameraUp(float zenithDegrees, float azimuthDegrees)
     return glm::normalize(glm::cross(right, forward));
 }
 
+glm::vec3 perspectiveCameraUp(float zenithDegrees, float azimuthDegrees)
+{
+    const float zenith = zenithDegrees * DEG2RAD;
+    const float azimuth = azimuthDegrees * DEG2RAD;
+    const glm::vec3 cameraOut{
+        std::sin(zenith) * std::cos(azimuth),
+        std::cos(zenith),
+        std::sin(zenith) * std::sin(azimuth)};
+    const glm::vec3 forward = -glm::normalize(cameraOut);
+    // Perspective imagery behaves like a forward-looking camera: keep the
+    // horizon horizontal. At nadir, vertical-up is degenerate, so use north-up.
+    const glm::vec3 worldUp{0.0f, 1.0f, 0.0f};
+    glm::vec3 up = worldUp - glm::dot(worldUp, forward) * forward;
+    if (glm::dot(up, up) < 1.0e-12f) {
+        const glm::vec3 north{1.0f, 0.0f, 0.0f};
+        up = north - glm::dot(north, forward) * forward;
+    }
+    up = glm::normalize(up);
+    glm::vec3 right = glm::cross(forward, up);
+    if (glm::dot(right, right) < 1.0e-12f) right = {0.0f, 0.0f, 1.0f};
+    else right = glm::normalize(right);
+    return glm::normalize(glm::cross(right, forward));
+}
+
 void transferToComputeBarrier(vk::CommandBuffer command, VkBuffer buffer, VkDeviceSize size)
 {
     VkBufferMemoryBarrier barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
@@ -263,7 +287,7 @@ SensorMatrix Geometry::createPerspectiveSensor(glm::vec3 position_XZY, float vza
     const float lookDistance = std::max(1.0f, glm::length(m_sensorSceneSize_XZY));
     return createSensor(position_XZY, position_XZY - cameraOut * lookDistance,
                         m_sensorSceneSize_XZY, m_sensorFov,
-                        observationCameraUp(vza, vaa));
+                        perspectiveCameraUp(vza, vaa));
 }
 
 glm::vec3 Geometry::sensorWorldToXzy(glm::vec3 position_XYZ) const {

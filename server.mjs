@@ -897,14 +897,16 @@ function writeRadiosityTiffForAngle(jsonPath, inputPath, mode, viewAngleOverride
     const length = length3(value)
     return length > 1e-9 ? value.map((component) => component / length) : fallback
   }
-  const cameraBasis = (forward) => {
+  const cameraBasis = (forward, perspectiveView = false) => {
     const north = [1, 0, 0]
-    const northProjection = dot3(north, forward)
-    let up = north.map((component, axis) => component - northProjection * forward[axis])
+    const worldUp = [0, 1, 0]
+    const preferredUp = perspectiveView ? worldUp : north
+    const fallbackUp = perspectiveView ? north : worldUp
+    const preferredProjection = dot3(preferredUp, forward)
+    let up = preferredUp.map((component, axis) => component - preferredProjection * forward[axis])
     if (length3(up) <= 1e-9) {
-      const worldUp = [0, 1, 0]
-      const upProjection = dot3(worldUp, forward)
-      up = worldUp.map((component, axis) => component - upProjection * forward[axis])
+      const fallbackProjection = dot3(fallbackUp, forward)
+      up = fallbackUp.map((component, axis) => component - fallbackProjection * forward[axis])
     }
     up = normalize3(up, [1, 0, 0])
     const right = normalize3(cross3(forward, up), [0, 0, 1])
@@ -928,7 +930,7 @@ function writeRadiosityTiffForAngle(jsonPath, inputPath, mode, viewAngleOverride
   if (perspective) {
     cameraOut = directionFromAngles(viewAngles[0], viewAngles[1])
     cameraForward = cameraOut.map((component) => -component)
-    ;({ right: cameraRight, up: cameraUp } = cameraBasis(cameraForward))
+    ;({ right: cameraRight, up: cameraUp } = cameraBasis(cameraForward, true))
     const verticalFov = Math.max(0.1, Math.min(120, Number(sensor.fov) || 60))
     perspectiveTanHalfFov = Math.tan(verticalFov * 0.5 * Math.PI / 180)
   } else {
