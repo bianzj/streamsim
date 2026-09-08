@@ -3,16 +3,206 @@
 //
 
 #include "scene.h"
+#include "hexvoxel.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <limits>
+#include <map>
+#include <numeric>
 #include <stdexcept>
+#include <tuple>
 #include <unordered_map>
+#include <vector>
+
+#include <gdal_priv.h>
 
 
 namespace {
+
+struct DemHeightField {
+    std::string path;
+    int width{0};
+    int height{0};
+    float minimum{0.0f};
+    std::vector<float> values;
+    bool valid{false};
+};
+
+const DemHeightField& demHeightField(const Background& background)
+{
+    static DemHeightField cached;
+    const std::string requested = background.isDEM ? background.DEMFile : std::string{};
+    if (cached.path == requested) return cached;
+    cached = {};
+    cached.path = requested;
+    if (requested.empty()) return cached;
+
+    GDALAllRegister();
+    GDALDataset* dataset = static_cast<GDALDataset*>(GDALOpen(requested.c_str(), GA_ReadOnly));
+    if (!dataset || dataset->GetRasterCount() < 1) {
+        if (dataset) GDALClose(dataset);
+        throw std::runtime_error("Cannot open DEM: " + requested);
+    }
+    cached.width = dataset->GetRasterXSize();
+    cached.height = dataset->GetRasterYSize();
+    if (cached.width < 2 || cached.height < 2) {
+        GDALClose(dataset);
+        throw std::runtime_error("DEM must contain at least 2 x 2 cells: " + requested);
+    }
+    cached.values.resize(static_cast<size_t>(cached.width) * cached.height);
+    GDALRasterBand* band = dataset->GetRasterBand(1);
+    int hasNoData = 0;
+    const double noData = band->GetNoDataValue(&hasNoData);
+    const CPLErr readResult = band->RasterIO(
+        GF_Read, 0, 0, cached.width, cached.height, cached.values.data(),
+        cached.width, cached.height, GDT_Float32, 0, 0);
+    GDALClose(dataset);
+    if (readResult != CE_None) throw std::runtime_error("Cannot read DEM elevations: " + requested);
+
+    cached.minimum = std::numeric_limits<float>::infinity();
+    for (float value : cached.values) {
+        if (!std::isfinite(value) || (hasNoData && value == static_cast<float>(noData))) continue;
+        cached.minimum = std::min(cached.minimum, value);
+    }
+    if (!std::isfinite(cached.minimum)) throw std::runtime_error("DEM contains no valid elevations: " + requested);
+    for (float& value : cached.values) {
+        if (!std::isfinite(value) || (hasNoData && value == static_cast<float>(noData))) value = cached.minimum;
+    }
+    cached.valid = true;
+    return cached;
+}
+
+float demHeightAboveMinimum(const Background& background, float x, float z)
+{
+    const DemHeightField& dem = demHeightField(background);
+    if (!dem.valid) return 0.0f;
+    const float u = std::clamp(z / std::max(1.0f, background.sceneSize.y), 0.0f, 1.0f) * (dem.width - 1);
+    const float v = (1.0f - std::clamp(
+        x / std::max(1.0f, background.sceneSize.x), 0.0f, 1.0f))
+        * (dem.height - 1);
+    const int x0 = static_cast<int>(std::floor(u));
+    const int y0 = static_cast<int>(std::floor(v));
+    const int x1 = std::min(dem.width - 1, x0 + 1);
+    const int y1 = std::min(dem.height - 1, y0 + 1);
+    const auto at = [&dem](int column, int row) {
+        return dem.values[static_cast<size_t>(row) * dem.width + column];
+    };
+    const float top = at(x0, y0) * (1.0f - (u - x0)) + at(x1, y0) * (u - x0);
+    const float bottom = at(x0, y1) * (1.0f - (u - x0)) + at(x1, y1) * (u - x0);
+    return std::max(0.0f, top * (1.0f - (v - y0)) + bottom * (v - y0) - dem.minimum);
+}
+
+bool keepParticipatingMediumVoxel(const Canopy& canopy,
+                                  const glm::ivec3& localVoxel,
+                                  const Shape& shape,
+                                  float stepSize)
+{
+    // Fog occupies its complete primitive. Fire uses the primitive only as a
+    // bounding volume and is narrowed into a deterministic, upward flame.
+    if (canopy.structureType != 2) return true;
+
+    const int sizeX = std::max(1, static_cast<int>(std::ceil(shape.length / stepSize)));
+    const int sizeY = std::max(1, static_cast<int>(std::ceil(shape.height / stepSize)));
+    const int sizeZ = std::max(1, static_cast<int>(std::ceil(shape.width / stepSize)));
+    const float x = (static_cast<float>(localVoxel.x) + 0.5f) / sizeX - 0.5f;
+    const float y = std::clamp((static_cast<float>(localVoxel.y) + 0.5f) / sizeY, 0.0f, 1.0f);
+    const float z = (static_cast<float>(localVoxel.z) + 0.5f) / sizeZ - 0.5f;
+
+    // A small height-dependent displacement makes the flame asymmetric while
+    // keeping it reproducible between runs and between VoxelRT/VoxelEB.
+    constexpr float pi = 3.14159265358979323846f;
+    const float centreX = 0.075f * y * std::sin(2.0f * pi * (1.35f * y + 0.11f));
+    const float centreZ = 0.055f * y * std::sin(2.0f * pi * (1.85f * y + 0.37f));
+    const float radius = 0.08f + 0.48f * (1.0f - std::pow(y, 0.72f));
+    const float edgeNoise = 0.035f * std::sin(
+        17.0f * x + 13.0f * z + 9.0f * y + 0.7f);
+    const float radialDistance = std::sqrt(
+        (x - centreX) * (x - centreX) + (z - centreZ) * (z - centreZ));
+    return radialDistance <= radius + edgeNoise;
+}
+
+PrimMesh createVoxelDemBackground(const Background& background, float stepSize)
+{
+    PrimMesh mesh;
+    mesh.meshId = 0;
+    mesh.nVertices = 0;
+    mesh.nIndices = 0;
+    const int columns = std::max(1, static_cast<int>(std::floor(background.sceneSize.x / stepSize)));
+    const int rows = std::max(1, static_cast<int>(std::floor(background.sceneSize.y / stepSize)));
+    std::vector<float> tops(static_cast<size_t>(columns) * rows);
+    const auto topAt = [&tops, rows](int column, int row) -> float& {
+        return tops[static_cast<size_t>(column) * rows + row];
+    };
+    for (int column = 0; column < columns; ++column) {
+        for (int row = 0; row < rows; ++row) {
+            const float x0 = column * stepSize;
+            const float x1 = std::min(background.sceneSize.x, (column + 1) * stepSize);
+            const float y0 = row * stepSize;
+            const float y1 = std::min(background.sceneSize.y, (row + 1) * stepSize);
+            topAt(column, row) = std::floor(demHeightAboveMinimum(
+                background, (x0 + x1) * 0.5f, (y0 + y1) * 0.5f) / stepSize);
+        }
+    }
+    const auto appendTriangle = [&mesh](const glm::vec3& a,
+                                        const glm::vec3& b,
+                                        const glm::vec3& c) {
+        for (const glm::vec3& point : {a, b, c}) {
+            VertexAttribute vertex{};
+            vertex.pos = point;
+            mesh.vertices.emplace_back(vertex);
+            mesh.indices.emplace_back(mesh.nVertices++);
+            ++mesh.nIndices;
+        }
+    };
+    const auto appendQuad = [&appendTriangle](const glm::vec3& a,
+                                              const glm::vec3& b,
+                                              const glm::vec3& c,
+                                              const glm::vec3& d) {
+        appendTriangle(a, b, c);
+        appendTriangle(a, c, d);
+    };
+    for (int column = 0; column < columns; ++column) {
+        for (int row = 0; row < rows; ++row) {
+            const float x0 = static_cast<float>(column);
+            const float x1 = static_cast<float>(column + 1);
+            const float y0 = static_cast<float>(row);
+            const float y1 = static_cast<float>(row + 1);
+            // Keep the terrain surface and its NanoVDB state in the same cell.
+            const float surfaceTop = topAt(column, row);
+            appendQuad({x0, y0, surfaceTop}, {x0, y1, surfaceTop},
+                       {x1, y1, surfaceTop}, {x1, y0, surfaceTop});
+
+            // Close every height transition. This avoids open terrain cracks
+            // while retaining the original stable one-cell/one-state mapping.
+            if (column + 1 < columns) {
+                const float neighborTop = topAt(column + 1, row);
+                if (surfaceTop > neighborTop) {
+                    appendQuad({x1, y0, neighborTop}, {x1, y1, neighborTop},
+                               {x1, y1, surfaceTop}, {x1, y0, surfaceTop});
+                } else if (neighborTop > surfaceTop) {
+                    appendQuad({x1, y0, surfaceTop}, {x1, y0, neighborTop},
+                               {x1, y1, neighborTop}, {x1, y1, surfaceTop});
+                }
+            }
+            if (row + 1 < rows) {
+                const float neighborTop = topAt(column, row + 1);
+                if (surfaceTop > neighborTop) {
+                    appendQuad({x0, y1, neighborTop}, {x0, y1, surfaceTop},
+                               {x1, y1, surfaceTop}, {x1, y1, neighborTop});
+                } else if (neighborTop > surfaceTop) {
+                    appendQuad({x0, y1, surfaceTop}, {x1, y1, surfaceTop},
+                               {x1, y1, neighborTop}, {x0, y1, neighborTop});
+                }
+            }
+            mesh.voxelIds.emplace_back(column, row, surfaceTop - 1.0f);
+        }
+    }
+    return mesh;
+}
 
 struct ObjVoxelCoord {
     int x;
@@ -161,10 +351,368 @@ int mappedId(const MapType& values, const std::vector<std::string>& names,
     return found == values.end() ? 0 : found->second;
 }
 
+struct RotatedHexContribution {
+    std::array<float, 3> projectedArea{{0.0f, 0.0f, 0.0f}};
+    std::array<std::vector<std::uint64_t>, 3> coverMask;
+    float rho{0.0f};
+    int sampleN{0};
+};
+
+struct HexCategoryAccum {
+    int type{0};
+    int spectralId{0};
+    MeshLink prototype{};
+    std::array<double, 3> projectedArea{{0.0, 0.0, 0.0}};
+    std::array<std::vector<std::uint64_t>, 3> coverMask;
+    double rho{0.0};
+};
+
+struct HexWorldAccum {
+    ObjVoxelCoord coord{};
+    int sampleN{0};
+    std::vector<int> linkIndices;
+    std::array<std::vector<std::uint64_t>, 3> unionMask;
+    std::vector<HexCategoryAccum> categories;
+};
+
+struct HexMixAccumulator {
+    std::unordered_map<ObjVoxelCoord, HexWorldAccum, ObjVoxelCoordHash> cells;
+};
+
+void orMask(std::vector<std::uint64_t>& destination,
+            const std::vector<std::uint64_t>& source)
+{
+    if (destination.size() < source.size()) destination.resize(source.size(), 0U);
+    for (std::size_t i = 0; i < source.size(); ++i) destination[i] |= source[i];
+}
+
+std::uint64_t maskPopulation(const std::vector<std::uint64_t>& mask)
+{
+    std::uint64_t result = 0;
+    for (std::uint64_t word : mask) {
+        while (word != 0U) {
+            word &= word - 1U;
+            ++result;
+        }
+    }
+    return result;
+}
+
+void setMaskPixel(std::vector<std::uint64_t>& mask, std::size_t pixel,
+                  std::size_t pixelCount)
+{
+    if (mask.empty()) mask.assign((pixelCount + 63U) / 64U, 0U);
+    mask[pixel / 64U] |= std::uint64_t{1} << (pixel % 64U);
+}
+
+RotatedHexContribution rotateHexContribution(const hexvoxel::VoxelResult& source,
+                                              int sampleN, float rotationDegrees)
+{
+    RotatedHexContribution result;
+    result.rho = source.hex.rho;
+    result.sampleN = sampleN;
+    const int turns = static_cast<int>(std::llround(-rotationDegrees / 90.0f)) & 3;
+    const std::size_t pixelCount = static_cast<std::size_t>(sampleN) * sampleN;
+
+    auto rotateXZ = [sampleN, turns](int x, int z) {
+        for (int turn = 0; turn < turns; ++turn) {
+            const int nextX = z;
+            const int nextZ = sampleN - 1 - x;
+            x = nextX;
+            z = nextZ;
+        }
+        return std::array<int, 2>{{x, z}};
+    };
+
+    for (int sourceAxis = 0; sourceAxis < 3; ++sourceAxis) {
+        const int destinationAxis = (turns & 1) != 0
+            ? (sourceAxis == 0 ? 2 : (sourceAxis == 2 ? 0 : 1))
+            : sourceAxis;
+        result.projectedArea[destinationAxis] += source.projectedArea[sourceAxis];
+        const auto& sourceMask = source.coverMask[sourceAxis];
+        for (std::size_t pixel = 0; pixel < pixelCount; ++pixel) {
+            if (pixel / 64U >= sourceMask.size()
+                || (sourceMask[pixel / 64U] &
+                    (std::uint64_t{1} << (pixel % 64U))) == 0U) continue;
+            const int u = static_cast<int>(pixel % static_cast<std::size_t>(sampleN));
+            const int v = static_cast<int>(pixel / static_cast<std::size_t>(sampleN));
+            int x = 0, y = 0, z = 0;
+            if (sourceAxis == 0) { y = u; z = v; }
+            else if (sourceAxis == 1) { x = u; z = v; }
+            else { x = u; y = v; }
+            const auto rotated = rotateXZ(x, z);
+            x = rotated[0]; z = rotated[1];
+            int destinationU = 0, destinationV = 0;
+            if (destinationAxis == 0) { destinationU = y; destinationV = z; }
+            else if (destinationAxis == 1) { destinationU = x; destinationV = z; }
+            else { destinationU = x; destinationV = y; }
+            setMaskPixel(result.coverMask[destinationAxis],
+                         static_cast<std::size_t>(destinationV) * sampleN
+                             + destinationU,
+                         pixelCount);
+        }
+    }
+    return result;
+}
+
+void addHexContribution(HexMixAccumulator& accumulator, const ObjVoxelCoord& coord,
+                        const std::vector<int>& linkIndices,
+                        const RotatedHexContribution& contribution,
+                        const MeshLink& prototype)
+{
+    HexWorldAccum& world = accumulator.cells[coord];
+    world.coord = coord;
+    if (world.sampleN == 0) world.sampleN = contribution.sampleN;
+    if (world.linkIndices.empty()) world.linkIndices = linkIndices;
+
+    auto category = std::find_if(world.categories.begin(), world.categories.end(),
+        [&](const HexCategoryAccum& value) {
+            return value.type == prototype.type
+                && value.spectralId == prototype.spectralId
+                && value.prototype.thermalId == prototype.thermalId;
+        });
+    if (category == world.categories.end()) {
+        HexCategoryAccum value;
+        value.type = prototype.type;
+        value.spectralId = prototype.spectralId;
+        value.prototype = prototype;
+        world.categories.emplace_back(std::move(value));
+        category = std::prev(world.categories.end());
+    }
+
+    category->rho += contribution.rho;
+    for (int axis = 0; axis < 3; ++axis) {
+        category->projectedArea[axis] += contribution.projectedArea[axis];
+        orMask(category->coverMask[axis], contribution.coverMask[axis]);
+        orMask(world.unionMask[axis], contribution.coverMask[axis]);
+    }
+}
+
+template <typename ModelIO>
+void finalizeHexMixtures(HexMixAccumulator& accumulator,
+                         const std::shared_ptr<ModelIO>& modelio)
+{
+    if (accumulator.cells.empty()) return;
+    auto& meshio = modelio->m_meshio;
+    auto& instanceio = modelio->m_instanceio;
+    auto& voxelio = modelio->m_voxelio;
+    const std::size_t baseMaterialCount = meshio->spectralNames.size();
+    const std::size_t sensorBands = baseMaterialCount > 0
+        ? meshio->spectrals.size() / baseMaterialCount : 0U;
+    const std::size_t fixedBands = baseMaterialCount > 0
+        ? meshio->fixedSpectrals.size() / baseMaterialCount : 0U;
+
+    std::vector<HexWorldAccum*> ordered;
+    ordered.reserve(accumulator.cells.size());
+    for (auto& entry : accumulator.cells) ordered.push_back(&entry.second);
+    std::sort(ordered.begin(), ordered.end(), [](const auto* left, const auto* right) {
+        if (left->coord.x != right->coord.x) return left->coord.x < right->coord.x;
+        if (left->coord.y != right->coord.y) return left->coord.y < right->coord.y;
+        return left->coord.z < right->coord.z;
+    });
+
+    std::size_t mixedCategoryCells = 0;
+    // VoxelEB has 2002 fixed bands. Quantising the two-class weight permits
+    // identical mixtures to share one material instead of duplicating a full
+    // spectrum for every world voxel.
+    std::map<std::tuple<int, int, int, int, int>, std::pair<int, int>> compositeCache;
+    for (HexWorldAccum* world : ordered) {
+        if (world->categories.empty() || world->linkIndices.empty()) continue;
+        const double pixelCount = static_cast<double>(world->sampleN) * world->sampleN;
+        std::array<double, 3> totalCover{{0.0, 0.0, 0.0}};
+        std::array<double, 3> totalProjected{{0.0, 0.0, 0.0}};
+        std::vector<double> opticalContribution(world->categories.size(), 0.0);
+        double rho = 0.0;
+
+        for (int axis = 0; axis < 3; ++axis) {
+            totalCover[axis] = pixelCount > 0.0
+                ? static_cast<double>(maskPopulation(world->unionMask[axis])) / pixelCount
+                : 0.0;
+            double rawCoverSum = 0.0;
+            std::vector<double> categoryCover(world->categories.size(), 0.0);
+            for (std::size_t categoryIndex = 0;
+                 categoryIndex < world->categories.size(); ++categoryIndex) {
+                HexCategoryAccum& category = world->categories[categoryIndex];
+                categoryCover[categoryIndex] = pixelCount > 0.0
+                    ? static_cast<double>(maskPopulation(category.coverMask[axis])) / pixelCount
+                    : 0.0;
+                rawCoverSum += categoryCover[categoryIndex];
+                totalProjected[axis] += category.projectedArea[axis];
+            }
+            if (rawCoverSum > 1.0e-12) {
+                for (std::size_t categoryIndex = 0;
+                     categoryIndex < world->categories.size(); ++categoryIndex) {
+                    // 先保留实际联合遮挡，再按类别独立遮挡比例分配。
+                    opticalContribution[categoryIndex] += totalCover[axis]
+                        * categoryCover[categoryIndex] / rawCoverSum;
+                }
+            }
+        }
+        for (const HexCategoryAccum& category : world->categories) rho += category.rho;
+
+        VoxelHex mixed{};
+        mixed.rho = static_cast<float>(std::max(rho, 0.0));
+        float* ci[3] = {&mixed.ax, &mixed.ay, &mixed.az};
+        for (int axis = 0; axis < 3; ++axis) {
+            float value = 1.0f;
+            if (totalProjected[axis] > 1.0e-12 && totalCover[axis] > 0.0) {
+                const double minimumGap = pixelCount > 0.0 ? 0.5 / pixelCount : 1.0e-6;
+                const double gap = std::max(1.0 - totalCover[axis], minimumGap);
+                value = static_cast<float>(std::max(
+                    -std::log(gap) / totalProjected[axis], 0.0));
+            }
+            *ci[axis] = value;
+        }
+
+        const int hexId = static_cast<int>(voxelio->voxelHexs.size());
+        voxelio->voxelHexs.emplace_back(mixed);
+        for (int linkIndex : world->linkIndices) {
+            if (linkIndex >= 0
+                && linkIndex < static_cast<int>(voxelio->voxellinks.size())) {
+                voxelio->voxellinks[linkIndex].hexId = hexId;
+            }
+        }
+
+        if (world->categories.size() == 1U || sensorBands == 0U) continue;
+        ++mixedCategoryCells;
+        double contributionSum = 0.0;
+        for (double value : opticalContribution) contributionSum += value;
+        if (contributionSum <= 1.0e-12) {
+            for (std::size_t i = 0; i < world->categories.size(); ++i) {
+                opticalContribution[i] = std::accumulate(
+                    world->categories[i].projectedArea.begin(),
+                    world->categories[i].projectedArea.end(), 0.0);
+                contributionSum += opticalContribution[i];
+            }
+        }
+        if (contributionSum <= 1.0e-12) {
+            std::fill(opticalContribution.begin(), opticalContribution.end(), 1.0);
+            contributionSum = static_cast<double>(opticalContribution.size());
+        }
+
+        std::vector<std::size_t> retained(world->categories.size());
+        std::iota(retained.begin(), retained.end(), 0U);
+        std::stable_sort(retained.begin(), retained.end(),
+            [&](std::size_t left, std::size_t right) {
+                return opticalContribution[left] > opticalContribution[right];
+            });
+        if (retained.size() > 2U) retained.resize(2U);
+        contributionSum = 0.0;
+        for (std::size_t index : retained) {
+            contributionSum += opticalContribution[index];
+        }
+        if (contributionSum <= 1.0e-12) {
+            contributionSum = static_cast<double>(retained.size());
+            for (std::size_t index : retained) opticalContribution[index] = 1.0;
+        }
+        const std::size_t dominant = retained.front();
+        const std::size_t secondary = retained.size() > 1U ? retained[1] : retained[0];
+        const int firstWeight = std::clamp(static_cast<int>(std::lround(
+            opticalContribution[dominant] / contributionSum * 1024.0)), 0, 1024);
+        opticalContribution[dominant] = static_cast<double>(firstWeight);
+        opticalContribution[secondary] = static_cast<double>(1024 - firstWeight);
+        contributionSum = 1024.0;
+        const auto cacheKey = std::make_tuple(
+            world->categories[dominant].spectralId,
+            world->categories[secondary].spectralId,
+            world->categories[dominant].prototype.thermalId,
+            world->categories[secondary].prototype.thermalId,
+            firstWeight);
+        auto cached = compositeCache.find(cacheKey);
+        int compositeSpectralId = -1;
+        int compositeThermalId = -1;
+        if (cached != compositeCache.end()) {
+            compositeSpectralId = cached->second.first;
+            compositeThermalId = cached->second.second;
+        } else {
+            compositeSpectralId = static_cast<int>(
+                meshio->spectrals.size() / sensorBands);
+            for (std::size_t band = 0; band < sensorBands; ++band) {
+                double reflectance = 0.0, transmittance = 0.0;
+                for (std::size_t i : retained) {
+                    const std::size_t source = static_cast<std::size_t>(
+                        world->categories[i].spectralId) * sensorBands + band;
+                    if (source >= meshio->spectrals.size()) continue;
+                    const double weight = opticalContribution[i] / contributionSum;
+                    reflectance += weight * meshio->spectrals[source].reflectance;
+                    transmittance += weight * meshio->spectrals[source].transmittance;
+                }
+                const float refl = static_cast<float>(std::clamp(reflectance, 0.0, 1.0));
+                const float trans = static_cast<float>(
+                    std::clamp(transmittance, 0.0, 1.0 - refl));
+                meshio->spectrals.push_back(Spectral{refl, trans});
+            }
+            if (fixedBands > 0U) {
+                for (std::size_t band = 0; band < fixedBands; ++band) {
+                    double reflectance = 0.0, transmittance = 0.0;
+                    for (std::size_t i : retained) {
+                        const std::size_t source = static_cast<std::size_t>(
+                            world->categories[i].spectralId) * fixedBands + band;
+                        if (source >= meshio->fixedSpectrals.size()) continue;
+                        const double weight = opticalContribution[i] / contributionSum;
+                        reflectance += weight * meshio->fixedSpectrals[source].reflectance;
+                        transmittance += weight * meshio->fixedSpectrals[source].transmittance;
+                    }
+                    const float refl = static_cast<float>(std::clamp(reflectance, 0.0, 1.0));
+                    const float trans = static_cast<float>(
+                        std::clamp(transmittance, 0.0, 1.0 - refl));
+                    meshio->fixedSpectrals.push_back(Spectral{refl, trans});
+                }
+            }
+            if (!meshio->thermals.empty()) {
+                double sunlit = 0.0, shaded = 0.0, thermalWeight = 0.0;
+                for (std::size_t i : retained) {
+                    const int thermalId = world->categories[i].prototype.thermalId;
+                    if (thermalId < 0
+                        || thermalId >= static_cast<int>(meshio->thermals.size())) continue;
+                    const double weight = opticalContribution[i] / contributionSum;
+                    sunlit += weight * meshio->thermals[thermalId].sunlitTemperature;
+                    shaded += weight * meshio->thermals[thermalId].shadedTemperature;
+                    thermalWeight += weight;
+                }
+                if (thermalWeight > 1.0e-12) {
+                    compositeThermalId = static_cast<int>(meshio->thermals.size());
+                    meshio->thermals.push_back(Thermal{
+                        static_cast<float>(sunlit / thermalWeight),
+                        static_cast<float>(shaded / thermalWeight)});
+                }
+            }
+            compositeCache.emplace(cacheKey,
+                                   std::make_pair(compositeSpectralId,
+                                                  compositeThermalId));
+        }
+
+        MeshLink composite = world->categories[dominant].prototype;
+        composite.spectralId = compositeSpectralId;
+        if (compositeThermalId >= 0) {
+            composite.thermalId = compositeThermalId;
+        }
+        const int compositeMeshId = static_cast<int>(meshio->meshLinks.size());
+        meshio->meshLinks.emplace_back(composite);
+        const int compositeInstanceId = static_cast<int>(instanceio->instanceLinks.size());
+        InstanceLink link{};
+        link.meshId = compositeMeshId;
+        instanceio->instanceLinks.emplace_back(link);
+        for (int linkIndex : world->linkIndices) {
+            if (linkIndex >= 0
+                && linkIndex < static_cast<int>(voxelio->voxellinks.size())) {
+                voxelio->voxellinks[linkIndex].instanceId = compositeInstanceId;
+            }
+        }
+    }
+
+    std::cout << "Heterogeneous voxel merge: cells=" << ordered.size()
+              << " mixed-categories=" << mixedCategoryCells
+              << " shared-mixtures=" << compositeCache.size()
+              << " descriptors=" << voxelio->voxelHexs.size() << std::endl;
+}
+
 template <typename ModelIO>
 bool createObjFilledVoxels(Scene* scene, PrimEntity& entity,
                            nanovdb::GridBuilder<int32_t>& nanoBuilder,
-                           std::shared_ptr<ModelIO>& modelio)
+                           std::shared_ptr<ModelIO>& modelio,
+                           const Background& background,
+                           HexMixAccumulator* mixAccumulator)
 {
     if (!std::filesystem::exists(entity.objFile)) {
         throw std::runtime_error("Cannot open OBJ for voxelization: " + entity.objFile);
@@ -176,18 +724,154 @@ bool createObjFilledVoxels(Scene* scene, PrimEntity& entity,
         throw std::runtime_error("OBJ has no triangles for voxelization: " + entity.objFile);
     }
 
-    size_t rejectedVoxelCount = 0;
-    const std::vector<glm::ivec3> activeXYZ = voxelizeObjSurface(
-        objLoader.m_objmesh, modelio->stepsize_surface,
-        entity.voxelFillThreshold, rejectedVoxelCount);
+    const bool separateMeshes = entity.meshNames.size() > 1U;
+    const bool legacyBuildingFaces = !separateMeshes
+        && entity.type == Type::BUILDING;
+    const size_t propertyMeshCount = separateMeshes
+        ? entity.meshNames.size() : legacyBuildingFaces ? 2U : 1U;
 
-    std::cout << "OBJ voxelization: " << entity.objFile
-              << " triangles=" << objLoader.m_objmesh.indices.size() / 3
-              << " active=" << activeXYZ.size()
-              << " rejected=" << rejectedVoxelCount
-              << " threshold=" << entity.voxelFillThreshold << std::endl;
+    VoxelDesigner designer;
+    std::vector<PrimMesh> propertyMeshes(propertyMeshCount);
+    size_t totalActive = 0;
+    for (size_t meshIndex = 0; meshIndex < propertyMeshCount; ++meshIndex) {
+        ObjMesh sourceMesh = objLoader.m_objmesh;
+        if (separateMeshes) {
+            ObjLoader meshLoader;
+            meshLoader.loadMesh(entity.objFile, entity.meshNames[meshIndex], true);
+            sourceMesh = std::move(meshLoader.m_objmesh);
+        }
+        if (sourceMesh.indices.empty()) continue;
 
-    if (activeXYZ.empty()) return true;
+        size_t rejectedVoxelCount = 0;
+        const std::vector<glm::ivec3> activeXYZ = voxelizeObjSurface(
+            sourceMesh, modelio->stepsize_surface,
+            entity.voxelFillThreshold, rejectedVoxelCount);
+        propertyMeshes[meshIndex] = designer.createTriVoxels(activeXYZ);
+        totalActive += activeXYZ.size();
+        std::cout << "OBJ mesh voxelization: " << entity.objFile
+                  << " mesh=" << (separateMeshes ? entity.meshNames[meshIndex] : "all")
+                  << " triangles=" << sourceMesh.indices.size() / 3
+                  << " active=" << activeXYZ.size()
+                  << " rejected=" << rejectedVoxelCount
+                  << " threshold=" << entity.voxelFillThreshold << std::endl;
+    }
+    if (totalActive == 0U) {
+        throw std::runtime_error("Configured OBJ meshes have no voxelizable triangles: "
+                                 + entity.objFile);
+    }
+
+    // Do not pass meshes that became empty after fill-threshold filtering to
+    // Vulkan. Empty vertex/index buffers are not valid acceleration-structure
+    // inputs on all drivers.
+    std::vector<size_t> activeMeshIndices;
+    activeMeshIndices.reserve(propertyMeshCount);
+    for (size_t meshIndex = 0; meshIndex < propertyMeshCount; ++meshIndex) {
+        if (!propertyMeshes[meshIndex].voxelIds.empty()) {
+            activeMeshIndices.emplace_back(meshIndex);
+        } else {
+            std::cout << "OBJ mesh skipped after voxelization: "
+                      << (separateMeshes ? entity.meshNames[meshIndex] : "all")
+                      << std::endl;
+        }
+    }
+
+    struct HexMeshSource {
+        hexvoxel::HexScene scene;
+        hexvoxel::HexResult result;
+        std::vector<int> lookup;
+        bool ready{false};
+    };
+    std::vector<HexMeshSource> hexSources(propertyMeshCount);
+    if (modelio->heterogeneousVoxel) {
+        std::string error;
+        hexvoxel::HexScene completeScene;
+        if (hexvoxel::loadObj(entity.objFile, modelio->stepsize_surface,
+                              completeScene, &error)) {
+            for (size_t meshIndex = 0; meshIndex < propertyMeshCount; ++meshIndex) {
+                if (propertyMeshes[meshIndex].voxelIds.empty()) continue;
+                HexMeshSource& source = hexSources[meshIndex];
+                source.scene = completeScene;
+                if (separateMeshes) {
+                    const std::string& meshName = entity.meshNames[meshIndex];
+                    source.scene.tris.clear();
+                    bool closed = true;
+                    for (const hexvoxel::ObjInfo& object : completeScene.objects) {
+                        if (object.name != meshName) continue;
+                        const auto first = completeScene.tris.begin()
+                            + object.triOffset;
+                        source.scene.tris.insert(source.scene.tris.end(), first,
+                                                 first + object.triCount);
+                        closed = closed && object.closed;
+                    }
+                    if (source.scene.tris.empty()) {
+                        std::cerr << "Heterogeneous Mesh '" << meshName
+                                  << "' not found in " << entity.objFile << std::endl;
+                        continue;
+                    }
+                    source.scene.objects = {{
+                        meshName, closed, 0,
+                        static_cast<std::uint32_t>(source.scene.tris.size())}};
+                }
+
+                hexvoxel::HexConfig config;
+                source.result = hexvoxel::compute(
+                    source.scene, config, nullptr, 0, nullptr);
+                const long long cellCount =
+                    static_cast<long long>(source.result.gridX)
+                    * source.result.gridY * source.result.gridZ;
+                source.lookup.assign(
+                    static_cast<size_t>(std::max(0LL, cellCount)), -1);
+                for (size_t index = 0; index < source.result.voxels.size(); ++index) {
+                    const auto& voxel = source.result.voxels[index];
+                    const long long flat =
+                        (static_cast<long long>(voxel.iz) * source.result.gridY
+                            + voxel.iy) * source.result.gridX + voxel.ix;
+                    if (flat >= 0 && flat < cellCount) {
+                        source.lookup[static_cast<size_t>(flat)] =
+                            static_cast<int>(index);
+                    }
+                }
+                source.ready = true;
+                std::cout << "Heterogeneous Mesh voxels: "
+                          << (separateMeshes ? entity.meshNames[meshIndex] : "all")
+                          << " grid=" << source.result.gridX << "x"
+                          << source.result.gridY << "x" << source.result.gridZ
+                          << " active=" << source.result.voxels.size()
+                          << " mean-density=" << source.result.meanRhoAll
+                          << " time=" << source.result.computeMs << " ms" << std::endl;
+            }
+        } else {
+            std::cerr << "Heterogeneous voxel extraction failed: " << error << std::endl;
+        }
+    }
+
+    auto heterogeneousContribution = [&](size_t meshIndex,
+                                         const glm::ivec3& localVoxel,
+                                         float rotationDegrees,
+                                         RotatedHexContribution& output) -> bool {
+        if (meshIndex >= hexSources.size() || !hexSources[meshIndex].ready) {
+            return false;
+        }
+        const HexMeshSource& source = hexSources[meshIndex];
+        // ObjLoader, heterogeneous extraction and Three.js now preserve the
+        // same OBJ axes, so the active voxel maps directly to the source cell.
+        const glm::ivec3 sourceVoxel = localVoxel;
+        const long long ix = static_cast<long long>(sourceVoxel.x)
+            - std::lround(source.scene.gridOrigin[0]);
+        const long long iy = static_cast<long long>(sourceVoxel.y)
+            - std::lround(source.scene.gridOrigin[1]);
+        const long long iz = static_cast<long long>(sourceVoxel.z)
+            - std::lround(source.scene.gridOrigin[2]);
+        if (ix < 0 || iy < 0 || iz < 0 || ix >= source.result.gridX
+            || iy >= source.result.gridY || iz >= source.result.gridZ) return false;
+        const int lookup = source.lookup[static_cast<size_t>(
+            (iz * source.result.gridY + iy) * source.result.gridX + ix)];
+        if (lookup < 0) return false;
+        output = rotateHexContribution(
+            source.result.voxels[static_cast<size_t>(lookup)],
+            source.result.sampleN, rotationDegrees);
+        return true;
+    };
 
     auto accessor = nanoBuilder.getAccessor();
     auto& meshio = modelio->m_meshio;
@@ -197,35 +881,36 @@ bool createObjFilledVoxels(Scene* scene, PrimEntity& entity,
     int& instanceCount = modelio->n_instance;
     int& voxelCount = modelio->n_voxel;
 
-    VoxelDesigner designer;
-    // OBJ 坐标已经由 ObjLoader 统一为 X/Y/Z，Y 是竖直方向。
+    // OBJ、体素和 Three.js 均使用 +X 北、+Y 上、+Z 东。
     // 传统的 createTriEntity 使用 X/Z/Y（Z 为高度），不能再调用
     // XYZ2XZY，否则会把 OBJ 的高度轴 Y 换到水平轴 Z。
-    PrimMesh activeMesh = designer.createTriVoxels(activeXYZ);
-    const bool building = entity.type == Type::BUILDING;
-    const size_t propertyMeshCount = building ? 2U : 1U;
-
-    for (size_t meshIndex = 0; meshIndex < propertyMeshCount; ++meshIndex) {
-        PrimMesh mesh = activeMesh;
-        mesh.meshId = modelMeshCount + static_cast<int>(meshIndex);
+    std::vector<int> meshIdByProperty(propertyMeshCount, -1);
+    int addedMeshCount = 0;
+    for (const size_t meshIndex : activeMeshIndices) {
+        PrimMesh mesh = propertyMeshes[meshIndex];
+        mesh.meshId = modelMeshCount + addedMeshCount;
+        meshIdByProperty[meshIndex] = mesh.meshId;
         meshio->primMeshes.emplace_back(std::move(mesh));
 
         MeshLink link{};
+        const Type meshType = meshIndex < entity.types.size()
+            ? entity.types[meshIndex] : entity.type;
         link.spectralId = mappedId(meshio->spectralNames,
                                    entity.spectralNames, meshIndex);
         link.thermalId = mappedId(meshio->thermalNames,
                                   entity.thermalNames, meshIndex);
-        link.canopyId = entity.type == Type::WATER ? 0 :
+        link.canopyId = meshType == Type::WATER ? 0 :
             mappedId(meshio->canopyNames, entity.canopyNames, meshIndex);
-        if (entity.type == Type::VEGETATION) {
+        if (meshType == Type::VEGETATION) {
             link.bioId = mappedId(meshio->leafbioNames, entity.propNames, meshIndex);
-        } else if (entity.type == Type::WATER) {
+        } else if (meshType == Type::WATER) {
             link.bioId = mappedId(meshio->watersetNames, entity.propNames, meshIndex);
         } else {
             link.bioId = mappedId(meshio->soilsetNames, entity.propNames, meshIndex);
         }
-        link.type = static_cast<int>(entity.type);
+        link.type = static_cast<int>(meshType);
         meshio->meshLinks.emplace_back(link);
+        ++addedMeshCount;
     }
 
     if (entity.isdisFromFile) {
@@ -252,6 +937,8 @@ bool createObjFilledVoxels(Scene* scene, PrimEntity& entity,
         static_cast<int>(std::floor(modelio->voxelSize_XZY.x / 2.0f + 0.5f)),
         0,
         static_cast<int>(std::floor(modelio->voxelSize_XZY.z / 2.0f + 0.5f))};
+    const int sceneVoxelHeight = std::max(1, static_cast<int>(std::ceil(
+        modelio->sceneSize_XYZ.z / std::max(0.01f, modelio->stepsize_surface))));
 
     for (size_t placementIndex = 0;
          placementIndex < entity.primDistributions.size(); ++placementIndex) {
@@ -260,82 +947,111 @@ bool createObjFilledVoxels(Scene* scene, PrimEntity& entity,
             ? entity.scales[placementIndex] : 1.0f;
         const float rotationValue = placementIndex < entity.rotations.size()
             ? entity.rotations[placementIndex] : 0.0f;
+        const int terrainHeight = static_cast<int>(std::round(
+            demHeightAboveMinimum(background, placement.x, placement.y) /
+            modelio->stepsize_surface));
         const glm::ivec3 gridShift{
             static_cast<int>(std::floor(placement.x / modelio->stepsize_surface)),
-            static_cast<int>(std::floor(placement.z / modelio->stepsize_surface)),
+            static_cast<int>(std::floor(placement.z / modelio->stepsize_surface)) + terrainHeight,
             static_cast<int>(std::floor(placement.y / modelio->stepsize_surface))};
 
         const glm::mat4 unit(1.0f);
         const glm::mat4 rotation = glm::rotate(
-            unit, glm::radians(rotationValue), glm::vec3(0.0f, 1.0f, 0.0f));
+            unit, glm::radians(-rotationValue), glm::vec3(0.0f, 1.0f, 0.0f));
         const glm::mat4 scale = glm::scale(unit, glm::vec3(scaleValue));
         const glm::mat4 objectTransform =
             glm::translate(unit, glm::vec3(gridShift - sceneHalf)) *
             rotation * scale;
 
-        const int firstInstance = instanceCount;
-        for (size_t meshIndex = 0; meshIndex < propertyMeshCount; ++meshIndex) {
+        std::vector<int> instanceIdByProperty(propertyMeshCount, -1);
+        int addedInstanceCount = 0;
+        for (const size_t meshIndex : activeMeshIndices) {
             Instance instance{};
-            instance.meshId =
-                static_cast<uint32_t>(modelMeshCount + meshIndex);
+            instance.meshId = static_cast<uint32_t>(meshIdByProperty[meshIndex]);
             instance.object2worldMatrix = objectTransform;
             instance.world2objectMatrix =
                 glm::transpose(glm::inverse(objectTransform));
+            instanceIdByProperty[meshIndex] = instanceCount + addedInstanceCount;
             instanceio->instances.emplace_back(instance);
 
             InstanceLink instanceLink{};
             instanceLink.meshId = instance.meshId;
             instanceio->instanceLinks.emplace_back(instanceLink);
+            ++addedInstanceCount;
         }
 
         size_t insertedForPlacement = 0;
-        for (const glm::vec3& localVoxel : activeMesh.voxelIds) {
-            const glm::vec3 localCenter = localVoxel + glm::vec3(0.5f);
-            const glm::vec3 transformedCenter =
-                glm::vec3(rotation * scale * glm::vec4(localCenter, 1.0f));
-            const glm::ivec3 voxelId =
-                gridShift + glm::ivec3(glm::floor(transformedCenter));
+        size_t overlappedForPlacement = 0;
+        size_t clippedForPlacement = 0;
+        const size_t voxelMeshCount = legacyBuildingFaces ? 1U : propertyMeshCount;
+        for (size_t meshIndex = 0; meshIndex < voxelMeshCount; ++meshIndex) {
+            if (meshIdByProperty[meshIndex] < 0
+                || instanceIdByProperty[meshIndex] < 0) continue;
+            for (const glm::vec3& localVoxel : propertyMeshes[meshIndex].voxelIds) {
+                const glm::vec3 localCenter = localVoxel + glm::vec3(0.5f);
+                const glm::vec3 transformedCenter =
+                    glm::vec3(rotation * scale * glm::vec4(localCenter, 1.0f));
+                const glm::ivec3 voxelId =
+                    gridShift + glm::ivec3(glm::floor(transformedCenter));
 
-            if (voxelId.x < 0 || voxelId.z < 0 || voxelId.y < 0 ||
-                voxelId.x >= modelio->voxelSize_XZY.x ||
-                voxelId.z >= modelio->voxelSize_XZY.z) {
-                continue;
-            }
+                if (voxelId.x < 0 || voxelId.z < 0 || voxelId.y < 0 ||
+                    voxelId.x >= modelio->voxelSize_XZY.x ||
+                    voxelId.y >= sceneVoxelHeight ||
+                    voxelId.z >= modelio->voxelSize_XZY.z) {
+                    ++clippedForPlacement;
+                    continue;
+                }
 
-            const nanovdb::Coord coord(voxelId.x, voxelId.y, voxelId.z);
-            if (accessor.getValue(coord) >= 0) continue;
+                const nanovdb::Coord coord(voxelId.x, voxelId.y, voxelId.z);
+                const ObjVoxelCoord worldCoord{voxelId.x, voxelId.y, voxelId.z};
+                RotatedHexContribution contribution;
+                const bool hasContribution = mixAccumulator
+                    && heterogeneousContribution(meshIndex,
+                                                 glm::ivec3(localVoxel),
+                                                 rotationValue, contribution);
+                const int existingIndex = accessor.getValue(coord);
+                std::vector<int> linkIndices;
 
-            accessor.setValue(coord, voxelCount);
-            if (building) {
-                for (int face = 1; face <= 5; ++face) {
+                if (existingIndex < 0) {
+                    const int firstLink = voxelCount;
+                    accessor.setValue(coord, firstLink);
                     VoxelLink link{};
                     link.voxelId = voxelId;
-                    link.instanceId = face == 5 ? firstInstance + 1 : firstInstance;
+                    link.instanceId = instanceIdByProperty[meshIndex];
                     link.aeroId = 0;
-                    link.faceId = face;
+                    link.faceId = 0;
                     link.isValid = 1;
+                    link.hexId = -1;
                     voxelio->voxellinks.emplace_back(link);
-                    ++voxelCount;
+                    linkIndices.push_back(voxelCount++);
+                    ++insertedForPlacement;
+                } else {
+                    ++overlappedForPlacement;
+                    if (mixAccumulator) {
+                        const auto found = mixAccumulator->cells.find(worldCoord);
+                        if (found != mixAccumulator->cells.end()) {
+                            linkIndices = found->second.linkIndices;
+                        }
+                    }
                 }
-            } else {
-                VoxelLink link{};
-                link.voxelId = voxelId;
-                link.instanceId = firstInstance;
-                link.aeroId = 0;
-                link.faceId = 0;
-                link.isValid = 1;
-                voxelio->voxellinks.emplace_back(link);
-                ++voxelCount;
+
+                if (hasContribution && !linkIndices.empty()) {
+                    addHexContribution(
+                        *mixAccumulator, worldCoord, linkIndices, contribution,
+                        meshio->meshLinks[meshIdByProperty[meshIndex]]);
+                }
             }
-            ++insertedForPlacement;
         }
 
-        instanceCount += static_cast<int>(propertyMeshCount);
+        instanceCount += addedInstanceCount;
         std::cout << "OBJ placement " << placementIndex
-                  << " inserted=" << insertedForPlacement << std::endl;
+                  << " terrain-height=" << terrainHeight * modelio->stepsize_surface
+                  << "m inserted=" << insertedForPlacement
+                  << " mesh-overlap=" << overlappedForPlacement
+                  << " clipped=" << clippedForPlacement << std::endl;
     }
 
-    modelMeshCount += static_cast<int>(propertyMeshCount);
+    modelMeshCount += addedMeshCount;
     return true;
 }
 
@@ -369,7 +1085,10 @@ bool Scene::createObjScene(std::shared_ptr<FileIO> &fileio, std::shared_ptr<Rayt
     //-- Background Mesh
     //-------------------------
     if(scenexml.background.isDEM) {
-        loader.creatBackgroundFromDEM(scenexml.background.DEMFile, scenexml.background.sceneSize);
+        loader.creatBackgroundFromDEM(
+            scenexml.background.DEMFile,
+            scenexml.background.sceneSize,
+            scenexml.background.stepsize_surface);
         std::string objDir = fileio->m_pRaytracingXml->projectDir + "/dem.obj";
         outputObjMesh(loader.m_objmesh, objDir);
         isInterp = true;
@@ -391,14 +1110,15 @@ bool Scene::createObjScene(std::shared_ptr<FileIO> &fileio, std::shared_ptr<Rayt
     bgMeshLink.type = int(Type::SOIL);
     std::string bgSpectralName = fileio->m_pRaytracingXml->scenexml.background.bgSpectralName;
     bgMeshLink.spectralId =  meshio->spectralNames.find(bgSpectralName)->second;
-    std::string bgThermalName;
+    std::string bgThermalName =
+        fileio->m_pRaytracingXml->scenexml.background.bgThermalName;
     int bgThermalIndex = 0;
-    if (fileio->m_pRaytracingXml->sensorxml.isTemperature == true)
-    {
-        bgThermalName =  fileio->m_pRaytracingXml->scenexml.background.bgThermalName;
-        bgThermalIndex = meshio->thermalNames.find(bgThermalName)->second;
-    }
+    const auto bgThermalIt = meshio->thermalNames.find(bgThermalName);
+    if (bgThermalIt != meshio->thermalNames.end())
+        bgThermalIndex = bgThermalIt->second;
     bgMeshLink.thermalId = bgThermalIndex;
+    bgMeshLink.angularEffectStrength =
+        fileio->m_pRaytracingXml->scenexml.background.angularEffectStrength;
     meshio->meshLinks.emplace_back(bgMeshLink);
     //-------------------------
     //-- Background Instance
@@ -497,10 +1217,11 @@ bool Scene::createObjScene(std::shared_ptr<FileIO> &fileio, std::shared_ptr<Rayt
 
             int spectralIndex = meshio->spectralNames.find(spectralName)->second;
             int thermalIndex = 0;
-            if (fileio->m_pRaytracingXml->sensorxml.isTemperature == true)
-            {
+            if (kmesh < static_cast<int>(objEntity.thermalNames.size())) {
                 thermalName = objEntity.thermalNames[kmesh];
-                thermalIndex = meshio->thermalNames.find(thermalName)->second;
+                const auto thermalIt = meshio->thermalNames.find(thermalName);
+                if (thermalIt != meshio->thermalNames.end())
+                    thermalIndex = thermalIt->second;
             }
             MeshLink meshLink{};
             meshLink.type = int(objEntity.types[kmesh]);
@@ -526,19 +1247,12 @@ bool Scene::createObjScene(std::shared_ptr<FileIO> &fileio, std::shared_ptr<Rayt
 
                 //nvmath::vec3f shift = nvmath::vec3f{ shift0.x - x/2.0,shift0.z,shift0.y - z/2.0 };
                 glm::vec3 shift;
-                if (isInterp == true)
-                {
-                    shift = nvmath::vec3f{shift0.x - x / 2.0, shift0.z - loader.centerElevation, shift0.y - y / 2.0};
-                }
-                else
-                {
-                    shift = glm::vec3{shift0.x - x / 2.0, shift0.z, shift0.y - y / 2.0};
-                }
+                shift = glm::vec3{shift0.x - x / 2.0, shift0.z, shift0.y - y / 2.0};
 
 
                 glm::mat4 unit = glm::mat4(1.0f);
                 glm::vec3 scale = glm::vec3(scale0);
-                glm::mat4 rotation = glm::rotate(unit, glm::radians(angle0), glm::vec3(0.0, 1.0, 0.0));
+                glm::mat4 rotation = glm::rotate(unit, glm::radians(-angle0), glm::vec3(0.0, 1.0, 0.0));
                 glm::mat4 mat = glm::translate(unit, shift) * rotation * glm::scale(unit, scale);
                 instance.object2worldMatrix = mat;
                 instance.world2objectMatrix = glm::transpose(glm::inverse(mat));
@@ -579,6 +1293,7 @@ bool Scene::createPrimObjScene(std::shared_ptr<FileIO> &fileio, std::shared_ptr<
     auto &voxelio = voxellstio->m_voxelio;
     auto &background = fileio->m_pVoxelebXml->scenexml.background;
     nanovdb::GridBuilder<int32_t> nanoBuilder(-1);
+    HexMixAccumulator hexMixtures;
 
 
     /// ------------------------------------
@@ -594,7 +1309,10 @@ bool Scene::createPrimObjScene(std::shared_ptr<FileIO> &fileio, std::shared_ptr<
         auto &voxelEntity = scenexml.primEntities[kVoxelModel];
 
         if (voxelEntity.voxelizeFromObj) {
-            createObjFilledVoxels(this, voxelEntity, nanoBuilder, voxellstio);
+            createObjFilledVoxels(this, voxelEntity, nanoBuilder, voxellstio,
+                                  background,
+                                  voxellstio->heterogeneousVoxel
+                                      ? &hexMixtures : nullptr);
             continue;
         }
 
@@ -602,18 +1320,21 @@ bool Scene::createPrimObjScene(std::shared_ptr<FileIO> &fileio, std::shared_ptr<
         {
             if(voxelEntity.isshapeFromFile == true)
             {
-                createPrimObj_Crowns(voxelEntity, nanoBuilder, voxellstio);
+                createPrimObj_Crowns(voxelEntity, nanoBuilder, voxellstio, background);
             }else {
-                createPrimObj_Crown(voxelEntity, nanoBuilder, voxellstio);
+                createPrimObj_Crown(voxelEntity, nanoBuilder, voxellstio, background);
             }
         }else if(voxelEntity.type == Type::BUILDING)
         {
-            createPrimObj_Building(voxelEntity, nanoBuilder, voxellstio);
+            createPrimObj_Building(voxelEntity, nanoBuilder, voxellstio, background);
         }else if(voxelEntity.type == Type::WATER)
         {
-            createPrimObj_Crown(voxelEntity, nanoBuilder, voxellstio);
+            createPrimObj_Crown(voxelEntity, nanoBuilder, voxellstio, background);
         }
 
+    }
+    if (voxellstio->heterogeneousVoxel) {
+        finalizeHexMixtures(hexMixtures, voxellstio);
     }
     voxellstio->m_voxelio->nanoHandle = nanoBuilder.getHandle<>();
 
@@ -621,7 +1342,7 @@ bool Scene::createPrimObjScene(std::shared_ptr<FileIO> &fileio, std::shared_ptr<
     return true;
 }
 
-bool Scene::createPrimObj_Crown(PrimEntity & voxelEntity,nanovdb::GridBuilder<int32_t> &nanoBuilder,std::shared_ptr<VoxelebIO> &modelio){
+bool Scene::createPrimObj_Crown(PrimEntity & voxelEntity,nanovdb::GridBuilder<int32_t> &nanoBuilder,std::shared_ptr<VoxelebIO> &modelio, const Background& background){
 
     auto acc = nanoBuilder.getAccessor();
     auto &meshio = modelio->m_meshio;
@@ -650,26 +1371,32 @@ bool Scene::createPrimObj_Crown(PrimEntity & voxelEntity,nanovdb::GridBuilder<in
 
     currentVoxelModel1.meshId = n_modelmesh;
     meshio->primMeshes.emplace_back(currentVoxelModel1); //xzy
-    std::string meshName1 = voxelEntity.meshNames[0];
-    std::string spectralName1 = voxelEntity.spectralNames[0];
-    std::string canopyName1 = voxelEntity.canopyNames[0];
-    std::string propName1 = voxelEntity.propNames[0];
-    MeshLink meshlink1;
-    meshlink1.spectralId = meshio->spectralNames.find(spectralName1)->second;
-    meshlink1.thermalId = 0;
-    meshlink1.canopyId = type == Type::WATER ? 0 : meshio->canopyNames.find(canopyName1)->second;
+    MeshLink meshlink1{};
+    meshlink1.spectralId = mappedId(meshio->spectralNames,
+                                    voxelEntity.spectralNames, 0);
+    meshlink1.thermalId = mappedId(meshio->thermalNames,
+                                   voxelEntity.thermalNames, 0);
+    meshlink1.canopyId = type == Type::WATER ? 0 :
+        mappedId(meshio->canopyNames, voxelEntity.canopyNames, 0);
     if (type == Type::VEGETATION) {
-        // meshlink1.leafbioId = meshio->leafbioNames.find(propName)->second;
-        meshlink1.bioId = meshio->leafbioNames.find(propName1)->second;
+        meshlink1.bioId = mappedId(meshio->leafbioNames,
+                                   voxelEntity.propNames, 0);
     } else if (type == Type::SOIL || type == Type::BUILDING) {
-        //  meshlink1.soilsetId = meshio->soilsetNames.find(propName)->second;
-        meshlink1.bioId = meshio->soilsetNames.find(propName1)->second;
+        meshlink1.bioId = mappedId(meshio->soilsetNames,
+                                   voxelEntity.propNames, 0);
     } else if (type == Type::WATER) {
-        meshlink1.bioId = meshio->watersetNames.find(propName1)->second;
+        meshlink1.bioId = mappedId(meshio->watersetNames,
+                                   voxelEntity.propNames, 0);
     }
     //  meshlink1.aeroId = meshio->aeroNames.find(aeroName)->second;
     meshlink1.type = (int) type;
     meshio->meshLinks.emplace_back(meshlink1);
+
+    const Canopy* mediumCanopy = meshlink1.canopyId >= 0 &&
+        static_cast<size_t>(meshlink1.canopyId) < meshio->canopies.size()
+        ? &meshio->canopies[meshlink1.canopyId] : nullptr;
+    const bool isParticipatingMedium = mediumCanopy != nullptr &&
+        (mediumCanopy->structureType == 2 || mediumCanopy->structureType == 3);
 
 
 
@@ -695,10 +1422,18 @@ bool Scene::createPrimObj_Crown(PrimEntity & voxelEntity,nanovdb::GridBuilder<in
     for (int kinstance = 0; kinstance < voxelEntity.primDistributions.size(); kinstance++) {
         // voxel instance1��change postion,
 
+        const glm::vec3 placement = voxelEntity.primDistributions[kinstance];
+        // Fire and fog positions are specified by horizontal centre and bottom
+        // height. Primitive voxel geometry starts at its minimum corner.
+        const float originX = placement.x -
+            (isParticipatingMedium ? shape.length * 0.5f : 0.0f);
+        const float originGroundY = placement.y -
+            (isParticipatingMedium ? shape.width * 0.5f : 0.0f);
         glm::ivec3 shift0;
-        shift0 = {voxelEntity.primDistributions[kinstance].x / modelio->stepsize_surface,
-                  voxelEntity.primDistributions[kinstance].z / modelio->stepsize_surface,
-                  voxelEntity.primDistributions[kinstance].y / modelio->stepsize_surface};
+        shift0 = {originX / modelio->stepsize_surface,
+                  (placement.z + demHeightAboveMinimum(
+                      background, placement.x, placement.y)) / modelio->stepsize_surface,
+                  originGroundY / modelio->stepsize_surface};
 
         ///-----------------------------------------------------------------------------
         ///
@@ -713,7 +1448,7 @@ bool Scene::createPrimObj_Crown(PrimEntity & voxelEntity,nanovdb::GridBuilder<in
         //
         glm::mat4 unit = glm::mat4(1.0f);
         glm::vec3 scale = glm::vec3(scale0);
-        glm::mat4 angle = glm::rotate(unit, glm::radians(angle0), glm::vec3(0.0, 1.0, 0.0));
+        glm::mat4 angle = glm::rotate(unit, glm::radians(-angle0), glm::vec3(0.0, 1.0, 0.0));
         glm::mat4 mat = glm::scale(unit, scale) * glm::translate(unit, shift);
 
         Instance instance1{};
@@ -728,11 +1463,19 @@ bool Scene::createPrimObj_Crown(PrimEntity & voxelEntity,nanovdb::GridBuilder<in
 
 
         int isValid = 0;
+        int insertedVoxelCount = 0;
+        int occupiedVoxelCount = 0;
+        int mediumVoxelCount = 0;
 
         for (int kvoxel = 0; kvoxel < currentVoxelModel1.voxelIds.size(); kvoxel++) {
             // this is what we did in the shader;
             // glm::ivec3 pos =  mat * glm::vec4(currentVoxelModel.voxelIds[kvoxel],1.0);
-            glm::ivec3 Id = shift0 + glm::ivec3(currentVoxelModel1.voxelIds[kvoxel]);
+            const glm::ivec3 localVoxel = glm::ivec3(currentVoxelModel1.voxelIds[kvoxel]);
+            if (isParticipatingMedium &&
+                !keepParticipatingMediumVoxel(*mediumCanopy, localVoxel, shape,
+                                              modelio->stepsize_surface)) continue;
+            if (isParticipatingMedium) mediumVoxelCount++;
+            glm::ivec3 Id = shift0 + localVoxel;
             int test = acc.getValue(nanovdb::Coord(Id.x, Id.y, Id.z));
 
             // the first bufferid;
@@ -751,8 +1494,20 @@ bool Scene::createPrimObj_Crown(PrimEntity & voxelEntity,nanovdb::GridBuilder<in
                 modelio->m_voxelio->voxellinks.emplace_back(voxelLink);
                 n_voxel++;
                 isValid = 1;
+                insertedVoxelCount++;
 
+            } else if (isParticipatingMedium) {
+                occupiedVoxelCount++;
             }
+        }
+        if (isParticipatingMedium) {
+            std::cout << "Participating medium voxelization: "
+                      << voxelEntity.primitiveName
+                      << " placement=" << kinstance
+                      << " candidates=" << currentVoxelModel1.voxelIds.size()
+                      << " medium-shape=" << mediumVoxelCount
+                      << " inserted=" << insertedVoxelCount
+                      << " occupied=" << occupiedVoxelCount << '\n';
         }
         if (isValid == 0) {
             continue;
@@ -768,7 +1523,7 @@ bool Scene::createPrimObj_Crown(PrimEntity & voxelEntity,nanovdb::GridBuilder<in
     return true;
 }
 
-bool Scene::createPrimObj_Crowns(PrimEntity & voxelEntity,nanovdb::GridBuilder<int32_t> &nanoBuilder,std::shared_ptr<VoxelebIO> &modelio){
+bool Scene::createPrimObj_Crowns(PrimEntity & voxelEntity,nanovdb::GridBuilder<int32_t> &nanoBuilder,std::shared_ptr<VoxelebIO> &modelio, const Background& background){
 
     auto acc = nanoBuilder.getAccessor();
     auto &meshio = modelio->m_meshio;
@@ -839,7 +1594,7 @@ bool Scene::createPrimObj_Crowns(PrimEntity & voxelEntity,nanovdb::GridBuilder<i
 
             glm::ivec3 shift0;
             shift0 = {shape.pos.x / modelio->stepsize_surface,
-                      shape.pos.z / modelio->stepsize_surface,
+                      (shape.pos.z + demHeightAboveMinimum(background, shape.pos.x, shape.pos.y)) / modelio->stepsize_surface,
                       shape.pos.y / modelio->stepsize_surface};
 
             ///-----------------------------------------------------------------------------
@@ -911,7 +1666,7 @@ bool Scene::createPrimObj_Crowns(PrimEntity & voxelEntity,nanovdb::GridBuilder<i
     return true;
 }
 
-bool Scene::createPrimObj_Building(PrimEntity & voxelEntity,nanovdb::GridBuilder<int32_t> &nanoBuilder, std::shared_ptr<VoxelebIO> &modelio) {
+bool Scene::createPrimObj_Building(PrimEntity & voxelEntity,nanovdb::GridBuilder<int32_t> &nanoBuilder, std::shared_ptr<VoxelebIO> &modelio, const Background& background) {
 
 
     auto acc = nanoBuilder.getAccessor();
@@ -1004,7 +1759,9 @@ bool Scene::createPrimObj_Building(PrimEntity & voxelEntity,nanovdb::GridBuilder
 
         glm::ivec3 shift0;
         shift0 = {voxelEntity.primDistributions[kinstance].x / modelio->stepsize_surface,
-                  voxelEntity.primDistributions[kinstance].z / modelio->stepsize_surface,
+                  (voxelEntity.primDistributions[kinstance].z + demHeightAboveMinimum(
+                      background, voxelEntity.primDistributions[kinstance].x,
+                      voxelEntity.primDistributions[kinstance].y)) / modelio->stepsize_surface,
                   voxelEntity.primDistributions[kinstance].y / modelio->stepsize_surface};
 
 
@@ -1021,7 +1778,7 @@ bool Scene::createPrimObj_Building(PrimEntity & voxelEntity,nanovdb::GridBuilder
         //
         glm::mat4 unit = glm::mat4(1.0f);
         glm::vec3 scale = glm::vec3(scale0);
-        glm::mat4 angle = glm::rotate(unit, glm::radians(angle0), glm::vec3(0.0, 1.0, 0.0));
+        glm::mat4 angle = glm::rotate(unit, glm::radians(-angle0), glm::vec3(0.0, 1.0, 0.0));
         glm::mat4 mat = glm::scale(unit, scale) * glm::translate(unit, shift);
 
         Instance instance1{};
@@ -1162,7 +1919,7 @@ bool Scene::createPrimObj_Background(Background & background,nanovdb::GridBuilde
     VoxelDesigner loader;
     PrimMesh bgModelXYZ;
     if ((background.isDEM == true) && (background.DEMFile != "")) {
-        std::cout<<("----------------error--------------------");
+        bgModelXYZ = createVoxelDemBackground(background, modelio->stepsize_surface);
     } else {
         bgModelXYZ = loader.createTriBackground(modelio->sceneSize_XYZ.x, modelio->sceneSize_XYZ.y, background.stepsize_surface);
     }
@@ -1173,7 +1930,7 @@ bool Scene::createPrimObj_Background(Background & background,nanovdb::GridBuilde
     meshio->primMeshes.emplace_back(bgModel);
 
     // background model link
-    MeshLink bgMeshLink;
+    MeshLink bgMeshLink{};
     const auto thermalIt = meshio->thermalNames.find(background.bgThermalName);
     bgMeshLink.thermalId = thermalIt == meshio->thermalNames.end() ? 0 : thermalIt->second;
     bgMeshLink.canopyId = 0;
@@ -1199,6 +1956,7 @@ bool Scene::createPrimObj_Background(Background & background,nanovdb::GridBuilde
     }
     bgMeshLink.bioId = bgPropIndex;
     bgMeshLink.type = static_cast<int>(background.type);
+    bgMeshLink.angularEffectStrength = background.angularEffectStrength;
     meshio->meshLinks.emplace_back(bgMeshLink);
 
     /// ------------------------------------
@@ -1286,6 +2044,7 @@ bool Scene::createPrimObjScene(std::shared_ptr<FileIO> &fileio, std::shared_ptr<
     auto &voxelio = voxellstio->m_voxelio;
     auto &background = fileio->m_pVoxelrtXml->scenexml.background;
     nanovdb::GridBuilder<int32_t> nanoBuilder(-1);
+    HexMixAccumulator hexMixtures;
 
 
     /// ------------------------------------
@@ -1301,7 +2060,10 @@ bool Scene::createPrimObjScene(std::shared_ptr<FileIO> &fileio, std::shared_ptr<
         auto &voxelEntity = scenexml.primEntities[kVoxelModel];
 
         if (voxelEntity.voxelizeFromObj) {
-            createObjFilledVoxels(this, voxelEntity, nanoBuilder, voxellstio);
+            createObjFilledVoxels(this, voxelEntity, nanoBuilder, voxellstio,
+                                  background,
+                                  voxellstio->heterogeneousVoxel
+                                      ? &hexMixtures : nullptr);
             continue;
         }
 
@@ -1310,15 +2072,18 @@ bool Scene::createPrimObjScene(std::shared_ptr<FileIO> &fileio, std::shared_ptr<
         {
             if(voxelEntity.isshapeFromFile == true)
             {
-                createPrimObj_Crowns(voxelEntity, nanoBuilder, voxellstio);
+                createPrimObj_Crowns(voxelEntity, nanoBuilder, voxellstio, background);
             }else {
-                createPrimObj_Crown(voxelEntity, nanoBuilder, voxellstio);
+                createPrimObj_Crown(voxelEntity, nanoBuilder, voxellstio, background);
             }
         }else if(voxelEntity.type == Type::BUILDING)
         {
-            createPrimObj_Building(voxelEntity, nanoBuilder, voxellstio);
+            createPrimObj_Building(voxelEntity, nanoBuilder, voxellstio, background);
         }
 
+    }
+    if (voxellstio->heterogeneousVoxel) {
+        finalizeHexMixtures(hexMixtures, voxellstio);
     }
     voxellstio->m_voxelio->nanoHandle = nanoBuilder.getHandle<>();
 
@@ -1326,7 +2091,7 @@ bool Scene::createPrimObjScene(std::shared_ptr<FileIO> &fileio, std::shared_ptr<
     return true;
 }
 
-bool Scene::createPrimObj_Crown(PrimEntity & voxelEntity,nanovdb::GridBuilder<int32_t> &nanoBuilder,std::shared_ptr<VoxelrtIO> &modelio){
+bool Scene::createPrimObj_Crown(PrimEntity & voxelEntity,nanovdb::GridBuilder<int32_t> &nanoBuilder,std::shared_ptr<VoxelrtIO> &modelio, const Background& background){
 
     auto acc = nanoBuilder.getAccessor();
     auto &meshio = modelio->m_meshio;
@@ -1352,15 +2117,13 @@ bool Scene::createPrimObj_Crown(PrimEntity & voxelEntity,nanovdb::GridBuilder<in
     PrimMesh currentVoxelModel1 = XYZ2XZY(currentVoxelModelXYZ1, 0); // (1,1,0) => (1,0,1) with  height = 0
     currentVoxelModel1.meshId = n_modelmesh;
     meshio->primMeshes.emplace_back(currentVoxelModel1); //xzy
-    std::string meshName1 = voxelEntity.meshNames[0];
-    std::string spectralName1 = voxelEntity.spectralNames[0];
-    std::string thermalName1 = voxelEntity.thermalNames[0];
-    std::string canopyName1 = voxelEntity.canopyNames[0];
-    std::string propName1 = voxelEntity.propNames[0];
-    MeshLink meshlink1;
-    meshlink1.spectralId = meshio->spectralNames.find(spectralName1)->second;
-    meshlink1.thermalId = meshio->thermalNames.find(thermalName1)->second;
-    meshlink1.canopyId = meshio->canopyNames.find(canopyName1)->second;
+    MeshLink meshlink1{};
+    meshlink1.spectralId = mappedId(meshio->spectralNames,
+                                    voxelEntity.spectralNames, 0);
+    meshlink1.thermalId = mappedId(meshio->thermalNames,
+                                   voxelEntity.thermalNames, 0);
+    meshlink1.canopyId = type == Type::WATER ? 0 :
+        mappedId(meshio->canopyNames, voxelEntity.canopyNames, 0);
 //    if (type == Type::VEGETATION) {
 //        // meshlink1.leafbioId = meshio->leafbioNames.find(propName)->second;
 //        meshlink1.bioId = meshio->leafbioNames.find(propName1)->second;
@@ -1371,6 +2134,12 @@ bool Scene::createPrimObj_Crown(PrimEntity & voxelEntity,nanovdb::GridBuilder<in
     //  meshlink1.aeroId = meshio->aeroNames.find(aeroName)->second;
     meshlink1.type = (int) type;
     meshio->meshLinks.emplace_back(meshlink1);
+
+    const Canopy* mediumCanopy = meshlink1.canopyId >= 0 &&
+        static_cast<size_t>(meshlink1.canopyId) < meshio->canopies.size()
+        ? &meshio->canopies[meshlink1.canopyId] : nullptr;
+    const bool isParticipatingMedium = mediumCanopy != nullptr &&
+        (mediumCanopy->structureType == 2 || mediumCanopy->structureType == 3);
 
 
 
@@ -1396,10 +2165,18 @@ bool Scene::createPrimObj_Crown(PrimEntity & voxelEntity,nanovdb::GridBuilder<in
     for (int kinstance = 0; kinstance < voxelEntity.primDistributions.size(); kinstance++) {
         // voxel instance1��change postion,
 
+        const glm::vec3 placement = voxelEntity.primDistributions[kinstance];
+        // Fire and fog positions are specified by horizontal centre and bottom
+        // height. Primitive voxel geometry starts at its minimum corner.
+        const float originX = placement.x -
+            (isParticipatingMedium ? shape.length * 0.5f : 0.0f);
+        const float originGroundY = placement.y -
+            (isParticipatingMedium ? shape.width * 0.5f : 0.0f);
         glm::ivec3 shift0;
-        shift0 = {voxelEntity.primDistributions[kinstance].x / modelio->stepsize_surface,
-                  voxelEntity.primDistributions[kinstance].z / modelio->stepsize_surface,
-                  voxelEntity.primDistributions[kinstance].y / modelio->stepsize_surface};
+        shift0 = {originX / modelio->stepsize_surface,
+                  (placement.z + demHeightAboveMinimum(
+                      background, placement.x, placement.y)) / modelio->stepsize_surface,
+                  originGroundY / modelio->stepsize_surface};
 
         ///-----------------------------------------------------------------------------
         ///
@@ -1414,7 +2191,7 @@ bool Scene::createPrimObj_Crown(PrimEntity & voxelEntity,nanovdb::GridBuilder<in
         //
         glm::mat4 unit = glm::mat4(1.0f);
         glm::vec3 scale = glm::vec3(scale0);
-        glm::mat4 angle = glm::rotate(unit, glm::radians(angle0), glm::vec3(0.0, 1.0, 0.0));
+        glm::mat4 angle = glm::rotate(unit, glm::radians(-angle0), glm::vec3(0.0, 1.0, 0.0));
         glm::mat4 mat = glm::scale(unit, scale) * glm::translate(unit, shift);
 
         Instance instance1{};
@@ -1429,11 +2206,19 @@ bool Scene::createPrimObj_Crown(PrimEntity & voxelEntity,nanovdb::GridBuilder<in
 
 
         int isValid = 0;
+        int insertedVoxelCount = 0;
+        int occupiedVoxelCount = 0;
+        int mediumVoxelCount = 0;
 
         for (int kvoxel = 0; kvoxel < currentVoxelModel1.voxelIds.size(); kvoxel++) {
             // this is what we did in the shader;
             // glm::ivec3 pos =  mat * glm::vec4(currentVoxelModel.voxelIds[kvoxel],1.0);
-            glm::ivec3 Id = shift0 + glm::ivec3(currentVoxelModel1.voxelIds[kvoxel]);
+            const glm::ivec3 localVoxel = glm::ivec3(currentVoxelModel1.voxelIds[kvoxel]);
+            if (isParticipatingMedium &&
+                !keepParticipatingMediumVoxel(*mediumCanopy, localVoxel, shape,
+                                              modelio->stepsize_surface)) continue;
+            if (isParticipatingMedium) mediumVoxelCount++;
+            glm::ivec3 Id = shift0 + localVoxel;
             int test = acc.getValue(nanovdb::Coord(Id.x, Id.y, Id.z));
 
             // the first bufferid;
@@ -1452,8 +2237,20 @@ bool Scene::createPrimObj_Crown(PrimEntity & voxelEntity,nanovdb::GridBuilder<in
                 modelio->m_voxelio->voxellinks.emplace_back(voxelLink);
                 n_voxel++;
                 isValid = 1;
+                insertedVoxelCount++;
 
+            } else if (isParticipatingMedium) {
+                occupiedVoxelCount++;
             }
+        }
+        if (isParticipatingMedium) {
+            std::cout << "Participating medium voxelization: "
+                      << voxelEntity.primitiveName
+                      << " placement=" << kinstance
+                      << " candidates=" << currentVoxelModel1.voxelIds.size()
+                      << " medium-shape=" << mediumVoxelCount
+                      << " inserted=" << insertedVoxelCount
+                      << " occupied=" << occupiedVoxelCount << '\n';
         }
         if (isValid == 0) {
             continue;
@@ -1469,7 +2266,7 @@ bool Scene::createPrimObj_Crown(PrimEntity & voxelEntity,nanovdb::GridBuilder<in
     return true;
 }
 
-bool Scene::createPrimObj_Crowns(PrimEntity & voxelEntity,nanovdb::GridBuilder<int32_t> &nanoBuilder,std::shared_ptr<VoxelrtIO> &modelio){
+bool Scene::createPrimObj_Crowns(PrimEntity & voxelEntity,nanovdb::GridBuilder<int32_t> &nanoBuilder,std::shared_ptr<VoxelrtIO> &modelio, const Background& background){
 
     auto acc = nanoBuilder.getAccessor();
     auto &meshio = modelio->m_meshio;
@@ -1540,7 +2337,7 @@ bool Scene::createPrimObj_Crowns(PrimEntity & voxelEntity,nanovdb::GridBuilder<i
 
             glm::ivec3 shift0;
             shift0 = {shape.pos.x / modelio->stepsize_surface,
-                      shape.pos.z / modelio->stepsize_surface,
+                      (shape.pos.z + demHeightAboveMinimum(background, shape.pos.x, shape.pos.y)) / modelio->stepsize_surface,
                       shape.pos.y / modelio->stepsize_surface};
 
             ///-----------------------------------------------------------------------------
@@ -1612,7 +2409,7 @@ bool Scene::createPrimObj_Crowns(PrimEntity & voxelEntity,nanovdb::GridBuilder<i
     return true;
 }
 
-bool Scene::createPrimObj_Building(PrimEntity & voxelEntity,nanovdb::GridBuilder<int32_t> &nanoBuilder, std::shared_ptr<VoxelrtIO> &modelio) {
+bool Scene::createPrimObj_Building(PrimEntity & voxelEntity,nanovdb::GridBuilder<int32_t> &nanoBuilder, std::shared_ptr<VoxelrtIO> &modelio, const Background& background) {
 
 
     auto acc = nanoBuilder.getAccessor();
@@ -1705,7 +2502,9 @@ bool Scene::createPrimObj_Building(PrimEntity & voxelEntity,nanovdb::GridBuilder
 
         glm::ivec3 shift0;
         shift0 = {voxelEntity.primDistributions[kinstance].x / modelio->stepsize_surface,
-                  voxelEntity.primDistributions[kinstance].z / modelio->stepsize_surface,
+                  (voxelEntity.primDistributions[kinstance].z + demHeightAboveMinimum(
+                      background, voxelEntity.primDistributions[kinstance].x,
+                      voxelEntity.primDistributions[kinstance].y)) / modelio->stepsize_surface,
                   voxelEntity.primDistributions[kinstance].y / modelio->stepsize_surface};
 
 
@@ -1722,7 +2521,7 @@ bool Scene::createPrimObj_Building(PrimEntity & voxelEntity,nanovdb::GridBuilder
         //
         glm::mat4 unit = glm::mat4(1.0f);
         glm::vec3 scale = glm::vec3(scale0);
-        glm::mat4 angle = glm::rotate(unit, glm::radians(angle0), glm::vec3(0.0, 1.0, 0.0));
+        glm::mat4 angle = glm::rotate(unit, glm::radians(-angle0), glm::vec3(0.0, 1.0, 0.0));
         glm::mat4 mat = glm::scale(unit, scale) * glm::translate(unit, shift);
 
         Instance instance1{};
@@ -1863,7 +2662,7 @@ bool Scene::createPrimObj_Background(Background & background,nanovdb::GridBuilde
     VoxelDesigner loader;
     PrimMesh bgModelXYZ;
     if ((background.isDEM == true) && (background.DEMFile != "")) {
-        std::cout<<("----------------error--------------------");
+        bgModelXYZ = createVoxelDemBackground(background, modelio->stepsize_surface);
     } else {
         bgModelXYZ = loader.createTriBackground(modelio->sceneSize_XYZ.x, modelio->sceneSize_XYZ.y, background.stepsize_surface);
     }
@@ -1874,7 +2673,7 @@ bool Scene::createPrimObj_Background(Background & background,nanovdb::GridBuilde
     meshio->primMeshes.emplace_back(bgModel);
 
     // background model link
-    MeshLink bgMeshLink;
+    MeshLink bgMeshLink{};
     std::string bgThermalName = background.bgThermalName;
     bgMeshLink.thermalId =  meshio->thermalNames.find(bgThermalName)->second;
     bgMeshLink.canopyId = 0;
@@ -1893,9 +2692,16 @@ bool Scene::createPrimObj_Background(Background & background,nanovdb::GridBuilde
     //  bgMeshLink.canopyId = meshio->canopyNames.find(bgCanopyName)->second;
     int bgPropIndex = 0;
     std::string bgPropName = background.bgPropName;
-    //bgPropIndex = meshio->soilsetNames.find(bgPropName)->second;
-    //bgMeshLink.bioId = bgPropIndex;
-    bgMeshLink.type = (int) Type::SOIL;
+    if (background.type == Type::WATER) {
+        const auto propIt = meshio->watersetNames.find(bgPropName);
+        bgPropIndex = propIt == meshio->watersetNames.end() ? 0 : propIt->second;
+    } else {
+        const auto propIt = meshio->soilsetNames.find(bgPropName);
+        bgPropIndex = propIt == meshio->soilsetNames.end() ? 0 : propIt->second;
+    }
+    bgMeshLink.bioId = bgPropIndex;
+    bgMeshLink.type = static_cast<int>(background.type);
+    bgMeshLink.angularEffectStrength = background.angularEffectStrength;
     meshio->meshLinks.emplace_back(bgMeshLink);
 
     /// ------------------------------------
@@ -2049,5 +2855,3 @@ void Scene::outputObjMesh(ObjMesh model, std::string &fileName) {
     }
 
 }
-
-

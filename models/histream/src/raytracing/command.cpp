@@ -34,8 +34,22 @@ bool Command::run(std::shared_ptr<RaytracingIO> &raytracingio){
 
     raytracingio->m_currentSemaphore = 1;
 
-    submit(raytracingio,nullptr, nullptr);
-    waitFence(raytracingio);
+    const int imageHeight = std::max(1, raytracingio->imageSize.y);
+    const int imageWidth = std::max(1, raytracingio->imageSize.x);
+    // Periodic traversal can multiply TLAS work for every primary miss. Keep
+    // each Vulkan submission small enough to avoid a Windows TDR while still
+    // completing and downloading one observation direction at a time.
+    const int rowsPerSubmit = raytracingio->periodicNeighborCount > 0
+        ? std::max(1, std::min(imageHeight, 2048 / imageWidth))
+        : imageHeight;
+    for (int row = 0; row < imageHeight; row += rowsPerSubmit) {
+        raytracingio->setting.imageOffsetY = row;
+        raytracingio->dispatchRowCount = std::min(rowsPerSubmit, imageHeight - row);
+        submit(raytracingio, nullptr, nullptr);
+        waitFence(raytracingio);
+    }
+    raytracingio->setting.imageOffsetY = 0;
+    raytracingio->dispatchRowCount = 0;
 
     return true;
 }
@@ -122,7 +136,9 @@ void Command::recordCommandBuffer(const VkCommandBuffer& cmdBuf, std::shared_ptr
     auto & m_sbtWrapper= raytracingio->m_sbtWrapper;
     VkExtent2D size;
     size.width = raytracingio->imageSize.x;
-    size.height = raytracingio->imageSize.y;
+    size.height = raytracingio->dispatchRowCount > 0
+        ? static_cast<uint32_t>(raytracingio->dispatchRowCount)
+        : static_cast<uint32_t>(raytracingio->imageSize.y);
 
     vkCmdBindPipeline(cmdBuf, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipeline);
     vkCmdBindDescriptorSets(cmdBuf, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipelineLayout, 0,

@@ -4,88 +4,150 @@
 
 #include "compo.h"
 
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <fstream>
+#include <sstream>
+#include <stdexcept>
+#include <utility>
+
+namespace {
+float bounded(float value, float fallback)
+{
+    return std::clamp(std::isfinite(value) ? value : fallback, 0.0f, 1.0f);
+}
+
+float wavelengthMicrometres(float wavelength)
+{
+    return wavelength > 50.0f ? wavelength / 1000.0f : wavelength;
+}
+
+float wavelengthNanometres(float wavelength)
+{
+    return wavelength > 0.0f && wavelength <= 50.0f ? wavelength * 1000.0f : wavelength;
+}
+
+std::vector<float> parseSpectrumRow(std::string line)
+{
+    std::replace(line.begin(), line.end(), ',', ' ');
+    std::replace(line.begin(), line.end(), ';', ' ');
+    std::vector<float> values;
+    std::istringstream stream(line);
+    float value = 0.0f;
+    while (stream >> value) if (std::isfinite(value)) values.push_back(value);
+    return values;
+}
+
+void readSpectrumFile(const std::string& path, std::vector<float>& wavelengths,
+                      std::vector<float>& reflectance, std::vector<float>& transmittance)
+{
+    std::ifstream input(path);
+    if (!input) throw std::runtime_error("Cannot open imported spectrum: " + path);
+    std::vector<std::vector<float>> rows;
+    std::string line;
+    while (std::getline(input, line)) {
+        const std::size_t comment = line.find('#');
+        if (comment != std::string::npos) line.erase(comment);
+        auto values = parseSpectrumRow(line);
+        if (!values.empty()) rows.push_back(std::move(values));
+    }
+    if (rows.size() < 2U || rows.size() > 3U || rows[0].size() < 2U ||
+        rows[1].size() != rows[0].size() ||
+        (rows.size() == 3U && rows[2].size() != rows[0].size())) {
+        throw std::runtime_error("Imported spectrum must contain wavelength and reflectance rows, plus optional transmittance row: " + path);
+    }
+    std::vector<std::pair<float, std::size_t>> order;
+    for (std::size_t index = 0; index < rows[0].size(); ++index)
+        order.emplace_back(wavelengthNanometres(rows[0][index]), index);
+    std::sort(order.begin(), order.end());
+    wavelengths.clear(); reflectance.clear(); transmittance.clear();
+    for (const auto& entry : order) {
+        if (!wavelengths.empty() && entry.first <= wavelengths.back())
+            throw std::runtime_error("Imported spectrum wavelengths must be unique: " + path);
+        wavelengths.push_back(entry.first);
+        reflectance.push_back(rows[1][entry.second]);
+        transmittance.push_back(rows.size() == 3U ? rows[2][entry.second] : 0.0f);
+    }
+}
+
+float interpolateValue(const std::vector<float>& wavelengths,
+                       const std::vector<float>& values, float wavelength, float fallback)
+{
+    if (values.empty()) return fallback;
+    if (values.size() == 1U || wavelengths.size() != values.size()) return values.front();
+    const float target = wavelengthNanometres(wavelength);
+    if (target <= wavelengths.front()) return values.front();
+    if (target >= wavelengths.back()) return values.back();
+    const auto upper = std::upper_bound(wavelengths.begin(), wavelengths.end(), target);
+    const std::size_t right = static_cast<std::size_t>(upper - wavelengths.begin());
+    const std::size_t left = right - 1U;
+    const float span = wavelengths[right] - wavelengths[left];
+    const float weight = span > 0.0f ? (target - wavelengths[left]) / span : 0.0f;
+    return values[left] + (values[right] - values[left]) * weight;
+}
+}
+
 
 bool Compo::createCompOptical(std::shared_ptr<FileIO> &fileio, std::shared_ptr<RaytracingIO> &raytracingio)
 {
-    auto & meshio = raytracingio->m_meshio;
+    auto &meshio = raytracingio->m_meshio;
     meshio->spectrals.clear();
+    meshio->spectralNames.clear();
+    int materialId = 0;
+    for (const auto& material : fileio->m_pRaytracingXml->spectralxmls) {
+        meshio->spectralNames[material.spectralName] = materialId++;
+        const auto values = resolveSpectrals(material, fileio->m_pRaytracingXml->sensorxml.waves,
+                                             fileio->m_pRaytracingXml->sensorxml.waves,
+                                             raytracingio->m_defined->m_fluspectCoeff);
+        meshio->spectrals.insert(meshio->spectrals.end(), values.begin(), values.end());
+    }
+
     meshio->thermals.clear();
-
-    //--------------------------------------------------
-    //--- Spectral
-    //--------------------------------------------------
-    int id = 0;
-    for(auto &spectralxml: fileio->m_pRaytracingXml->spectralxmls ){
-        if(spectralxml.type == spectralType::CUSTOM){
-            for(int i=0;i<spectralxml.reflectances.size();i++)
-                meshio->spectrals.push_back(Spectral{spectralxml.reflectances[i],spectralxml.transmittance[i]});
-        }
-        meshio->spectralNames.insert({spectralxml.spectralName,id});
-        id++;
-    }
-    //--------------------------------------------------
-    //--- Thermal
-    //--------------------------------------------------
-    id = 0;
-    for(auto &thermalxml: fileio->m_pRaytracingXml->thermalxmls ) {
+    meshio->thermalNames.clear();
+    int thermalId = 0;
+    for (const auto &thermalxml : fileio->m_pRaytracingXml->thermalxmls) {
         meshio->thermals.push_back(Thermal{thermalxml.sunlitTemperature, thermalxml.shadedTemperature});
-        meshio->thermalNames.insert({thermalxml.thermalName,id});
-        id++;
+        meshio->thermalNames[thermalxml.thermalName] = thermalId++;
     }
-
-    //// add none to avoid pass the empty data into the GPU
-    if (!fileio->m_pRaytracingXml->sensorxml.isTemperature)
-    {
-        meshio->thermals.push_back(Thermal{300, 300});
-        meshio->thermalNames.insert({"None",id});
-        id++;
+    if (!fileio->m_pRaytracingXml->sensorxml.isTemperature) {
+        meshio->thermals.push_back(Thermal{300.0f, 300.0f});
+        meshio->thermalNames["None"] = thermalId;
     }
-
     return true;
 }
 
 bool Compo::createCompOptical(std::shared_ptr<FileIO> &fileio, std::shared_ptr<VoxelrtIO> &modelio)
 {
-    auto & meshio = modelio->m_meshio;
+    auto &meshio = modelio->m_meshio;
     meshio->spectrals.clear();
+    meshio->spectralNames.clear();
+    int materialId = 0;
+    for (const auto& material : fileio->m_pVoxelrtXml->spectralxmls) {
+        meshio->spectralNames[material.spectralName] = materialId++;
+        const auto values = resolveSpectrals(material, fileio->m_pVoxelrtXml->sensorxml.waves,
+                                             fileio->m_pVoxelrtXml->sensorxml.waves,
+                                             modelio->m_defined->m_fluspectCoeff);
+        meshio->spectrals.insert(meshio->spectrals.end(), values.begin(), values.end());
+    }
+
     meshio->thermals.clear();
-
-    //--------------------------------------------------
-    //--- Spectral
-    //--------------------------------------------------
-    int id = 0;
-    for(auto &spectralxml: fileio->m_pVoxelrtXml->spectralxmls ){
-        if(spectralxml.type == spectralType::CUSTOM){
-            for(int i=0;i<spectralxml.reflectances.size();i++)
-                meshio->spectrals.push_back(Spectral{spectralxml.reflectances[i],spectralxml.transmittance[i]});
-        }
-        meshio->spectralNames.insert({spectralxml.spectralName,id});
-        id++;
-    }
-    //--------------------------------------------------
-    //--- Thermal
-    //--------------------------------------------------
-    id = 0;
-    for(auto &thermalxml: fileio->m_pVoxelrtXml->thermalxmls ) {
+    meshio->thermalNames.clear();
+    int thermalId = 0;
+    for (const auto &thermalxml : fileio->m_pVoxelrtXml->thermalxmls) {
         meshio->thermals.push_back(Thermal{thermalxml.sunlitTemperature, thermalxml.shadedTemperature});
-        meshio->thermalNames.insert({thermalxml.thermalName,id});
-        id++;
+        meshio->thermalNames[thermalxml.thermalName] = thermalId++;
     }
-    //--------------------------------------------------
-    //--- Canopy
-    //--------------------------------------------------
-    id = 0;
-    for(auto &canopyxml: fileio->m_pVoxelrtXml->canopyxmls){
 
-        ;
+    meshio->canopies.clear();
+    meshio->canopyNames.clear();
+    int canopyId = 0;
+    for (const auto &canopyxml : fileio->m_pVoxelrtXml->canopyxmls) {
         meshio->canopies.push_back(canopyxml.canopy);
-        meshio->canopyNames.insert({canopyxml.canopyName,id});
-        id++;
+        meshio->canopyNames[canopyxml.canopyName] = canopyId++;
     }
-
     return true;
 }
-
 
 float Compo::calctav(float alfa,float nr)
 {
@@ -210,13 +272,78 @@ void Compo::fluspect(OptCoeff fluspectCoeff, FluspectParam fluspectParam, std::v
     }
 }
 
+std::vector<Spectral> Compo::resolveSpectrals(const SpectralXml& material,
+                                              const std::vector<float>& outputWavelengths,
+                                              const std::vector<float>& customWavelengths,
+                                              const OptCoeff& coefficients)
+{
+    std::vector<float> sourceWavelengths;
+    std::vector<float> sourceReflectance;
+    std::vector<float> sourceTransmittance;
+
+    if (material.type == spectralType::PROSPECT || material.type == spectralType::BSM) {
+        const bool prospectReady = coefficients.wl_.size() >= N1 &&
+            coefficients.nr_.size() >= N1 && coefficients.kdm_.size() >= N1 &&
+            coefficients.kab_.size() >= N1 && coefficients.kw_.size() >= N1 &&
+            coefficients.ks_.size() >= N1 && coefficients.phiI_.size() >= N1 &&
+            coefficients.phiII_.size() >= N1;
+        const bool bsmReady = coefficients.wl_.size() >= N1 &&
+            coefficients.gsv1_.size() >= N1 && coefficients.gsv2_.size() >= N1 &&
+            coefficients.gsv3_.size() >= N1 && coefficients.kw_.size() >= N1 &&
+            coefficients.nw_.size() >= N1;
+        if ((material.type == spectralType::PROSPECT && !prospectReady) ||
+            (material.type == spectralType::BSM && !bsmReady)) {
+            throw std::runtime_error("Optical model coefficients are unavailable for material: " + material.spectralName);
+        }
+        std::vector<Spectral> modeled;
+        if (material.type == spectralType::PROSPECT)
+            fluspect(coefficients, material.fp, modeled);
+        else
+            bsm(coefficients, material.bsm, modeled);
+        const std::size_t count = std::min(modeled.size(), coefficients.wl_.size());
+        sourceWavelengths.reserve(count);
+        sourceReflectance.reserve(count);
+        sourceTransmittance.reserve(count);
+        for (std::size_t index = 0; index < count; ++index) {
+            sourceWavelengths.push_back(wavelengthNanometres(coefficients.wl_[index]));
+            sourceReflectance.push_back(modeled[index].reflectance);
+            sourceTransmittance.push_back(modeled[index].transmittance);
+        }
+    } else if (material.type == spectralType::OTHER) {
+        if (material.path.empty()) throw std::runtime_error("Imported spectrum path is empty for material: " + material.spectralName);
+        readSpectrumFile(material.path, sourceWavelengths, sourceReflectance, sourceTransmittance);
+    } else {
+        sourceWavelengths.reserve(customWavelengths.size());
+        for (float wavelength : customWavelengths)
+            sourceWavelengths.push_back(wavelengthNanometres(wavelength));
+        sourceReflectance = material.reflectances;
+        sourceTransmittance = material.transmittance;
+    }
+
+    std::vector<Spectral> resolved;
+    resolved.reserve(outputWavelengths.size());
+    for (float wavelength : outputWavelengths) {
+        if (wavelengthMicrometres(wavelength) > 2.5f) {
+            const float reflectance = bounded(material.refl_tir, 0.05f);
+            resolved.push_back(Spectral{reflectance,
+                std::min(bounded(material.tau_tir, 0.0f), 1.0f - reflectance)});
+            continue;
+        }
+        const float reflectance = bounded(interpolateValue(
+            sourceWavelengths, sourceReflectance, wavelength, 0.2f), 0.2f);
+        const float transmittance = std::min(bounded(interpolateValue(
+            sourceWavelengths, sourceTransmittance, wavelength, 0.0f), 0.0f),
+            1.0f - reflectance);
+        resolved.push_back(Spectral{reflectance, transmittance});
+    }
+    return resolved;
+}
+
 
 bool Compo::createCompProperty(std::shared_ptr<FileIO> &fileio, std::shared_ptr<VoxelebIO> &modelio) {
 
     auto & meshio = modelio->m_meshio;
     auto & definedio = modelio->m_defined;
-    int num = 0;
-
     meshio->thermals.clear();
     meshio->thermalNames.clear();
     int thermalId = 0;
@@ -232,83 +359,24 @@ bool Compo::createCompProperty(std::shared_ptr<FileIO> &fileio, std::shared_ptr<
         meshio->thermalNames.insert({"__default_thermal", 0});
     }
 
+    meshio->spectrals.clear();
+    meshio->fixedSpectrals.clear();
+    meshio->spectralNames.clear();
+    std::vector<float> fixedWavelengths;
+    fixedWavelengths.reserve(N1 + 1);
+    for (int index = 0; index < N1; ++index) fixedWavelengths.push_back(400.0f + index);
+    fixedWavelengths.push_back(10500.0f);
     int id = 0;
-    for(auto &spectralxml: fileio->m_pVoxelebXml->spectralxmls ){
-
-        if(spectralxml.type == spectralType::PROSPECT){
-
-            // spectral
-            for(int i=0;i<spectralxml.reflectances.size();i++)
-                meshio->spectrals.push_back(Spectral{spectralxml.reflectances[i],spectralxml.transmittance[i]});
-
-            // fixedSpectral
-            meshio->fp = spectralxml.fp;
-            std::vector<Spectral> spectral_;
-            fluspect(definedio->m_fluspectCoeff,meshio->fp,spectral_);
-            spectral_.push_back(Spectral{spectralxml.refl_tir,spectralxml.tau_tir});
-            meshio->fixedSpectrals.insert(meshio->fixedSpectrals.end(),spectral_.begin(),spectral_.end());
-
-        }
-
-        if(spectralxml.type == spectralType::BSM){
-
-            // spectral
-            for(int i=0;i<spectralxml.reflectances.size();i++)
-                meshio->spectrals.push_back(Spectral{spectralxml.reflectances[i],spectralxml.transmittance[i]});
-
-            // fixedSpectral
-            meshio->fp = spectralxml.fp;
-            std::vector<Spectral> spectral_;
-            //fluspect(definedio->m_fluspectCoeff,meshio->fp,spectral_);
-            bsm(definedio->m_fluspectCoeff,spectralxml.bsm,spectral_);
-            spectral_.push_back(Spectral{spectralxml.refl_tir,spectralxml.tau_tir});
-            meshio->fixedSpectrals.insert(meshio->fixedSpectrals.end(),spectral_.begin(),spectral_.end());
-
-        }
-
-        if(spectralxml.type == spectralType::OTHER){
-
-            //spectral
-            for(int i=0;i<spectralxml.reflectances.size();i++)
-                meshio->spectrals.push_back(Spectral{spectralxml.reflectances[i],spectralxml.transmittance[i]});
-
-            // fixedSpectral
-            //------------------------------------
-            std::string infileName1 = spectralxml.path;
-            //m_soilRefl_ = Utils::readascfile(infileName, 0, 1, num);
-            std::vector<float> refl_;
-            Utils::readascfileinout(infileName1,0,1,refl_,num);
-            for(int k = 0;k<N1;k++){
-                Spectral spectral{refl_[k],0};
-                meshio->fixedSpectrals.push_back(spectral);
-            }
-            meshio->fixedSpectrals.push_back(Spectral{spectralxml.refl_tir,spectralxml.tau_tir});
-
-        }
-
-        if(spectralxml.type == spectralType::CUSTOM){
-
-            //spectral
-            for(int i=0;i<spectralxml.reflectances.size();i++)
-                meshio->spectrals.push_back(Spectral{spectralxml.reflectances[i],spectralxml.transmittance[i]});
-
-            // fixedSpectral
-            //------------------------------------
-            //std::string infileName1 = spectralxml.path;
-            //m_soilRefl_ = Utils::readascfile(infileName, 0, 1, num);
-            //std::vector<float> refl_;
-            //Utils::readascfileinout(infileName1,0,1,refl_,num);
-
-            for(int k = 0;k<N1;k++){
-                Spectral spectral{spectralxml.reflectances[0],spectralxml.transmittance[0]};
-                meshio->fixedSpectrals.push_back(spectral);
-            }
-            meshio->fixedSpectrals.push_back(Spectral{spectralxml.refl_tir,spectralxml.tau_tir});
-
-        }
-
-        meshio->spectralNames.insert({spectralxml.spectralName,id});
-        id++;
+    for (const auto& spectralxml : fileio->m_pVoxelebXml->spectralxmls) {
+        const auto sensorValues = resolveSpectrals(
+            spectralxml, fileio->m_pVoxelebXml->sensorxml.waves,
+            fileio->m_pVoxelebXml->sensorxml.waves, definedio->m_fluspectCoeff);
+        const auto fixedValues = resolveSpectrals(
+            spectralxml, fixedWavelengths, fileio->m_pVoxelebXml->sensorxml.waves,
+            definedio->m_fluspectCoeff);
+        meshio->spectrals.insert(meshio->spectrals.end(), sensorValues.begin(), sensorValues.end());
+        meshio->fixedSpectrals.insert(meshio->fixedSpectrals.end(), fixedValues.begin(), fixedValues.end());
+        meshio->spectralNames.insert({spectralxml.spectralName, id++});
     }
 
     id = 0;
@@ -333,7 +401,7 @@ bool Compo::createCompProperty(std::shared_ptr<FileIO> &fileio, std::shared_ptr<
             meshio->leafbioNames.insert({propxml.name, id1});
             id1++;
         }
-        else if(propxml.type == Type::SOIL){
+        else if(propxml.type == Type::SOIL || propxml.type == Type::BUILDING){
             meshio->soilsets.push_back(propxml.soilset);
             meshio->soilsetNames.insert({propxml.name, id2});
             id2++;
@@ -376,7 +444,9 @@ void Compo::bsm(OptCoeff bsmCoeff,BSMParam bsm,std::vector<Spectral>& spectrals)
     float B = bsm.BSMBrightness;
     float lat = bsm.BSMlat;
     float lon = bsm.BSMlon;
-    float SMC = bsm.SMC;
+    // Accept both percentage input (25) and fractional input (0.25).
+    float SMC = bsm.SMC > 1.0f ? bsm.SMC / 100.0f : bsm.SMC;
+    SMC = std::clamp(SMC, 0.0f, 1.0f);
     float SMCp = 0.25;
     float film = 0.015;
     float rd = 3.1415926/180.0;

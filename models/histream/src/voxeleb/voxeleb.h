@@ -55,9 +55,10 @@ public:
     bool uploadMeteo(std::shared_ptr<FileIO> &fileio, std::shared_ptr<VoxelebIO> &modelio);
     bool updateMeteo(std::shared_ptr<VoxelebIO> &modelio, int knode);
 
-    void output(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<FileIO> &fileio, int knode, int kangle);
+    void output(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<FileIO> &fileio, int knode, int kangle, int kpos = -1);
     void outputTxt(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<FileIO> &fileio, int kangle);
     void outputVoxel(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<FileIO> &fileio);
+    void outputFluidSlices(std::shared_ptr<VoxelebIO> &modelio);
 
 
     std::shared_ptr<Geometry> m_pGeometry;

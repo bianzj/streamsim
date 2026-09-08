@@ -33,9 +33,11 @@ class ObjLoader
 {
 public:
 	void loadModel(const std::string& filename);
-	void loadMesh(const std::string& filename, const std::string& meshname);
+	void loadMesh(const std::string& filename, const std::string& meshname,
+	              bool exactMatch = false);
 	void createBackground(glm::vec3);
-	void creatBackgroundFromDEM(const std::string& filename, nvmath::vec3f sceneSize);
+	void creatBackgroundFromDEM(const std::string& filename, nvmath::vec3f sceneSize,
+	                             float targetStep);
 
     float getHeightAt(float locX, float locY);
 	void interpolateZValues(nvmath::vec3f sceneSize,  // 场景范围 (x_size, y_size, z_size)

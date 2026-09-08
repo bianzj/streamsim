@@ -1,0 +1,3 @@
+Khronos glTF Sample Asset: CesiumMilkTruck
+Source: https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/CesiumMilkTruck
+License: see SOURCE_README.md and upstream repository license metadata.

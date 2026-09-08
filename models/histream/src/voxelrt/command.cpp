@@ -4,6 +4,8 @@
 
 #include "command.h"
 
+#include <algorithm>
+
 
 
 bool Command::create(std::shared_ptr<VoxelrtIO> &modelio){
@@ -47,14 +49,70 @@ bool Command::runRT(std::shared_ptr<VoxelrtIO> &modelio){
     submit(modelio, VoxelRTStage::gap, voxelSize1D, std::nullopt, std::nullopt);
     waitFence(modelio);
 
-    submit(modelio, VoxelRTStage::diffuse, voxelSize1D, std::nullopt, std::nullopt);
-    waitFence(modelio);
+    // A wavelength is independent at this stage. Dispatch it separately so
+    // dense hyperspectral jobs do not become one long GPU command and trip
+    // the Windows TDR watchdog.
+    for (int band = 0; band < modelio->n_wave; ++band) {
+        setting.n_jump = band;
+        submit(modelio, VoxelRTStage::diffuse, voxelSize1D, std::nullopt, std::nullopt);
+        waitFence(modelio);
+    }
+    setting.n_jump = 0;
 
     submit(modelio, VoxelRTStage::out, voxelSize2D, std::nullopt, std::nullopt);
     waitFence(modelio);
 
 
 
+    return true;
+}
+
+bool Command::runRTAccelerated(std::shared_ptr<VoxelrtIO>& modelio,
+                               int spectralBatchSize)
+{
+    modelio->m_currentSemaphore = 1;
+    spectralBatchSize = std::clamp(spectralBatchSize, 1, 4);
+
+    const glm::ivec3 voxelSize2D(
+        (modelio->setting.imageSize.x + (GROUP_SIZEXY - 1)) / GROUP_SIZEXY,
+        (modelio->setting.imageSize.y + (GROUP_SIZEXY - 1)) / GROUP_SIZEXY,
+        1);
+    const glm::ivec3 voxelSize1D(
+        (modelio->n_voxel + (GROUP_SIZEX - 1)) / GROUP_SIZEX, 1, 1);
+
+    submit(modelio, VoxelRTStage::gap, voxelSize1D,
+           std::nullopt, std::nullopt);
+    waitFence(modelio);
+
+    for (int firstBand = 0; firstBand < modelio->n_wave;
+         firstBand += spectralBatchSize) {
+        VkCommandBuffer commandBuffer =
+            modelio->m_genCmdBuf.createCommandBuffer();
+
+        modelio->setting.n_jump = firstBand;
+        modelio->setting.spectralBatchSize = std::min(
+            spectralBatchSize, modelio->n_wave - firstBand);
+        recordCommandBuffer(
+            commandBuffer, modelio->m_descSet,
+            modelio->m_pipelineLayout,
+            modelio->m_pipelines[VoxelRTStage::diffuse],
+            modelio->setting);
+        vkCmdDispatch(commandBuffer, voxelSize1D.x,
+                      voxelSize1D.y, voxelSize1D.z);
+
+        vkEndCommandBuffer(commandBuffer);
+        VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &commandBuffer;
+        vkQueueSubmit(modelio->m_queue, 1, &submitInfo, modelio->m_fence);
+        waitFence(modelio);
+    }
+    modelio->setting.n_jump = 0;
+    modelio->setting.spectralBatchSize = 1;
+
+    submit(modelio, VoxelRTStage::out, voxelSize2D,
+           std::nullopt, std::nullopt);
+    waitFence(modelio);
     return true;
 }
 

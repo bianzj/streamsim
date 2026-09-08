@@ -60,6 +60,15 @@ bool Buffer::createBuffer(std::shared_ptr<VoxelrtIO> &voxellstio){
         cmdGen.submitAndWait(cmdBufCanopy);
     }
 
+    // Water BRDF parameters are required by VoxelRT even in scenes without a
+    // water object because the descriptor layout is shared by every pass.
+    if (meshio->watersets.empty()) meshio->watersets.emplace_back();
+    VkCommandBuffer cmdBufWaterSet = cmdGen.createCommandBuffer();
+    meshio->m_pWaterSetBuffer = std::make_shared<nvvk::Buffer>(
+        m_pAlloc->createBuffer(cmdBufWaterSet, meshio->watersets,
+                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT));
+    cmdGen.submitAndWait(cmdBufWaterSet);
+
     // tempe
     VkCommandBuffer cmdBufTempe = cmdGen.createCommandBuffer();
     std::vector<VoxelTempe> voxelTempes(n_voxel, VoxelTempe{305, 295});
@@ -124,6 +133,12 @@ bool Buffer::createBuffer(std::shared_ptr<VoxelrtIO> &voxellstio){
         voxelio->m_pVoxelLinkBuffer = std::make_shared<nvvk::Buffer>(m_pAlloc->createBuffer(cmdBufVoxelLink, voxelio->voxellinks, usage_));
         cmdGen.submitAndWait(cmdBufVoxelLink);
 
+        if (voxelio->voxelHexs.empty()) voxelio->voxelHexs.emplace_back();
+        VkCommandBuffer cmdBufVoxelHex = cmdGen.createCommandBuffer();
+        voxelio->m_pVoxelHexBuffer = std::make_shared<nvvk::Buffer>(
+            m_pAlloc->createBuffer(cmdBufVoxelHex, voxelio->voxelHexs, usage_));
+        cmdGen.submitAndWait(cmdBufVoxelHex);
+
         // voxel Nano
         VkCommandBuffer cmdBufVoxelNano = cmdGen.createCommandBuffer();
         voxelio->m_pVoxelNanoBuffer = std::make_shared<nvvk::Buffer>(m_pAlloc->createBuffer(cmdBufVoxelNano, voxelio->nanoHandle.size(), voxelio->nanoHandle.data(),
@@ -166,15 +181,20 @@ bool Buffer::createBuffer(std::shared_ptr<VoxelrtIO> &voxellstio){
     VkCommandBuffer cmdBufDir = cmdGen.createCommandBuffer();
     std::vector<VoxelDir> voxelDirs(n_voxel, VoxelDir{0, 0});
     voxelio->m_pDirBuffer = std::make_shared<nvvk::Buffer>(m_pAlloc->createBuffer(cmdBufDir, voxelDirs,
-                                                                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                                                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                                                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
     cmdGen.submitAndWait(cmdBufDir);
 
     // rads
     VkCommandBuffer cmdBufRads = cmdGen.createCommandBuffer();
-    std::vector<VoxelRad> voxelRads(n_voxel * DIFFUSENUM, VoxelRad{0, 0});
+    // Keep the directional integration scratch space separate from the
+    // persistent per-band results. Otherwise every new band overwrites the
+    // results of the preceding bands (most visibly band 0).
+    const size_t radiationStride = static_cast<size_t>(DIFFUSENUM) +
+                                   static_cast<size_t>(voxellstio->n_wave);
+    std::vector<VoxelRad> voxelRads(static_cast<size_t>(n_voxel) * radiationStride, VoxelRad{0, 0});
     voxelio->m_pRadsBuffer = std::make_shared<nvvk::Buffer>(m_pAlloc->createBuffer(cmdBufRads, voxelRads,
-                                                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                                                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
     cmdGen.submitAndWait(cmdBufRads);
 
@@ -246,11 +266,13 @@ void Buffer::destroy(std::shared_ptr<VoxelrtIO> &voxellstio){
     {
         m_pAlloc->destroy(*(meshio->m_pBufferCanopy));
     }
+    if (meshio->m_pWaterSetBuffer) m_pAlloc->destroy(*(meshio->m_pWaterSetBuffer));
     m_pAlloc->destroy(*(meshio->m_pBufferMeshLink));
 
     m_pAlloc->destroy(*(instanceio->m_pBufferInstanceLink));
     m_pAlloc->destroy(*(voxelio->m_pVoxelLinkBuffer));
     m_pAlloc->destroy(*(voxelio->m_pVoxelNanoBuffer));
+    if (voxelio->m_pVoxelHexBuffer) m_pAlloc->destroy(*(voxelio->m_pVoxelHexBuffer));
 
     m_pAlloc->destroy(*(surfio->m_pBufferLad));
 

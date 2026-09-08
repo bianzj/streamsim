@@ -6,6 +6,90 @@
 #include <algorithm>
 #include <cmath>
 
+namespace {
+
+constexpr double kOrthographicScale = 1.0;
+
+glm::vec3 observationCameraUp(float zenithDegrees, float azimuthDegrees)
+{
+    const float zenith = zenithDegrees * DEG2RAD;
+    const float azimuth = azimuthDegrees * DEG2RAD;
+    const glm::vec3 cameraOut{
+        std::sin(zenith) * std::cos(azimuth),
+        std::cos(zenith),
+        std::sin(zenith) * std::sin(azimuth)};
+    const glm::vec3 forward = -glm::normalize(cameraOut);
+    // +X is north. Project geographic north into the image plane so native
+    // output rows are already north-up and image columns increase eastward.
+    const glm::vec3 north{1.0f, 0.0f, 0.0f};
+    glm::vec3 up = north - glm::dot(north, forward) * forward;
+    if (glm::dot(up, up) < 1.0e-12f) {
+        const glm::vec3 worldUp{0.0f, 1.0f, 0.0f};
+        up = worldUp - glm::dot(worldUp, forward) * forward;
+    }
+    up = glm::normalize(up);
+    glm::vec3 right = glm::cross(forward, up);
+    if (glm::dot(right, right) < 1.0e-12f) right = {0.0f, 0.0f, 1.0f};
+    else right = glm::normalize(right);
+    return glm::normalize(glm::cross(right, forward));
+}
+
+void transferToComputeBarrier(vk::CommandBuffer command, VkBuffer buffer, VkDeviceSize size)
+{
+    VkBufferMemoryBarrier barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.buffer = buffer;
+    barrier.offset = 0;
+    barrier.size = size;
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                         0, nullptr, 1, &barrier, 0, nullptr);
+}
+
+void solveNadirMapping(float imageWidth, float imageHeight,
+                       float sceneWidth, float sceneDepth,
+                       const glm::vec2& leftUpper, const glm::vec2& leftBottom,
+                       const glm::vec2& rightUpper, const glm::vec2& rightBottom,
+                       Eigen::VectorXd& cx, Eigen::VectorXd& cy)
+{
+    // Scale factor is fixed at 1.0: preserve the real scene aspect ratio and
+    // fit it once into the nadir raster without the legacy 0.707 shrink.
+    // Pixel indices address sample centres.  The raster boundaries therefore
+    // lie at -0.5 and size-0.5.  Fitting scene corners to 0 and size-1 puts
+    // the outer samples exactly on triangle boundaries and creates a ring of
+    // false zero/no-hit pixels, most visibly as a nadir-angle dip.
+    const double rasterWidth = std::max(1.0, static_cast<double>(imageWidth));
+    const double rasterHeight = std::max(1.0, static_cast<double>(imageHeight));
+    const double groundPerPixel = std::max(
+        static_cast<double>(sceneDepth) / rasterWidth,
+        static_cast<double>(sceneWidth) / rasterHeight);
+    const double targetWidth = static_cast<double>(sceneDepth) / groundPerPixel
+                               * kOrthographicScale;
+    const double targetHeight = static_cast<double>(sceneWidth) / groundPerPixel
+                                * kOrthographicScale;
+    const double x0 = (rasterWidth - targetWidth) * 0.5 - 0.5;
+    const double x1 = x0 + targetWidth;
+    const double y0 = (rasterHeight - targetHeight) * 0.5 - 0.5;
+    const double y1 = y0 + targetHeight;
+
+    Eigen::MatrixXd design(4, 4);
+    design << x1, y0, x1 * y0, 1.0,
+              x1, y1, x1 * y1, 1.0,
+              x0, y0, x0 * y0, 1.0,
+              x0, y1, x0 * y1, 1.0;
+    Eigen::VectorXd sourceX(4), sourceY(4);
+    // Destination raster: top is north, right is east.
+    sourceX << rightUpper.x, rightBottom.x, leftUpper.x, leftBottom.x;
+    sourceY << rightUpper.y, rightBottom.y, leftUpper.y, leftBottom.y;
+    cx = design.jacobiSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(sourceX);
+    cy = design.jacobiSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(sourceY);
+}
+
+} // namespace
+
 
 LightSet Geometry::createLight(float sza, float saa, float direct, float diffuse,float solarT,float skyT)
 {
@@ -22,6 +106,7 @@ LightSet Geometry::createLight(float sza, float saa, float direct, float diffuse
     float r = SENSOR_HEIGHT;
     float rd = DEG2RAD;
     glm::vec3 origin = glm::vec3(0, 0, 0);
+    // Azimuth is clockwise from north: +X is north and +Z is east.
     glm::vec3 lightPos = glm::vec3(r * std::sin(sza * rd) * std::cos(saa * rd),
                                    r * std::cos(sza * rd),
                                    r * std::sin(sza * rd) * std::sin(saa * rd));
@@ -40,12 +125,6 @@ SensorMatrix Geometry::createSensor(glm::vec3 size, glm::vec3 origen, float vza,
     // auto & sceneio = modelio->m_sceneio;
 
     SensorMatrix sensor;
-    if (vza == 0.0 || vza == 45.0) vza = vza + ANGLE_COR;
-
-    if ((vaa - int((vaa +ANGLE_COR) / 45.0) * 45.0) < 0.05 && (vaa - int((vaa +ANGLE_COR) / 45.0) * 45.0) > 0)// vaa比45的倍数大一点
-        vaa = vaa + ANGLE_COR * 2;
-    if ((vaa - int((vaa +ANGLE_COR) / 45.0) * 45.0) > -0.05 && (vaa - int((vaa +ANGLE_COR) / 45.0) * 45.0) < 0)// vaa比45的倍数小一点
-        vaa = vaa - ANGLE_COR * 2;
 
     glm::vec3 semi = { size.x / 2.0, 0, size.z / 2.0 };
     glm::vec3 dimensionMin = -semi + glm::vec3{ origen.x, 0, origen.z };
@@ -62,7 +141,7 @@ SensorMatrix Geometry::createSensor(glm::vec3 size, glm::vec3 origen, float vza,
                                     r * std::sin(vza * rd) * std::sin(vaa * rd));
 
     CameraManip.setFov(SENSOR_FOV);
-    CameraManip.setLookat(sensorPos, origin, glm::vec3(0, 1, 0));
+    CameraManip.setLookat(sensorPos, origin, observationCameraUp(vza, vaa));
     float fovv = CameraManip.getFov();
 
 
@@ -82,8 +161,8 @@ SensorMatrix Geometry::createSensor(glm::vec3 size, glm::vec3 origen, float vza,
     proj[1][1] *= -1;
     sensor.viewInverse = glm::inverse(view);
     sensor.projInverse = glm::inverse(proj);
-    glm::vec3 eye, center,up;
-    CameraManip.getLookat(eye, center, up);                             // get sensor (eye) and center.
+    glm::vec3 eye, center, currentUp;
+    CameraManip.getLookat(eye, center, currentUp);                       // get sensor (eye) and center.
 
     float fov = CameraManip.getFov();
     sensor.focalDist = glm::length(center - eye);
@@ -101,7 +180,8 @@ SensorMatrix Geometry::createSensor(glm::vec3 size, glm::vec3 origen, float vza,
 }
 
 SensorMatrix Geometry::createSensor(glm::vec3 sensorPos_XZY, glm::vec3 center_XZY,
-                                    glm::vec3 sceneSize_XZY) {
+                                    glm::vec3 sceneSize_XZY, float fovDegrees,
+                                    glm::vec3 up) {
 
     // auto & sceneio = modelio->m_sceneio;
 
@@ -113,8 +193,8 @@ SensorMatrix Geometry::createSensor(glm::vec3 sensorPos_XZY, glm::vec3 center_XZ
     const float radius = std::max(0.01f, 0.5f * glm::length(sceneSize_XZY));
     const float requiredHalfHeight = radius / std::min(1.0f, aspect);
     const float fittedFov = glm::degrees(2.0f * std::atan(requiredHalfHeight / distance)) * 1.02f;
-    CameraManip.setFov(std::clamp(fittedFov, 0.1f, 120.0f));
-    CameraManip.setLookat(sensorPos_XZY, center_XZY, glm::vec3(0, 1, 0));
+    CameraManip.setFov(std::clamp(fovDegrees > 0.0f ? fovDegrees : fittedFov, 0.1f, 120.0f));
+    CameraManip.setLookat(sensorPos_XZY, center_XZY, up);
     float fovv = CameraManip.getFov();
 
 
@@ -133,8 +213,8 @@ SensorMatrix Geometry::createSensor(glm::vec3 sensorPos_XZY, glm::vec3 center_XZ
     proj[1][1] *= -1;
     sensor.viewInverse = glm::inverse(view);
     sensor.projInverse = glm::inverse(proj);
-    glm::vec3 eye, center,up;
-    CameraManip.getLookat(eye, center, up);                             // get sensor (eye) and center.
+    glm::vec3 eye, center, currentUp;
+    CameraManip.getLookat(eye, center, currentUp);                       // get sensor (eye) and center.
 
     float fov = CameraManip.getFov();
     sensor.focalDist = glm::length(center - eye);
@@ -154,7 +234,9 @@ SensorMatrix Geometry::createSensor(glm::vec3 sensorPos_XZY, glm::vec3 center_XZ
 void Geometry::configureSensor(const SensorXml& sensor, glm::vec3 sceneSize_XYZ,
                                float metresPerUnit) {
     const float scale = std::max(0.0001f, metresPerUnit);
+    m_sensorMetresPerUnit = scale;
     m_sensorProjection = sensor.projection;
+    m_sensorFov = std::clamp(sensor.sensorFov, 0.1f, 120.0f);
     m_sensorSceneSize_XZY = {sceneSize_XYZ.x / scale, sceneSize_XYZ.z / scale,
                              sceneSize_XYZ.y / scale};
     m_sensorPosition_XZY = {(sensor.position.x - sceneSize_XYZ.x * 0.5f) / scale,
@@ -164,11 +246,31 @@ void Geometry::configureSensor(const SensorXml& sensor, glm::vec3 sceneSize_XYZ,
 }
 
 SensorMatrix Geometry::createConfiguredSensor(glm::vec3 size_XZY, glm::vec3 origin_XZY,
-                                              float vza, float vaa, float ratio) {
+                                               float vza, float vaa, float ratio) {
     if (m_sensorProjection == Projection::PERSPECTIVE) {
-        return createSensor(m_sensorPosition_XZY, m_sensorTarget_XZY, m_sensorSceneSize_XZY);
+        return createPerspectiveSensor(m_sensorPosition_XZY, vza, vaa);
     }
     return createSensor(size_XZY, origin_XZY, vza, vaa, ratio);
+}
+
+SensorMatrix Geometry::createPerspectiveSensor(glm::vec3 position_XZY, float vza, float vaa) {
+    const float zenith = std::clamp(vza, 0.0f, 89.999f) * DEG2RAD;
+    const float azimuth = vaa * DEG2RAD;
+    const glm::vec3 cameraOut{
+        std::sin(zenith) * std::cos(azimuth),
+        std::cos(zenith),
+        std::sin(zenith) * std::sin(azimuth)};
+    const float lookDistance = std::max(1.0f, glm::length(m_sensorSceneSize_XZY));
+    return createSensor(position_XZY, position_XZY - cameraOut * lookDistance,
+                        m_sensorSceneSize_XZY, m_sensorFov,
+                        observationCameraUp(vza, vaa));
+}
+
+glm::vec3 Geometry::sensorWorldToXzy(glm::vec3 position_XYZ) const {
+    return {
+        position_XYZ.x / m_sensorMetresPerUnit - m_sensorSceneSize_XZY.x * 0.5f,
+        position_XYZ.z / m_sensorMetresPerUnit,
+        position_XYZ.y / m_sensorMetresPerUnit - m_sensorSceneSize_XZY.z * 0.5f};
 }
 
 
@@ -204,6 +306,11 @@ bool Geometry::createGeometry(std::shared_ptr<FileIO> &fileio, std::shared_ptr<R
     // Bands
     //---------------------------------------------------------
     modelio->waves = fileio->m_pRaytracingXml->sensorxml.waves;
+    modelio->isUAVTrave = fileio->m_pRaytracingXml->settingxml.isUAVtrave
+                          && !sensorxml.uavPoses.empty();
+    modelio->uavposes = sensorxml.uavPoses;
+    modelio->uavViewAzimuths = sensorxml.uavViewAzimuths;
+    modelio->n_pos = static_cast<int>(modelio->uavposes.size());
 
     //---------------------------------------------------------
     // LIGHT AND SENSOR INI with Angle 0 and Band 0
@@ -245,6 +352,15 @@ void Geometry::updateAngle(std::shared_ptr<RaytracingIO> &modelio, int kangle){
 
 }
 
+void Geometry::updateSensorPos(std::shared_ptr<RaytracingIO> &modelio, int kpos) {
+    if (kpos < 0 || kpos >= static_cast<int>(modelio->uavposes.size()) || modelio->angles.empty()) return;
+    Angle& angle = modelio->angles.front();
+    if (kpos < static_cast<int>(modelio->uavViewAzimuths.size())) angle.vaa = modelio->uavViewAzimuths[kpos];
+    SensorMatrix sensor = createPerspectiveSensor(sensorWorldToXzy(modelio->uavposes[kpos]),
+                                                  angle.vza, angle.vaa);
+    updateSensor(modelio, sensor);
+}
+
 void Geometry::updateSensor( std::shared_ptr<RaytracingIO> &modelio, SensorMatrix &sensor){
 
 
@@ -255,6 +371,7 @@ void Geometry::updateSensor( std::shared_ptr<RaytracingIO> &modelio, SensorMatri
     nvvk::CommandPool cmdBufGet(m_device, m_queueIndex);
     vk::CommandBuffer cmdBuf = cmdBufGet.createCommandBuffer();
     vkCmdUpdateBuffer(cmdBuf, (*m_pBufferSensor).buffer, 0, sizeof(SensorMatrix), &sensor);
+    transferToComputeBarrier(cmdBuf, (*m_pBufferSensor).buffer, sizeof(SensorMatrix));
     cmdBufGet.submitAndWait(cmdBuf);
 }
 
@@ -268,6 +385,7 @@ void Geometry::updateLight(std::shared_ptr<RaytracingIO> &modelio, LightSet &lig
     nvvk::CommandPool cmdBufGet(m_device, m_queueIndex);
     vk::CommandBuffer cmdBuf = cmdBufGet.createCommandBuffer();
     vkCmdUpdateBuffer(cmdBuf, (*m_pBufferLight).buffer, 0, sizeof(LightSet), &light);
+    transferToComputeBarrier(cmdBuf, (*m_pBufferLight).buffer, sizeof(LightSet));
     cmdBufGet.submitAndWait(cmdBuf);
 }
 
@@ -294,12 +412,11 @@ void Geometry::orthcorrect(std::shared_ptr<RaytracingIO> &modelio,float vza, flo
 
 
     //SensorMatrix sensor;
-    if (vza == 0.0 || vza == 45.0) vza = vza + ANGLE_COR;
     glm::vec3 origin = glm::vec3(0, 0, 0);
     glm::vec3 sensorPos = glm::vec3(r * std::sin(vza * rd) * std::cos(vaa * rd),
                                     r * std::cos(vza * rd), r * std::sin(vza * rd) * std::sin(vaa * rd));
     CameraManip.setFov(SENSOR_FOV);
-    CameraManip.setLookat(sensorPos, origin, glm::vec3(0, 1, 0));
+    CameraManip.setLookat(sensorPos, origin, observationCameraUp(vza, vaa));
     float fovv = CameraManip.getFov();
     //CameraManip.fit(dimensionMin * ratio / scale, dimensionMax * ratio / scale); // the sensor position height is changed.
     CameraManip.fit(dimensionMin * ratio, dimensionMax * ratio); // the sensor position height is changed.
@@ -313,10 +430,10 @@ void Geometry::orthcorrect(std::shared_ptr<RaytracingIO> &modelio,float vza, flo
     proj[1][1] *= -1;
 
     glm::vec4 leftupper,leftbottom,rightupper,rightbottom;
-    leftupper = glm::vec4(dimensionMin.x,0,dimensionMax.z,1);
+    leftupper = glm::vec4(dimensionMax.x,0,dimensionMin.z,1);
     leftbottom = glm::vec4(dimensionMin.x,0,dimensionMin.z,1);
     rightupper = glm::vec4(dimensionMax.x,0,dimensionMax.z,1);
-    rightbottom = glm::vec4(dimensionMax.x,0,dimensionMin.z,1);
+    rightbottom = glm::vec4(dimensionMin.x,0,dimensionMax.z,1);
 
     glm::vec4 lu,lb,ru,rb;
     glm::vec2 lun,lbn,run,rbn;
@@ -342,65 +459,10 @@ void Geometry::orthcorrect(std::shared_ptr<RaytracingIO> &modelio,float vza, flo
     rbn.y = (1.0f + rb.y)/2.0*height;
 
 
-    float vza0 = 0;
-    float vaa0 = 0;
-    ratio = 0.707;
-    if (vza0 == 0.0 || vza0 == 45.0) vza0 = vza0 + ANGLE_COR;
-    glm::vec3 origin0 = glm::vec3(0, 0, 0);
-    glm::vec3 sensorPos0 = glm::vec3(r * std::sin(vza0 * rd) * std::cos(vaa0 * rd),
-                                     r * std::cos(vza0 * rd), r * std::sin(vza0 * rd) * std::sin(vaa0 * rd));
-    CameraManip.setFov(SENSOR_FOV);
-    CameraManip.setLookat(sensorPos0, origin0, glm::vec3(0, 1, 0));
-    float fovv0 = CameraManip.getFov();
-    //CameraManip.fit(dimensionMin * ratio / scale, dimensionMax * ratio / scale); // the sensor position height is changed.
-    CameraManip.fit(dimensionMin * ratio, dimensionMax * ratio); // the sensor position height is changed.
-
-    glm::mat4 view0 = CameraManip.getMatrix();
-    // nvmath::mat4f projj0 = nvmath::perspectiveVK(CameraManip.getFov(), aspectRatio, 0.0001f, 10000.0f);
-    //glm::mat4 proj = glm::perspective(CameraManip.getFov(), aspectRatio, 0.0001f, 10000.0f);
-    glm::mat4 proj0 = glm::perspectiveRH_ZO(glm::radians(CameraManip.getFov()), aspectRatio, 0.1f, 1000.0f);
-    proj0[1][1] *= -1;
-    glm::vec2 lu0,lb0,ru0,rb0;
-    lu = proj0 * view0 * leftupper;
-    lu = lu/lu.w;
-    lu0.x = (lu.x+1.0f)/2.0*width;
-    lu0.y = (1.0f + lu.y)/2.0*height;
-
-    lb = proj0 * view0 * leftbottom;
-    lb = lb/lb.w;
-    lb0.x = (lb.x+1.0f)/2.0*width;
-    lb0.y = (1.0f + lb.y)/2.0*height;
-
-    ru = proj0 * view0 * rightupper;
-    ru = ru/ru.w;
-    ru0.x = (ru.x+1.0f)/2.0*width;
-    ru0.y = (1.0f + ru.y)/2.0*height;
-
-
-    rb = proj0 * view0 * rightbottom;
-    rb = rb/rb.w;
-    rb0.x = (rb.x+1.0f)/2.0*width;
-    rb0.y = (1.0f + rb.y)/2.0*height;
-
-
-
-
-    Eigen::VectorXd xx(4),yy(4),xx0(4),yy0(4);
-    xx0 << rb0.x,ru0.x,lb0.x,lu0.x;
-    yy0 << rb0.y,ru0.y,lb0.y,lu0.y;
-    xx << rbn.x,run.x,lbn.x,lun.x;
-    yy << rbn.y,run.y,lbn.y,lun.y;
-    Eigen::MatrixXd ww(4,4);
-    ww << rb0.x, rb0.y, rb0.x*rb0.y,1,
-            ru0.x, ru0.y, ru0.x*ru0.y,1,
-            lb0.x, lb0.y, lb0.x*lb0.y,1,
-            lu0.x, lu0.y, lu0.x*lu0.y,1;
-
-    cx = ww.jacobiSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(xx);
-    cy = ww.jacobiSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(yy);
-
-
-    int aa = 0;
+    solveNadirMapping(width, height,
+                      dimensionMax.x - dimensionMin.x,
+                      dimensionMax.z - dimensionMin.z,
+                      lun, lbn, run, rbn, cx, cy);
 }
 
 
@@ -439,6 +501,11 @@ bool Geometry::createGeometry(std::shared_ptr<FileIO> &fileio, std::shared_ptr<V
     // Bands
     //---------------------------------------------------------
     modelio->waves = fileio->m_pVoxelebXml->sensorxml.waves;
+    modelio->isUAVTrave = fileio->m_pVoxelebXml->settingxml.isUAVtrave
+                          && !sensorxml.uavPoses.empty();
+    modelio->uavposes = sensorxml.uavPoses;
+    modelio->uavViewAzimuths = sensorxml.uavViewAzimuths;
+    modelio->n_pos = static_cast<int>(modelio->uavposes.size());
 
     //---------------------------------------------------------
     // LIGHT AND SENSOR INI with Angle 0 and Band 0
@@ -481,6 +548,15 @@ void Geometry::updateAngle(std::shared_ptr<VoxelebIO> &modelio, int kangle){
 
 }
 
+void Geometry::updateSensorPos(std::shared_ptr<VoxelebIO> &modelio, int kpos) {
+    if (kpos < 0 || kpos >= static_cast<int>(modelio->uavposes.size()) || modelio->angles.empty()) return;
+    Angle& angle = modelio->angles.front();
+    if (kpos < static_cast<int>(modelio->uavViewAzimuths.size())) angle.vaa = modelio->uavViewAzimuths[kpos];
+    SensorMatrix sensor = createPerspectiveSensor(sensorWorldToXzy(modelio->uavposes[kpos]),
+                                                  angle.vza, angle.vaa);
+    updateSensor(modelio, sensor);
+}
+
 void Geometry::updateSensor( std::shared_ptr<VoxelebIO> &modelio, SensorMatrix &sensor){
 
 
@@ -491,6 +567,7 @@ void Geometry::updateSensor( std::shared_ptr<VoxelebIO> &modelio, SensorMatrix &
     nvvk::CommandPool cmdBufGet(m_device, m_queueIndex);
     vk::CommandBuffer cmdBuf = cmdBufGet.createCommandBuffer();
     vkCmdUpdateBuffer(cmdBuf, (*m_pBufferSensor).buffer, 0, sizeof(SensorMatrix), &sensor);
+    transferToComputeBarrier(cmdBuf, (*m_pBufferSensor).buffer, sizeof(SensorMatrix));
     cmdBufGet.submitAndWait(cmdBuf);
 }
 
@@ -504,6 +581,7 @@ void Geometry::updateLight(std::shared_ptr<VoxelebIO> &modelio, LightSet &light)
     nvvk::CommandPool cmdBufGet(m_device, m_queueIndex);
     vk::CommandBuffer cmdBuf = cmdBufGet.createCommandBuffer();
     vkCmdUpdateBuffer(cmdBuf, (*m_pBufferLight).buffer, 0, sizeof(LightSet), &light);
+    transferToComputeBarrier(cmdBuf, (*m_pBufferLight).buffer, sizeof(LightSet));
     cmdBufGet.submitAndWait(cmdBuf);
 }
 
@@ -526,8 +604,8 @@ void Geometry::updateSolarAngle(std::shared_ptr<VoxelebIO> &modelio, Angle &angl
     data.minute = m;
     data.second = 0;
     data.timezone = 8;
-    data.pressure = 800;
-    data.temperature = 25;
+    data.pressure = std::max(100.0f, modelio->meteo.p);
+    data.temperature = modelio->meteo.Ta;
     data.delta_t = Utils::calculateDeltaT(data.year, data.month);
     data.longitude = modelio->lon;
     data.latitude = modelio->lat;
@@ -562,13 +640,12 @@ void Geometry::orthcorrect(std::shared_ptr<VoxelebIO> &modelio,float vza, float 
 
 
     //SensorMatrix sensor;
-    if (vza == 0.0 || vza == 45.0) vza = vza + ANGLE_COR;
     glm::vec3 origin = glm::vec3(0, 0, 0);
     glm::vec3 sensorPos = glm::vec3(r * std::sin(vza * rd) * std::cos(vaa * rd),
                                     r * std::cos(vza * rd),
                                     r * std::sin(vza * rd) * std::sin(vaa * rd));
     CameraManip.setFov(SENSOR_FOV);
-    CameraManip.setLookat(sensorPos, origin, glm::vec3(0, 1, 0));
+    CameraManip.setLookat(sensorPos, origin, observationCameraUp(vza, vaa));
     float fovv = CameraManip.getFov();
     //CameraManip.fit(dimensionMin * ratio / scale, dimensionMax * ratio / scale); // the sensor position height is changed.
     CameraManip.fit(dimensionMin * ratio, dimensionMax * ratio); // the sensor position height is changed.
@@ -582,10 +659,10 @@ void Geometry::orthcorrect(std::shared_ptr<VoxelebIO> &modelio,float vza, float 
     proj[1][1] *= -1;
 
     glm::vec4 leftupper,leftbottom,rightupper,rightbottom;
-    leftupper = glm::vec4(dimensionMin.x,0,dimensionMax.z,1);
+    leftupper = glm::vec4(dimensionMax.x,0,dimensionMin.z,1);
     leftbottom = glm::vec4(dimensionMin.x,0,dimensionMin.z,1);
     rightupper = glm::vec4(dimensionMax.x,0,dimensionMax.z,1);
-    rightbottom = glm::vec4(dimensionMax.x,0,dimensionMin.z,1);
+    rightbottom = glm::vec4(dimensionMin.x,0,dimensionMax.z,1);
 
     glm::vec4 lu,lb,ru,rb;
     glm::vec2 lun,lbn,run,rbn;
@@ -611,66 +688,10 @@ void Geometry::orthcorrect(std::shared_ptr<VoxelebIO> &modelio,float vza, float 
     rbn.y = (1.0f + rb.y)/2.0*height;
 
 
-    float vza0 = 0;
-    float vaa0 = 0;
-    ratio = 0.707;
-    if (vza0 == 0.0 || vza0 == 45.0) vza0 = vza0 + ANGLE_COR;
-    glm::vec3 origin0 = glm::vec3(0, 0, 0);
-    glm::vec3 sensorPos0 = glm::vec3(r * std::sin(vza0 * rd) * std::cos(vaa0 * rd),
-                                     r * std::cos(vza0 * rd),
-                                     r * std::sin(vza0 * rd) * std::sin(vaa0 * rd));
-    CameraManip.setFov(SENSOR_FOV);
-    CameraManip.setLookat(sensorPos0, origin0, glm::vec3(0, 1, 0));
-    float fovv0 = CameraManip.getFov();
-    //CameraManip.fit(dimensionMin * ratio / scale, dimensionMax * ratio / scale); // the sensor position height is changed.
-    CameraManip.fit(dimensionMin * ratio, dimensionMax * ratio); // the sensor position height is changed.
-
-    glm::mat4 view0 = CameraManip.getMatrix();
-    // nvmath::mat4f projj0 = nvmath::perspectiveVK(CameraManip.getFov(), aspectRatio, 0.0001f, 10000.0f);
-    //glm::mat4 proj = glm::perspective(CameraManip.getFov(), aspectRatio, 0.0001f, 10000.0f);
-    glm::mat4 proj0 = glm::perspectiveRH_ZO(glm::radians(CameraManip.getFov()), aspectRatio, 0.1f, 1000.0f);
-    proj0[1][1] *= -1;
-    glm::vec2 lu0,lb0,ru0,rb0;
-    lu = proj0 * view0 * leftupper;
-    lu = lu/lu.w;
-    lu0.x = (lu.x+1.0f)/2.0*width;
-    lu0.y = (1.0f + lu.y)/2.0*height;
-
-    lb = proj0 * view0 * leftbottom;
-    lb = lb/lb.w;
-    lb0.x = (lb.x+1.0f)/2.0*width;
-    lb0.y = (1.0f + lb.y)/2.0*height;
-
-    ru = proj0 * view0 * rightupper;
-    ru = ru/ru.w;
-    ru0.x = (ru.x+1.0f)/2.0*width;
-    ru0.y = (1.0f + ru.y)/2.0*height;
-
-
-    rb = proj0 * view0 * rightbottom;
-    rb = rb/rb.w;
-    rb0.x = (rb.x+1.0f)/2.0*width;
-    rb0.y = (1.0f + rb.y)/2.0*height;
-
-
-
-
-    Eigen::VectorXd xx(4),yy(4),xx0(4),yy0(4);
-    xx0 << rb0.x,ru0.x,lb0.x,lu0.x;
-    yy0 << rb0.y,ru0.y,lb0.y,lu0.y;
-    xx << rbn.x,run.x,lbn.x,lun.x;
-    yy << rbn.y,run.y,lbn.y,lun.y;
-    Eigen::MatrixXd ww(4,4);
-    ww << rb0.x, rb0.y, rb0.x*rb0.y,1,
-            ru0.x, ru0.y, ru0.x*ru0.y,1,
-            lb0.x, lb0.y, lb0.x*lb0.y,1,
-            lu0.x, lu0.y, lu0.x*lu0.y,1;
-
-    cx = ww.jacobiSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(xx);
-    cy = ww.jacobiSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(yy);
-
-
-    int aa = 0;
+    solveNadirMapping(width, height,
+                      dimensionMax.x - dimensionMin.x,
+                      dimensionMax.z - dimensionMin.z,
+                      lun, lbn, run, rbn, cx, cy);
 }
 
 
@@ -717,9 +738,11 @@ bool Geometry::createGeometry(std::shared_ptr<FileIO> &fileio, std::shared_ptr<V
     sza = modelio->angles[0].sza;
     saa = modelio->angles[0].saa;
 
-    modelio->isUAVTrave = fileio->m_pVoxelrtXml->settingxml.isUAVtrave;
+    modelio->isUAVTrave = fileio->m_pVoxelrtXml->settingxml.isUAVtrave
+                          && !fileio->m_pVoxelrtXml->sensorxml.uavPoses.empty();
     modelio->n_pos = fileio->m_pVoxelrtXml->sensorxml.uavPoses.size();
     modelio->uavposes = fileio->m_pVoxelrtXml->sensorxml.uavPoses;
+    modelio->uavViewAzimuths = fileio->m_pVoxelrtXml->sensorxml.uavViewAzimuths;
 
 //    if(modelio->isUAVTrave == true){
 //        modelio->sensor = createSensor(glm::vec3(0,10,1),glm::vec3(0,0,0));}
@@ -765,26 +788,11 @@ void Geometry::updateAngle(std::shared_ptr<VoxelrtIO> &modelio, int kangle){
 }
 
 void Geometry::updateSensorPos(std::shared_ptr<VoxelrtIO> &modelio, int kpos){
-
-    glm::vec3 sensorpos = modelio->uavposes[kpos];
-    Angle angle = modelio->angles[0];
-//    std::cout << "Angle Info:"
-//              << "    vza_" << std::to_string(angles.x) << "    vaa_" << std::to_string(angles.y)
-//              << "    sza_" << std::to_string(angles.z) << "    saa_" << std::to_string(angles.w) << std::endl;
-
-    float ratio = 1.0;
-    //ratio = 0.707;
-    sensorpos = sensorpos/modelio->stepsize_surface;
-    SensorMatrix sensorMatrix;
-
-    float r = 10;
-    float rd = PI/180.0;
-
-    glm::vec3 sensortarget = glm::vec3(r * std::sin(angle.vza * rd) * std::cos(angle.vaa * rd),
-                                    r * std::cos(angle.vza * rd), r * std::sin(angle.vza * rd) * std::sin(angle.vaa * rd));
-
-
-    sensorMatrix = createSensor(sensorpos, sensorpos-sensortarget, m_sensorSceneSize_XZY);
+    if (kpos < 0 || kpos >= static_cast<int>(modelio->uavposes.size()) || modelio->angles.empty()) return;
+    Angle& angle = modelio->angles.front();
+    if (kpos < static_cast<int>(modelio->uavViewAzimuths.size())) angle.vaa = modelio->uavViewAzimuths[kpos];
+    SensorMatrix sensorMatrix = createPerspectiveSensor(sensorWorldToXzy(modelio->uavposes[kpos]),
+                                                        angle.vza, angle.vaa);
 
     updateSensor(modelio, sensorMatrix);
 
@@ -840,13 +848,12 @@ void Geometry::orthcorrect(std::shared_ptr<VoxelrtIO> &modelio,float vza, float 
 
 
     //SensorMatrix sensor;
-    if (vza == 0.0 || vza == 45.0) vza = vza + ANGLE_COR;
     glm::vec3 origin = glm::vec3(0, 0, 0);
     glm::vec3 sensorPos = glm::vec3(r * std::sin(vza * rd) * std::cos(vaa * rd),
                                     r * std::cos(vza * rd),
                                     r * std::sin(vza * rd) * std::sin(vaa * rd));
     CameraManip.setFov(SENSOR_FOV);
-    CameraManip.setLookat(sensorPos, origin, glm::vec3(0, 1, 0));
+    CameraManip.setLookat(sensorPos, origin, observationCameraUp(vza, vaa));
     float fovv = CameraManip.getFov();
     //CameraManip.fit(dimensionMin * ratio / scale, dimensionMax * ratio / scale); // the sensor position height is changed.
     CameraManip.fit(dimensionMin * ratio, dimensionMax * ratio); // the sensor position height is changed.
@@ -860,10 +867,10 @@ void Geometry::orthcorrect(std::shared_ptr<VoxelrtIO> &modelio,float vza, float 
     proj[1][1] *= -1;
 
     glm::vec4 leftupper,leftbottom,rightupper,rightbottom;
-    leftupper = glm::vec4(dimensionMin.x,0,dimensionMax.z,1);
+    leftupper = glm::vec4(dimensionMax.x,0,dimensionMin.z,1);
     leftbottom = glm::vec4(dimensionMin.x,0,dimensionMin.z,1);
     rightupper = glm::vec4(dimensionMax.x,0,dimensionMax.z,1);
-    rightbottom = glm::vec4(dimensionMax.x,0,dimensionMin.z,1);
+    rightbottom = glm::vec4(dimensionMin.x,0,dimensionMax.z,1);
 
     glm::vec4 lu,lb,ru,rb;
     glm::vec2 lun,lbn,run,rbn;
@@ -889,66 +896,8 @@ void Geometry::orthcorrect(std::shared_ptr<VoxelrtIO> &modelio,float vza, float 
     rbn.y = (1.0f + rb.y)/2.0*height;
 
 
-    float vza0 = 0;
-    float vaa0 = 0;
-    ratio = 0.707;
-    if (vza0 == 0.0 || vza0 == 45.0) vza0 = vza0 + ANGLE_COR;
-    glm::vec3 origin0 = glm::vec3(0, 0, 0);
-    glm::vec3 sensorPos0 = glm::vec3(r * std::sin(vza0 * rd) * std::cos(vaa0 * rd),
-                                     r * std::cos(vza0 * rd),
-                                     r * std::sin(vza0 * rd) * std::sin(vaa0 * rd));
-    CameraManip.setFov(SENSOR_FOV);
-    CameraManip.setLookat(sensorPos0, origin0, glm::vec3(0, 1, 0));
-    float fovv0 = CameraManip.getFov();
-    //CameraManip.fit(dimensionMin * ratio / scale, dimensionMax * ratio / scale); // the sensor position height is changed.
-    CameraManip.fit(dimensionMin * ratio, dimensionMax * ratio); // the sensor position height is changed.
-
-    glm::mat4 view0 = CameraManip.getMatrix();
-    // nvmath::mat4f projj0 = nvmath::perspectiveVK(CameraManip.getFov(), aspectRatio, 0.0001f, 10000.0f);
-    //glm::mat4 proj = glm::perspective(CameraManip.getFov(), aspectRatio, 0.0001f, 10000.0f);
-    glm::mat4 proj0 = glm::perspectiveRH_ZO(glm::radians(CameraManip.getFov()), aspectRatio, 0.1f, 1000.0f);
-    proj0[1][1] *= -1;
-    glm::vec2 lu0,lb0,ru0,rb0;
-    lu = proj0 * view0 * leftupper;
-    lu = lu/lu.w;
-    lu0.x = (lu.x+1.0f)/2.0*width;
-    lu0.y = (1.0f + lu.y)/2.0*height;
-
-    lb = proj0 * view0 * leftbottom;
-    lb = lb/lb.w;
-    lb0.x = (lb.x+1.0f)/2.0*width;
-    lb0.y = (1.0f + lb.y)/2.0*height;
-
-    ru = proj0 * view0 * rightupper;
-    ru = ru/ru.w;
-    ru0.x = (ru.x+1.0f)/2.0*width;
-    ru0.y = (1.0f + ru.y)/2.0*height;
-
-
-    rb = proj0 * view0 * rightbottom;
-    rb = rb/rb.w;
-    rb0.x = (rb.x+1.0f)/2.0*width;
-    rb0.y = (1.0f + rb.y)/2.0*height;
-
-
-
-
-    Eigen::VectorXd xx(4),yy(4),xx0(4),yy0(4);
-    xx0 << rb0.x,ru0.x,lb0.x,lu0.x;
-    yy0 << rb0.y,ru0.y,lb0.y,lu0.y;
-    xx << rbn.x,run.x,lbn.x,lun.x;
-    yy << rbn.y,run.y,lbn.y,lun.y;
-    Eigen::MatrixXd ww(4,4);
-    ww << rb0.x, rb0.y, rb0.x*rb0.y,1,
-            ru0.x, ru0.y, ru0.x*ru0.y,1,
-            lb0.x, lb0.y, lb0.x*lb0.y,1,
-            lu0.x, lu0.y, lu0.x*lu0.y,1;
-
-    cx = ww.jacobiSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(xx);
-    cy = ww.jacobiSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(yy);
-
-
-    int aa = 0;
+    solveNadirMapping(width, height,
+                      dimensionMax.x - dimensionMin.x,
+                      dimensionMax.z - dimensionMin.z,
+                      lun, lbn, run, rbn, cx, cy);
 }
-
-

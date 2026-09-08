@@ -15,6 +15,8 @@ public:
 //    bool run(std::shared_ptr<VoxelrtIO> &VoxelrtIO);
 
     bool runRT(std::shared_ptr<VoxelrtIO> &modelio);
+    bool runRTAccelerated(std::shared_ptr<VoxelrtIO> &modelio,
+                          int spectralBatchSize = 4);
 
 //    void submit(std::shared_ptr<VoxelrtIO> &VoxelrtIO,glm::ivec3 dispatchSize,
 //                VkDescriptorSet descSet, VkPipelineLayout pipelineLayout,

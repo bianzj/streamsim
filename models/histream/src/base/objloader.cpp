@@ -7,6 +7,8 @@
 #include "objloader.h"
 #include "nvh/nvprint.hpp"
 #include <opencv2/opencv.hpp>
+#include <algorithm>
+#include <cmath>
 //#include "Interpolate.hpp"
 
 
@@ -84,7 +86,8 @@ void ObjLoader::loadModel(const std::string& filename)
             VertexAttribute    vertex = {};
 
             const float* vp = &attrib.vertices[3 * index.vertex_index];
-            vertex.pos = { (-1.0) * (*(vp + 0)), *(vp + 1), *(vp + 2) * (-1) };
+            // Unified right-handed convention: +X north, +Y up, +Z east.
+            vertex.pos = { *(vp + 0), *(vp + 1), *(vp + 2) };
 
             if (minElevation > vertex.pos.y) minElevation = vertex.pos.y;
 
@@ -147,7 +150,8 @@ void ObjLoader::loadModel(const std::string& filename)
 /// </summary>
 /// <param name="filename"></param>
 /// <param name="meshname"></param>
-void ObjLoader::loadMesh(const std::string& filename, const std::string& meshname)
+void ObjLoader::loadMesh(const std::string& filename, const std::string& meshname,
+                         bool exactMatch)
 {
     clearCurrentInfo();
 
@@ -168,10 +172,13 @@ void ObjLoader::loadMesh(const std::string& filename, const std::string& meshnam
             break;
         }
     }
-    if (!selectedShape && !shapes.empty()) {
+    if (!selectedShape && !shapes.empty() && !exactMatch) {
         selectedShape = &shapes.front();
         std::cerr << "Mesh ' " << meshname << "' not found in " << filename
                   << ", using ' " << selectedShape->name << "'\n";
+    }
+    if (!selectedShape && exactMatch) {
+        std::cerr << "Mesh '" << meshname << "' not found in " << filename << '\n';
     }
 
     for (const auto& shape : shapes)
@@ -193,7 +200,8 @@ void ObjLoader::loadMesh(const std::string& filename, const std::string& meshnam
             VertexAttribute    vertex = {};
 
             const float* vp = &attrib.vertices[3 * index.vertex_index];
-            vertex.pos = { (-1.0) * (*(vp + 0)), *(vp + 1), *(vp + 2) * (-1) };
+            // Keep mesh-specific loading identical to whole-OBJ loading.
+            vertex.pos = { *(vp + 0), *(vp + 1), *(vp + 2) };
 
             /*if (!attrib.normals.empty() && index.normal_index >= 0)
             {
@@ -834,11 +842,9 @@ float ObjLoader::getHeightAt(float worldX, float worldZ)
         return minElevation - centerElevation;
     }
 
-    // 2. 映射到图像像素坐标 (浮点数)
-    // Mat.cols 对应 worldSize.x
-    // Mat.rows 对应 worldSize.y
-    float imgX = (localX / m_worldSize.x) * (m_heightmap.cols - 1);
-    float imgY = (localZ / m_worldSize.y) * (m_heightmap.rows - 1);
+    // GeoTIFF columns grow eastward (+Z); row zero is north (+X).
+    float imgX = (localZ / m_worldSize.y) * (m_heightmap.cols - 1);
+    float imgY = (1.0f - localX / m_worldSize.x) * (m_heightmap.rows - 1);
 
     // 3. 双线性插值 (Bilinear Interpolation)
     int x0 = (int)std::floor(imgX);
@@ -868,7 +874,9 @@ float ObjLoader::getHeightAt(float worldX, float worldZ)
 }
 
 
-void ObjLoader::creatBackgroundFromDEM(const std::string& filename, nvmath::vec3f sceneSize)
+void ObjLoader::creatBackgroundFromDEM(const std::string& filename,
+                                        nvmath::vec3f sceneSize,
+                                        float targetStep)
 {
     clearCurrentInfo();
 
@@ -894,21 +902,25 @@ void ObjLoader::creatBackgroundFromDEM(const std::string& filename, nvmath::vec3
     // 注意：GDAL 是一维数组，构建 Mat 时通常是 (Rows=Y, Cols=X)
     cv::Mat rawDem(nImgSizeY, nImgSizeX, CV_32F, pafScanline);
 
-    // 2. 预处理：缩放与中心化
-    // 你之前的逻辑是 step = 0.1，意味着放大 10 倍
-    float densityScale = 10.0f;
-    int newCols = nImgSizeX * densityScale; // 对应 X 轴
-    int newRows = nImgSizeY * densityScale; // 对应 Z (或 Y) 轴
+    // Resample the complete DEM extent onto the configured scene extent.
+    // The source raster dimensions/georeferenced footprint do not crop or
+    // enlarge the scene: X maps to sceneSize.x and Y maps to sceneSize.y.
+    const float requestedStep = std::max(targetStep, 0.01f);
+    const float cappedStep = std::max(
+        requestedStep,
+        std::max(sceneSize.x, sceneSize.y) / 2048.0f);
+    const int newCols = std::max(
+        2, static_cast<int>(std::ceil(sceneSize.x / cappedStep)) + 1);
+    const int newRows = std::max(
+        2, static_cast<int>(std::ceil(sceneSize.y / cappedStep)) + 1);
+    cv::resize(rawDem, m_heightmap, cv::Size(newCols, newRows),
+               0, 0, cv::INTER_LINEAR);
 
-    // 这一步直接得到高分辨率的 DEM，避免了后面写复杂的插值循环
-    cv::resize(rawDem, m_heightmap, cv::Size(newCols, newRows), 0, 0, cv::INTER_CUBIC);
-
-    // 计算平均高度 (均值)
-    cv::Scalar meanScalar = cv::mean(m_heightmap);
-    float averageElevation = (float)meanScalar[0];
-
-    // 将高度图整体减去平均值 (这样后续查询和生成都已经是中心化后的数据了)
-    m_heightmap = m_heightmap - averageElevation;
+    // 以 DEM 最低点作为场景零高程，确保地表和后续导入对象使用同一基准。
+    double minimumElevation = 0.0;
+    cv::minMaxLoc(m_heightmap, &minimumElevation, nullptr);
+    m_heightmap = m_heightmap - static_cast<float>(minimumElevation);
+    centerElevation = 0.0f;
 
     // 保存场景尺寸供查询函数使用
     m_sceneSizeCache = sceneSize;
@@ -932,9 +944,9 @@ void ObjLoader::creatBackgroundFromDEM(const std::string& filename, nvmath::vec3
             float u = (float)c / (float)(newCols - 1);
             float v = (float)r / (float)(newRows - 1);
 
-            // 映射到场景空间 [-Size/2, Size/2]
-            float worldX = (u - 0.5f) * sceneSize.x;
-            float worldZ = (v - 0.5f) * sceneSize.y;
+            // GeoTIFF row zero maps to north (+X); columns map east (+Z).
+            float worldX = (0.5f - v) * sceneSize.x;
+            float worldZ = (u - 0.5f) * sceneSize.y;
 
             // 获取高度 (已经是减去均值后的了)
             float worldY = m_heightmap.at<float>(r, c);
@@ -999,14 +1011,16 @@ void ObjLoader::interpolateZValues(nvmath::vec3f sceneSize, float* tempx, float*
 
         // 2. 场景范围检查 (改为检查 0 到 Size)
         if (wx < 0.0f || wx > sceneSize.x || wy < 0.0f || wy > sceneSize.y) {
-            tempz[i] = 0.0f; // 超出范围默认给 0
+            // 超出 DEM 范围时保留用户设置的离地高度。
             continue;
         }
 
         // 3. 映射：世界坐标 [0, Size] -> 归一化 UV [0.0, 1.0]
         // 不需要 +0.5 了，因为输入本身就是从 0 开始的
-        float u = wx / sceneSize.x;
-        float v = wy / sceneSize.y;
+        // Position-file columns are north and east respectively; the engine
+        // axes are +X north, +Y up and +Z east.
+        float u = wy / sceneSize.y;
+        float v = 1.0f - wx / sceneSize.x;
 
         // 转换为图像上的浮点坐标 [0, width-1]
         float imgX = u * (width - 1);
@@ -1048,8 +1062,7 @@ void ObjLoader::interpolateZValues(nvmath::vec3f sceneSize, float* tempx, float*
         // Y 方向
         float zInterp = zTop * (1.0f - dy) + zBot * dy;
 
-        tempz[i] = zInterp;
+        // 文件中的 Z 是相对地表的离地高度；DEM 只提供该位置的地表高程。
+        tempz[i] += zInterp;
     }
 }
-
-

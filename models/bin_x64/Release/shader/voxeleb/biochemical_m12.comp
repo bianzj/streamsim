@@ -60,6 +60,7 @@ void main()
                             floor(setting.voxelSize.z/2.0 + 0.5)); 
    uint spectralId,canopyId,bioId,typeId;
    uint bufferId0 = uint(gl_GlobalInvocationID.x);
+   if(bufferId0 >= uint(setting.voxelCount)) return;
    uint instanceId0 = voxelLinks[bufferId0].instanceId;
    ivec3 voxelId0 = voxelLinks[bufferId0].voxelId;
    float scale = setting.scale;
@@ -127,7 +128,8 @@ void main()
 
 			O = ubom.meteo.Oa;
 			O = O * p * 1e-8;
-			Q = voxelPnets[bufferId0].directPnet;
+			Q = voxelPnets[bufferId0].diffusePnet;
+			if(kt == 0) Q += voxelPnets[bufferId0].directPnet;
 
 			SCOOP = 2862;
 			Rdopt = Rdparam * Vcmo;

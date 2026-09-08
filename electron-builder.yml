@@ -1,0 +1,48 @@
+appId: cn.streamsim.desktop
+productName: StreamSim
+asar: true
+electronLanguages:
+  - zh-CN
+  - en-US
+directories:
+  output: release
+files:
+  - desktop/**/*
+  - server.mjs
+  - src/renderer/src/project-schema.js
+  - package.json
+extraResources:
+  - from: gui
+    to: gui
+  - from: .packaging/assets
+    to: assets
+  - from: models/bin_x64/Release
+    to: engine
+    filter:
+      - "**/*"
+      - "!**/*.pdb"
+      - "!**/*.lib"
+      - "!.analysis{,/**/*}"
+      - "!log_nvprosample.txt"
+  - from: docs
+    to: docs
+  - from: design/branding/streamsim-s-logo.ico
+    to: branding/streamsim.ico
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: StreamSim-Setup-${version}-x64-slim.${ext}
+  icon: design/branding/streamsim-s-logo.ico
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: StreamSim
+  deleteAppDataOnUninstall: false
+  installerIcon: design/branding/streamsim-s-logo.ico
+  uninstallerIcon: design/branding/streamsim-s-logo.ico
+  installerHeaderIcon: design/branding/streamsim-s-logo.ico

@@ -111,7 +111,8 @@ function bsm(coeff, p) {
   const B = p.BSMBrightness
   const lat = p.BSMlat
   const lon = p.BSMlon
-  const SMC = p.SMC
+  const rawSMC = Number(p.SMC)
+  const SMC = Math.max(0, Math.min(1, rawSMC > 1 ? rawSMC / 100 : rawSMC))
   const SMCp = 0.25
   const film = 0.015
   const rd = Math.PI / 180
@@ -163,7 +164,8 @@ export function computeSpectralValues(model, params, waves, coeff) {
   if (model === 'BSM') {
     const spectrum = bsm(coeff, {
       SMC: Number(params.SMC) || 25, BSMBrightness: Number(params.BSMBrightness) || 0.5,
-      BSMlat: Number(params.BSMlat) || 0, BSMlon: Number(params.BSMlon) || 0
+      BSMlat: Number.isFinite(Number(params.BSMlat)) ? Number(params.BSMlat) : 25,
+      BSMlon: Number.isFinite(Number(params.BSMlon)) ? Number(params.BSMlon) : 45
     })
     return sampleAtWaves(spectrum, coeff, waves)
   }

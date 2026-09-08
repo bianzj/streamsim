@@ -49,6 +49,7 @@ void main()
     //------------------------------------------------------------
     // get bufferId, voxelId, instanceId and typeId
     uint bufferId0 = uint(gl_GlobalInvocationID.x);
+    if(bufferId0 >= uint(setting.voxelCount)) return;
     ivec3 voxelId0 = voxelLinks[bufferId0].voxelId;
     if(voxelLinks[bufferId0].isValid==0) return;
     // Get nanoVDBLink: from voxelId to bufferId
@@ -64,6 +65,11 @@ void main()
     // if(primId0 - faceid0*10 == 0) return; 
     uint canopyId = meshLinks[meshId].canopyId;
     voxelNetRads[bufferId0].directTrad = 0;
+
+    // Rli is hemispherical downwelling longwave and is handled by diffuseTIR.
+    // Keeping a directional component here would count the same sky flux twice.
+    return;
+
 
     float Rin = ubom.meteo.Rin;               // measurement height 
     float Rli = ubom.meteo.Rli;               // wind speed

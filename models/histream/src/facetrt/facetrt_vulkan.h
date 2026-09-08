@@ -41,6 +41,9 @@ struct Config {
     uint32_t edgeHashCapacity{0}; // 0 selects a power-of-two capacity automatically.
     bool enableValidation{false};
     uint32_t gpuIndex{0};
+    uint32_t periodicNeighborCount{0};
+    float periodicSizeX{1.0f};
+    float periodicSizeZ{1.0f};
 };
 
 struct GraphDiagnostics {
@@ -80,6 +83,18 @@ public:
                       float skyRadiosity,
                       uint32_t iterations = 64,
                       float relaxation = 1.0f);
+    SolveResult solveAccelerated(
+        const std::vector<SurfaceOptics>& optics,
+        float skyRadiosity,
+        const std::vector<float>* initialRadiosity = nullptr,
+        uint32_t maximumIterations = 64,
+        uint32_t batchIterations = 8,
+        float tolerance = 1.0e-4f,
+        float relaxation = 1.0f);
+    std::vector<float> incidentIrradiance(
+        const SolveResult& solution,
+        const std::vector<SurfaceOptics>& optics,
+        float skyRadiosity) const;
     std::vector<float> computeSunlitFraction(const Direction& sunDirection);
 
     void destroy();
@@ -104,6 +119,7 @@ private:
         float viewProjection[16]{};
         float viewDirection[4]{};
         uint32_t raster[4]{}; // width, height, max layers, hash capacity
+        float periodic[4]{}; // domain X/Z size, neighbour count, reserved
     };
 
     struct SolvePush {

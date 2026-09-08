@@ -80,7 +80,7 @@
       <spectral id="1" name="soil" type="BSM">
         <reflectance>0.20</reflectance><transmittance>0.0</transmittance>
         <tau_TIR>0</tau_TIR><ref_TIR>0.05</ref_TIR>
-        <SMC>25</SMC><BSMBrightness>0.5</BSMBrightness><BSMlat>0</BSMlat><BSMlon>0</BSMlon>
+        <SMC>25</SMC><BSMBrightness>0.5</BSMBrightness><BSMlat>25</BSMlat><BSMlon>45</BSMlon>
       </spectral>
       <spectral id="2" name="green_leaf" type="Prospect">
         <reflectance>0.08,0.45</reflectance><transmittance>0.04,0.35</transmittance>

@@ -4,6 +4,37 @@
 
 #include "command.h"
 
+namespace {
+
+void clearEnergyState(const std::shared_ptr<VoxelebIO>& modelio)
+{
+    nvvk::CommandPool commandPool(modelio->m_device, modelio->m_queueIndex);
+    vk::CommandBuffer command = commandPool.createCommandBuffer();
+    vkCmdFillBuffer(command, modelio->m_voxelio->m_pStateBuffer->buffer,
+                    0, sizeof(EBState), 0);
+    commandPool.submitAndWait(command);
+}
+
+uint32_t readEnergyState(const std::shared_ptr<VoxelebIO>& modelio,
+                         const nvvk::Buffer& readback)
+{
+    nvvk::CommandPool commandPool(modelio->m_device, modelio->m_queueIndex);
+    vk::CommandBuffer command = commandPool.createCommandBuffer();
+    VkBufferCopy copy{};
+    copy.size = sizeof(EBState);
+    vkCmdCopyBuffer(command, modelio->m_voxelio->m_pStateBuffer->buffer,
+                    readback.buffer, 1, &copy);
+    commandPool.submitAndWait(command);
+
+    const void* mapped = modelio->m_pAlloc->map(readback);
+    const uint32_t count = *static_cast<const uint32_t*>(mapped);
+    modelio->m_pAlloc->unmap(readback);
+    return count;
+}
+
+} // namespace
+
+
 
 
 bool Command::create(std::shared_ptr<VoxelebIO> &modelio){
@@ -28,7 +59,7 @@ bool Command::create(std::shared_ptr<VoxelebIO> &modelio){
     // if (vkCreateFence(modelio->m_device, &fci, nullptr, &modelio->m_fence) != VK_SUCCESS)
     //     return false;
 
-    return false;
+    return true;
 }
 
 bool Command::runEB(std::shared_ptr<VoxelebIO> &modelio){
@@ -56,11 +87,16 @@ bool Command::runEB(std::shared_ptr<VoxelebIO> &modelio){
     submit(modelio, VoxelEBStage::diffuseVNIR, voxelSize1D, std::nullopt, std::nullopt);
     waitFence(modelio);
 
+    submit(modelio, VoxelEBStage::directTIR, voxelSize1D, std::nullopt, std::nullopt);
+    waitFence(modelio);
+
+    nvvk::Buffer stateReadback = modelio->m_pAlloc->createBuffer(
+        sizeof(EBState), VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
 
     for(int kiter = 0;kiter < 50; kiter++) {
 
-        submit(modelio, VoxelEBStage::directTIR, voxelSize1D, std::nullopt, std::nullopt);
-        waitFence(modelio);
 
         submit(modelio, VoxelEBStage::diffuseTIR, voxelSize1D, std::nullopt, std::nullopt);
         waitFence(modelio);
@@ -84,14 +120,20 @@ bool Command::runEB(std::shared_ptr<VoxelebIO> &modelio){
         waitFence(modelio);
 
         //--------------------------------------------------
+        clearEnergyState(modelio);
 
         submit(modelio, VoxelEBStage::budget, voxelSize1D, std::nullopt, std::nullopt);
         waitFence(modelio);
+        if(kiter >= 2 && readEnergyState(modelio, stateReadback) == 0U) {
+            break;
+        }
+
 
 
         //--------------------------------------------------
 
     }
+    modelio->m_pAlloc->destroy(stateReadback);
 
     submit(modelio, VoxelEBStage::updateTp, voxelSize1D, std::nullopt, std::nullopt);
     waitFence(modelio);
@@ -120,6 +162,49 @@ bool Command::runRT(std::shared_ptr<VoxelebIO> &modelio){
 
 
 
+    return true;
+}
+
+bool Command::runFluid(std::shared_ptr<VoxelebIO> &modelio, int iterations)
+{
+    if (!modelio->fluid.enabled || modelio->fluidCellCount == 0 || iterations <= 0) return true;
+    const glm::ivec3 dispatch(
+        static_cast<int>((modelio->fluidCellCount + GROUP_SIZEX - 1) / GROUP_SIZEX), 1, 1);
+
+    // Keep command buffers short enough for Windows' GPU watchdog while
+    // avoiding a queue submission and fence wait for every LBM pass.
+    constexpr int iterationsPerBatch = 32;
+    nvvk::CommandPool commandPool(modelio->m_device, modelio->m_queueIndex);
+    for (int first = 0; first < iterations; first += iterationsPerBatch) {
+        const int batchSize = std::min(iterationsPerBatch, iterations - first);
+        VkCommandBuffer command = commandPool.createCommandBuffer();
+        VkMemoryBarrier memoryBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        memoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+
+        for (int iteration = 0; iteration < batchSize; ++iteration) {
+            recordCommandBuffer(command, modelio->m_descSet, modelio->m_pipelineLayout,
+                                modelio->m_pipelines[VoxelEBStage::fluidLbm], modelio->setting);
+            vkCmdDispatch(command, dispatch.x, dispatch.y, dispatch.z);
+            vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                                 1, &memoryBarrier, 0, nullptr, 0, nullptr);
+
+            recordCommandBuffer(command, modelio->m_descSet, modelio->m_pipelineLayout,
+                                modelio->m_pipelines[VoxelEBStage::fluidCommit], modelio->setting);
+            vkCmdDispatch(command, dispatch.x, dispatch.y, dispatch.z);
+            vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                                 1, &memoryBarrier, 0, nullptr, 0, nullptr);
+        }
+
+        vkEndCommandBuffer(command);
+        VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &command;
+        vkQueueSubmit(modelio->m_queue, 1, &submitInfo, modelio->m_fence);
+        waitFence(modelio);
+    }
     return true;
 }
 

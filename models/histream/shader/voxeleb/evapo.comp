@@ -26,6 +26,7 @@
 #include "../global.glsl"
 #include "../functions.glsl"
 #include "../nanovdb_info.glsl"
+#include "fluid_coupling.glsl"
 
 layout(local_size_x = GROUP_SIZEX) in;
 
@@ -40,6 +41,7 @@ void main()
     //------------------------------------------------------------
     // get bufferId, voxelId, instanceId and typeId
     uint bufferId = uint(gl_GlobalInvocationID.x);
+    if(bufferId >= uint(setting.voxelCount)) return;
     if(voxelLinks[bufferId].isValid==0) return;
     //voxelRes: voxel number in 3 dimentions
     ivec3 voxelRes = ivec3(setting.voxelSize);
@@ -61,6 +63,15 @@ void main()
     canopyId = meshLink.canopyId;
     bioId = meshLink.bioId;
     typeId = meshLink.type;
+    if(typeId == TYPE_VEGETATION && isParticipatingMedium(canopies[canopyId])) {
+        voxelHeatFlux[bufferId].Hsunlit = 0.0;
+        voxelHeatFlux[bufferId].Hshaded = 0.0;
+        voxelHeatFlux[bufferId].LEsunlit = 0.0;
+        voxelHeatFlux[bufferId].LEshaded = 0.0;
+        voxelHeatFlux[bufferId].Gsunlit = 0.0;
+        voxelHeatFlux[bufferId].Gshaded = 0.0;
+        return;
+    }
     //-------------------------
     // various parameters
     //-------------------------
@@ -84,7 +95,7 @@ void main()
 	float dtime_[TLASTNUM], raa,rss;
     float dtime = ubom.meteo.dtime;
     float ea = ubom.meteo.ea;
-    float Ta = ubom.meteo.Ta;
+    float Ta = localAirTemperatureC(bufferId);
     float ca = ubom.meteo.Ca;
     float ci = voxelAirs[bufferId].ci;
     float H; // latent heat flux
@@ -207,7 +218,8 @@ void main()
                     TnewProfile[kdepth] = 0;
                     Mprofile[kdepth] = ubom.meteo.sm;
                 }
-                Soilheatflux(ToldProfile,Mprofile,Tc-273.15,Gst,TnewProfile,dtime);
+                Soilheatflux(ToldProfile, Mprofile, Tc - 273.15,
+                             soilSets[bioId].Tsoil, Gst, TnewProfile, dtime);
             }
         }// if soil
 

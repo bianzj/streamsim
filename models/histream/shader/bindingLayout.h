@@ -70,6 +70,16 @@ layout(push_constant) uniform _RtxState
 #define B_STATE 28
 #define B_LAD 29 
 #define B_WATERSET 30
+#define B_FLUID_VELOCITY_A 31
+#define B_FLUID_VELOCITY_B 32
+#define B_FLUID_SCALAR_A 33
+#define B_FLUID_SCALAR_B 34
+#define B_FLUID_LBM_A 35
+#define B_FLUID_LBM_B 36
+#define B_FLUID_DENSITY 37
+#define B_FLUID_META 38
+#define B_FLUID_PARAMETERS 39
+#define B_HEX 40
 
 
 // 1-5
@@ -109,6 +119,16 @@ layout(binding = B_TLAST) buffer BUFFER3{VoxelTlast voxelTlasts[];};
 layout(binding = B_STATE) buffer  _UBOSS{EBState ebState;};
 layout(binding = B_LAD) buffer  _LAD{float lads[];};
 layout(binding = B_WATERSET) buffer UBOW{WaterSet waterSets[];};
+layout(binding = B_FLUID_VELOCITY_A) buffer FLUIDVA{vec4 fluidVelocityA[];};
+layout(binding = B_FLUID_VELOCITY_B) buffer FLUIDVB{vec4 fluidVelocityB[];};
+layout(binding = B_FLUID_SCALAR_A) buffer FLUIDSA{vec4 fluidScalarA[];};
+layout(binding = B_FLUID_SCALAR_B) buffer FLUIDSB{vec4 fluidScalarB[];};
+layout(binding = B_FLUID_LBM_A) buffer FLUIDLBMA{float fluidLbmA[];};
+layout(binding = B_FLUID_LBM_B) buffer FLUIDLBMB{float fluidLbmB[];};
+layout(binding = B_FLUID_DENSITY) buffer FLUIDRHO{float fluidDensity[];};
+layout(binding = B_FLUID_META) buffer FLUIDMETA{FluidCellMeta fluidMeta[];};
+layout(binding = B_FLUID_PARAMETERS) uniform FLUIDPARAMS{FluidParameters fluidParameters;};
+layout(binding = B_HEX) buffer _bufferHex { VoxelHex voxelHexs[]; };
 
 layout(buffer_reference, scalar) buffer Vertices { VertexAttribute v[]; };
 layout(buffer_reference, scalar) buffer Indices { uvec3 i[]; };
@@ -140,6 +160,8 @@ layout(push_constant) uniform _RtxState
 #define B_NETRAD 13
 #define B_STORAGE 14
 #define B_LAD 15  
+#define B_HEX 16
+#define B_WATERSET 17
 
 
 // 1-5
@@ -165,6 +187,8 @@ layout(binding = B_RADS) buffer _bufferRad { VoxelRad voxelRads[]; };
 layout(binding = B_NETRAD) buffer _bufferNET {VoxelNetRad voxelNetRads[];}; //
 layout(binding = B_STORAGE) buffer _bufferstorage { float outImage[]; };
 layout(binding = B_LAD) buffer  _LAD{float lads[];};
+layout(binding = B_HEX) buffer _bufferHex { VoxelHex voxelHexs[]; };
+layout(binding = B_WATERSET) buffer _bufferWater { WaterSet waterSets[]; };
 
 layout(buffer_reference, scalar) buffer Vertices { VertexAttribute v[]; };
 layout(buffer_reference, scalar) buffer Indices { uvec3 i[]; };

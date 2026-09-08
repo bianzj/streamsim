@@ -28,6 +28,8 @@ public:
         netRad,
         storage,
         lad,
+        hex,
+        waterSet,
     };
 
 

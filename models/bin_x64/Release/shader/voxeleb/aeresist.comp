@@ -26,6 +26,7 @@
 #include "../global.glsl"
 #include "../functions.glsl"
 #include "../nanovdb_info.glsl"
+#include "fluid_coupling.glsl"
 
 layout(local_size_x = GROUP_SIZEX) in;
 
@@ -120,6 +121,7 @@ void main()
     // Initialization for the position and SSBO index
     //------------------------------------------------------------
     uint bufferId0 = gl_GlobalInvocationID.x;
+    if(bufferId0 >= uint(setting.voxelCount)) return;
     if(voxelLinks[bufferId0].isValid==0) return;
     //voxelRes: voxel number in 3 dimentions
     ivec3 voxelRes = ivec3(setting.voxelSize);
@@ -171,9 +173,14 @@ void main()
 
         aerotype = aeroConds[aeroId].type;
         L = aeroConds[aeroId].L;
-        hcmax = aeroConds[aeroId].hc_veg;
-        laimax = aeroConds[aeroId].lai;
-        leafwidth = aeroConds[aeroId].leafwidth;
+        canopy = canopies[canopyId];
+        // Fall back to the physical canopy when the default aerodynamic
+        // entry has lai=0; zero LAI creates infinite boundary resistance.
+        hcmax = max(aeroConds[aeroId].hc_veg, canopy.height);
+        laimax = aeroConds[aeroId].lai > 0.001
+            ? aeroConds[aeroId].lai : max(canopy.lai, 0.001);
+        leafwidth = aeroConds[aeroId].leafwidth > 0.0001
+            ? aeroConds[aeroId].leafwidth : max(canopy.leafwidth, 0.0001);
         rbs = 10; 
 
         //------------------------------------------
@@ -194,8 +201,9 @@ void main()
 
 
         // dynamic variable in time
-        z = ubom.meteo.z;               // measurement height 
-        u = ubom.meteo.u;               // wind speed
+        // The aerodynamic reference level must be above displacement height.
+        z = max(ubom.meteo.z, hcmax + max(2.0, 0.5 * hcmax));
+        u = max(localWindSpeed(bufferId0), 0.05); // obstacle- and canopy-resolved wind
         kappa = KAPPA; 
 
         if(aerotype == AEROTYPE_URBAN){
@@ -220,7 +228,7 @@ void main()
             raa = (1.0 / (kappa*ustar)*(log((z - d) / (z0m)) - ph_z + ph_zr));
 
             aeroConds[aeroId].ustar = ustar;
-            if(isnan(raa)) raa = 150;
+            if(isnan(raa) || isinf(raa) || raa < 1.0) raa = 150;
             voxelRaas[bufferId0].raa = raa;
             return;
         }
@@ -258,7 +266,7 @@ void main()
             // aerodynamic resistance
             aeroConds[aeroId].ustar = ustar;
             raa = (1.0 / (kappa * ustar)*(log((z-d)/z0m)-ph_z + ph_zr));
-            if(isnan(raa)) raa = 50;
+            if(isnan(raa) || isinf(raa) || raa < 1.0) raa = 50;
             voxelRaas[bufferId0].raa = raa;
             // voxelRaas[bufferId0].raa = surf1DId;
             // return;
@@ -330,7 +338,7 @@ void main()
             float y1 = z0m + d;
             float y2 = 0.01;
             if(typeId == TYPE_NULL) return;
-            if((typeId == TYPE_SOIL) || (typeId == TYPE_BUILDING) || (typeId == TYPE_WATER))
+            if((typeId == TYPE_SOIL) || (typeId == TYPE_WATER))
             {
                 // for soil under overstory vegetation 
                 y2 = 0.01;
@@ -340,12 +348,31 @@ void main()
                 raa = rai + rar + rac + rwcs + rbs;
 
                 // raa =  n;
-                if(isnan(raa)) raa = 50;
+                if(isnan(raa) || isinf(raa) || raa < 1.0) raa = 50;
                 voxelRaas[bufferId0].raa = raa;  
 
                 // voxelRaas[bufferId0].raa = sinh(n) / (n*kh0);
                 // voxelRaas[bufferId0].raa = kh0;
 
+            }else if (typeId == TYPE_BUILDING) {
+                // Exposed solids (including trunk and branch wood) must not use
+                // the under-canopy ground resistance at y=0.01 m.  Convert a
+                // standard forced-convection coefficient to aerodynamic
+                // resistance; the local canopy wind is retained but bounded by
+                // half of the reference wind for small exposed woody surfaces.
+                float localWind = max(uh, 0.5 * max(u, 0.1));
+                float heatTransfer = 8.3 + 4.1 * localWind;
+                if(soilSets[meshLink.bioId].thermalClass == 1)
+                {
+                    // Cylinder-like branch and trunk elements have a much
+                    // thinner thermal boundary layer than a wall or ground
+                    // plane. Use the reference wind and a material scale.
+                    heatTransfer = max(soilSets[meshLink.bioId].convectiveScale, 0.1)
+                        * (18.0 + 8.0 * max(u, 0.1));
+                }
+                raa = RHOA * CP / max(heatTransfer, 1.0);
+                if(isnan(raa) || isinf(raa) || raa < 1.0) raa = 50.0;
+                voxelRaas[bufferId0].raa = raa;
             }else if (typeId == TYPE_VEGETATION) {
                 // for vegetation under overstory vegetation 
                 // information for other layer 
@@ -354,7 +381,7 @@ void main()
 
                 if(hctemp >= hcmax){
                     raa = rai + rar + rac + rbc;
-                    if(isnan(raa)) raa = 50;
+                    if(isnan(raa) || isinf(raa) || raa < 1.0) raa = 50;
                     voxelRaas[bufferId0].raa = raa;
                     return;
                 }
@@ -373,7 +400,7 @@ void main()
                 
                 rbc = 70 / laimax * sqrt(leafwidthtemp/uz0);
                 raa = rai + rar + rac + rwcs + rbc;
-                if(isnan(raa)) raa = 50;
+                if(isnan(raa) || isinf(raa) || raa < 1.0) raa = 50;
                 voxelRaas[bufferId0].raa = raa;
             }// if type
         } // if type

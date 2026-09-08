@@ -1,0 +1,4 @@
+Poly Haven asset: fir_sapling
+Source: https://polyhaven.com/a/fir_sapling
+License: CC0 1.0 Universal
+License URL: https://creativecommons.org/publicdomain/zero/1.0/

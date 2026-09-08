@@ -1,0 +1,3 @@
+Khronos glTF Sample Asset: CarConcept
+Source: https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/CarConcept
+License: see SOURCE_README.md and upstream repository license metadata.

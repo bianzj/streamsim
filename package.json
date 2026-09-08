@@ -4,15 +4,27 @@
   "private": true,
   "description": "Three.js web interface for HiStream",
   "type": "module",
+  "main": "desktop/main.mjs",
   "scripts": {
     "dev": "node dev.mjs",
     "build": "vite build",
-    "start": "node server.mjs"
-  },
-  "dependencies": {
-    "three": "0.185.1"
+    "build:gui": "vite build",
+    "build:engine": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-engine.ps1",
+    "build:all": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-all.ps1",
+    "start": "node server.mjs",
+    "validate:assets": "node tools/validate-obj-library.mjs",
+    "lut:modtran": "node tools/modtran-lut.mjs",
+    "test:atmosphere": "node tools/test-modtran-lut.mjs",
+    "smoke:atmosphere": "node tools/smoke-atmosphere.mjs",
+    "smoke:atmosphere:facet": "node tools/smoke-atmosphere-facet.mjs",
+    "desktop": "electron .",
+    "stage:package": "node tools/stage-package-assets.mjs",
+    "pack:win": "npm run build:gui && npm run stage:package && electron-builder --win nsis"
   },
   "devDependencies": {
+    "electron": "^38.0.0",
+    "electron-builder": "^26.0.12",
+    "three": "0.185.1",
     "vite": "7.3.6"
   }
 }

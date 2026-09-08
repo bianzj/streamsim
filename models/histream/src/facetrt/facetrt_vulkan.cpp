@@ -66,6 +66,19 @@ std::array<float, 3> normalize3(std::array<float, 3> value)
     return value;
 }
 
+std::array<int, 2> periodicTileOffset(uint32_t index)
+{
+    static constexpr std::array<std::array<int, 2>, 20> offsets{{
+        {{-1, 0}}, {{1, 0}}, {{0, -1}}, {{0, 1}},
+        {{-1, -1}}, {{-1, 1}}, {{1, -1}}, {{1, 1}},
+        {{-2, 0}}, {{2, 0}}, {{0, -2}}, {{0, 2}},
+        {{-2, -1}}, {{-2, 1}}, {{2, -1}}, {{2, 1}},
+        {{-1, -2}}, {{1, -2}}, {{-1, 2}}, {{1, 2}}
+    }};
+    return index == 0U ? std::array<int, 2>{0, 0}
+                       : offsets[std::min<uint32_t>(index - 1U, 19U)];
+}
+
 } // namespace
 
 FacetrtVulkan::~FacetrtVulkan()
@@ -465,12 +478,26 @@ std::array<float, 16> FacetrtVulkan::makeProjection(const Direction& direction) 
                                                : std::array<float, 3>{0.0f, 1.0f, 0.0f};
     const std::array<float, 3> right = normalize3(cross3(reference, view));
     const std::array<float, 3> up = cross3(view, right);
-    const std::array<float, 3> center{(m_boundsMin[0] + m_boundsMax[0]) * 0.5f,
-                                      (m_boundsMin[1] + m_boundsMax[1]) * 0.5f,
-                                      (m_boundsMin[2] + m_boundsMax[2]) * 0.5f};
-    const std::array<float, 3> diagonal{m_boundsMax[0] - m_boundsMin[0],
-                                        m_boundsMax[1] - m_boundsMin[1],
-                                        m_boundsMax[2] - m_boundsMin[2]};
+    std::array<float, 3> extendedMin = m_boundsMin;
+    std::array<float, 3> extendedMax = m_boundsMax;
+    const uint32_t neighborCount = std::min(m_config.periodicNeighborCount, 20U);
+    for (uint32_t tileIndex = 1U; tileIndex <= neighborCount; ++tileIndex) {
+        const auto tile = periodicTileOffset(tileIndex);
+        const float offsetX = static_cast<float>(tile[0]) * m_config.periodicSizeX;
+        const float offsetZ = static_cast<float>(tile[1]) * m_config.periodicSizeZ;
+        extendedMin[0] = std::min(extendedMin[0], m_boundsMin[0] + offsetX);
+        extendedMax[0] = std::max(extendedMax[0], m_boundsMax[0] + offsetX);
+        extendedMin[2] = std::min(extendedMin[2], m_boundsMin[2] + offsetZ);
+        extendedMax[2] = std::max(extendedMax[2], m_boundsMax[2] + offsetZ);
+    }
+    const std::array<float, 3> center{
+        (extendedMin[0] + extendedMax[0]) * 0.5f,
+        (extendedMin[1] + extendedMax[1]) * 0.5f,
+        (extendedMin[2] + extendedMax[2]) * 0.5f};
+    const std::array<float, 3> diagonal{
+        extendedMax[0] - extendedMin[0],
+        extendedMax[1] - extendedMin[1],
+        extendedMax[2] - extendedMin[2]};
     const float radius = std::max(0.5f * std::sqrt(dot3(diagonal, diagonal)) * 1.001f,
                                   1.0e-4f);
 
@@ -852,6 +879,9 @@ GraphDiagnostics FacetrtVulkan::buildVisibilityGraph(
     push.raster[1] = m_config.rasterHeight;
     push.raster[2] = m_config.maxFragmentsPerPixel;
     push.raster[3] = m_hashCapacity;
+    push.periodic[0] = m_config.periodicSizeX;
+    push.periodic[1] = m_config.periodicSizeZ;
+    push.periodic[2] = static_cast<float>(m_config.periodicNeighborCount);
 
     VkCommandBuffer commandBuffer = beginCommands();
     vkCmdFillBuffer(commandBuffer, m_edgeKeys.buffer, 0, m_edgeKeys.size, 0xffffffffU);
@@ -911,7 +941,9 @@ GraphDiagnostics FacetrtVulkan::buildVisibilityGraph(
         vkCmdPushConstants(commandBuffer, m_visibilityPipelineLayout,
                            kVisibilityPushStages,
                            0, sizeof(push), &push);
-        vkCmdDraw(commandBuffer, m_facetCount * 3U, 1, 0, 0);
+        vkCmdDraw(commandBuffer, m_facetCount * 3U,
+                  std::min(m_config.periodicNeighborCount, 20U) + 1U,
+                  0, 0);
         vkCmdEndRenderPass(commandBuffer);
 
         VkMemoryBarrier rasterToResolve{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
@@ -1043,6 +1075,9 @@ std::vector<float> FacetrtVulkan::computeSunlitFraction(const Direction& sunDire
     push.raster[1] = m_config.rasterHeight;
     push.raster[2] = m_config.maxFragmentsPerPixel;
     push.raster[3] = m_hashCapacity;
+    push.periodic[0] = m_config.periodicSizeX;
+    push.periodic[1] = m_config.periodicSizeZ;
+    push.periodic[2] = static_cast<float>(m_config.periodicNeighborCount);
 
     VkCommandBuffer commandBuffer = beginCommands();
     vkCmdFillBuffer(commandBuffer, m_pixelCounts.buffer, 0, m_pixelCounts.size, 0U);
@@ -1076,7 +1111,9 @@ std::vector<float> FacetrtVulkan::computeSunlitFraction(const Direction& sunDire
     vkCmdPushConstants(commandBuffer, m_visibilityPipelineLayout,
                        kVisibilityPushStages,
                        0, sizeof(push), &push);
-    vkCmdDraw(commandBuffer, m_facetCount * 3U, 1, 0, 0);
+    vkCmdDraw(commandBuffer, m_facetCount * 3U,
+              std::min(m_config.periodicNeighborCount, 20U) + 1U,
+              0, 0);
     vkCmdEndRenderPass(commandBuffer);
 
     VkMemoryBarrier rasterToResolve{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
@@ -1204,6 +1241,158 @@ SolveResult FacetrtVulkan::solve(const std::vector<SurfaceOptics>& optics,
     downloadBuffer(m_residual, &deltaBits, sizeof(deltaBits));
     std::memcpy(&result.maxDelta, &deltaBits, sizeof(result.maxDelta));
     return result;
+}
+
+SolveResult FacetrtVulkan::solveAccelerated(
+    const std::vector<SurfaceOptics>& optics,
+    float skyRadiosity,
+    const std::vector<float>* initialRadiosity,
+    uint32_t maximumIterations,
+    uint32_t batchIterations,
+    float tolerance,
+    float relaxation)
+{
+    if (m_solvePipeline == VK_NULL_HANDLE) {
+        throw std::logic_error(
+            "buildVisibilityGraph() must be called before solveAccelerated()");
+    }
+    validateOptics(optics);
+    if (!std::isfinite(skyRadiosity) || skyRadiosity < 0.0f) {
+        throw std::invalid_argument("skyRadiosity must be finite and non-negative");
+    }
+    if (!(relaxation > 0.0f && relaxation <= 1.0f)) {
+        throw std::invalid_argument("GPU Jacobi relaxation must be in (0,1]");
+    }
+    if (maximumIterations == 0U || batchIterations == 0U ||
+        !std::isfinite(tolerance) || tolerance < 0.0f) {
+        throw std::invalid_argument(
+            "Accelerated solve iterations must be positive and tolerance non-negative");
+    }
+    if (initialRadiosity != nullptr) {
+        if (initialRadiosity->size() != surfaceCount() ||
+            std::any_of(initialRadiosity->begin(), initialRadiosity->end(),
+                        [](float value) {
+                            return !std::isfinite(value) || value < 0.0f;
+                        })) {
+            throw std::invalid_argument(
+                "Initial radiosity must contain one finite non-negative value per surface");
+        }
+    }
+
+    uploadBuffer(m_optics, optics.data(), optics.size() * sizeof(SurfaceOptics));
+    if (initialRadiosity != nullptr) {
+        const VkDeviceSize bytes =
+            initialRadiosity->size() * sizeof(float);
+        uploadBuffer(m_radiosityA, initialRadiosity->data(), bytes);
+        uploadBuffer(m_radiosityB, initialRadiosity->data(), bytes);
+    } else {
+        VkCommandBuffer clearCommands = beginCommands();
+        vkCmdFillBuffer(clearCommands, m_radiosityA.buffer, 0,
+                        m_radiosityA.size, 0U);
+        vkCmdFillBuffer(clearCommands, m_radiosityB.buffer, 0,
+                        m_radiosityB.size, 0U);
+        endCommands(clearCommands);
+    }
+
+    SolveResult result{};
+    uint32_t ping = 0U;
+    while (result.iterations < maximumIterations) {
+        const uint32_t count = std::min(
+            batchIterations, maximumIterations - result.iterations);
+        VkCommandBuffer commandBuffer = beginCommands();
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                          m_solvePipeline);
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                m_solvePipelineLayout, 0, 1,
+                                &m_solveDescriptorSet, 0, nullptr);
+        for (uint32_t iteration = 0; iteration < count; ++iteration) {
+            vkCmdFillBuffer(commandBuffer, m_residual.buffer, 0,
+                            sizeof(uint32_t), 0U);
+            VkMemoryBarrier residualClear{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            residualClear.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            residualClear.dstAccessMask =
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                                 1, &residualClear, 0, nullptr, 0, nullptr);
+
+            const SolvePush push{
+                m_facetCount, ping, skyRadiosity, relaxation};
+            vkCmdPushConstants(commandBuffer, m_solvePipelineLayout,
+                               VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                               sizeof(push), &push);
+            vkCmdDispatch(commandBuffer, (m_facetCount + 63U) / 64U, 1, 1);
+
+            VkMemoryBarrier iterationBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            iterationBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            iterationBarrier.dstAccessMask =
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT |
+                VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(commandBuffer,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                                     VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 0, 1, &iterationBarrier,
+                                 0, nullptr, 0, nullptr);
+            ping ^= 1U;
+        }
+        endCommands(commandBuffer);
+        result.iterations += count;
+
+        uint32_t deltaBits = 0U;
+        downloadBuffer(m_residual, &deltaBits, sizeof(deltaBits));
+        std::memcpy(&result.maxDelta, &deltaBits, sizeof(result.maxDelta));
+        if (result.maxDelta <= tolerance) {
+            break;
+        }
+    }
+
+    result.radiosity.resize(surfaceCount(), 0.0f);
+    const Buffer& finalBuffer = ping == 0U ? m_radiosityA : m_radiosityB;
+    downloadBuffer(finalBuffer, result.radiosity.data(),
+                   result.radiosity.size() * sizeof(float));
+    return result;
+}
+
+std::vector<float> FacetrtVulkan::incidentIrradiance(
+    const SolveResult& solution,
+    const std::vector<SurfaceOptics>& optics,
+    float skyRadiosity) const
+{
+    if (solution.radiosity.size() != surfaceCount() ||
+        optics.size() != surfaceCount() ||
+        m_rowOffsetsCpu.size() != surfaceCount() + 1U ||
+        m_denominatorCpu.size() != surfaceCount() ||
+        m_skyCountsCpu.size() != surfaceCount()) {
+        throw std::invalid_argument(
+            "Incident irradiance requires a completed solve and visibility graph");
+    }
+    if (!std::isfinite(skyRadiosity) || skyRadiosity < 0.0f) {
+        throw std::invalid_argument(
+            "Sky radiosity must be finite and non-negative");
+    }
+
+    std::vector<float> irradiance(surfaceCount(), 0.0f);
+    for (uint32_t side = 0; side < surfaceCount(); ++side) {
+        double diffuse = skyRadiosity;
+        const uint32_t denominator = m_denominatorCpu[side];
+        if (denominator != 0U) {
+            diffuse = static_cast<double>(m_skyCountsCpu[side]) *
+                      static_cast<double>(skyRadiosity);
+            for (uint32_t edgeIndex = m_rowOffsetsCpu[side];
+                 edgeIndex < m_rowOffsetsCpu[side + 1U]; ++edgeIndex) {
+                const CsrEdge& edge = m_edgesCpu[edgeIndex];
+                diffuse += static_cast<double>(edge.count) *
+                           static_cast<double>(
+                               solution.radiosity[edge.neighbor]);
+            }
+            diffuse /= static_cast<double>(denominator);
+        }
+        irradiance[side] = std::max(
+            0.0f, static_cast<float>(diffuse) +
+                      optics[side].directIrradiance);
+    }
+    return irradiance;
 }
 
 void FacetrtVulkan::destroySolveResources()

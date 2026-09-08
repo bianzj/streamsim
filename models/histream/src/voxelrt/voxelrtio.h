@@ -79,6 +79,7 @@ VoxelrtIO(){
 
     bool isUAVTrave = false; // for the scene or for the UAV
     std::vector<glm::vec3> uavposes;
+    std::vector<float> uavViewAzimuths;
     //Meteo Info
 
     std::vector<Meteo> meteos;
@@ -110,7 +111,12 @@ VoxelrtIO(){
     bool isTemperature;
     bool isDisplay;
     bool isImage;
+    bool isRadiationProcess;
     bool isAlbedo;
+    bool heterogeneousVoxel{false};
+    bool acceleratedRadiationSolver{false};
+    int periodicNeighborCount{0};
+    bool skyboxEnabled{false};
 
 
     std::shared_ptr<MeshIO> m_meshio;

@@ -7,6 +7,108 @@
 // Common functions
 //--------------------------------------------------------------------------------------------
 
+// Central domain is index 0. Indices 1..20 identify successive boundary
+// passages. Geometry buffers are never duplicated; ray tracers remap every
+// query into the same acceleration structure.
+ivec2 periodicTileOffset(int index)
+{
+  const ivec2 offsets[20] = ivec2[20](
+    ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1),
+    ivec2(-1, -1), ivec2(-1, 1), ivec2(1, -1), ivec2(1, 1),
+    ivec2(-2, 0), ivec2(2, 0), ivec2(0, -2), ivec2(0, 2),
+    ivec2(-2, -1), ivec2(-2, 1), ivec2(2, -1), ivec2(2, 1),
+    ivec2(-1, -2), ivec2(1, -2), ivec2(-1, 2), ivec2(1, 2));
+  return index <= 0 ? ivec2(0) : offsets[clamp(index - 1, 0, 19)];
+}
+
+// Returns the periodic tile and the ray-parameter interval over which the ray
+// is physically inside that tile. Restricting intersection tests to this
+// interval prevents a wrapped query from replacing a nearer hit that still
+// belongs to the central study area.
+ivec2 periodicRayTileSegment(vec3 origin, vec3 direction,
+                             int traversalIndex, vec2 requestedTileSize,
+                             out float segmentMinimum, out float segmentMaximum)
+{
+  const float huge = 1.0e30;
+  vec2 tileSize = max(requestedTileSize, vec2(0.01));
+  vec2 position = vec2(origin.x, origin.z) / tileSize + vec2(0.5);
+  vec2 ray = vec2(direction.x, direction.z) / tileSize;
+  ivec2 cell = ivec2(floor(position));
+  ivec2 stepDirection = ivec2(
+    ray.x > 0.0 ? 1 : (ray.x < 0.0 ? -1 : 0),
+    ray.y > 0.0 ? 1 : (ray.y < 0.0 ? -1 : 0));
+  vec2 nextBoundary = vec2(
+    stepDirection.x > 0 ? float(cell.x + 1) : float(cell.x),
+    stepDirection.y > 0 ? float(cell.y + 1) : float(cell.y));
+  vec2 nextCrossing = vec2(
+    stepDirection.x == 0 ? huge : (nextBoundary.x - position.x) / ray.x,
+    stepDirection.y == 0 ? huge : (nextBoundary.y - position.y) / ray.y);
+  vec2 crossingStep = vec2(
+    stepDirection.x == 0 ? huge : abs(1.0 / ray.x),
+    stepDirection.y == 0 ? huge : abs(1.0 / ray.y));
+
+  segmentMinimum = 0.0;
+  for(int crossing = 0; crossing < traversalIndex; ++crossing)
+  {
+    segmentMinimum = min(nextCrossing.x, nextCrossing.y);
+    float difference = abs(nextCrossing.x - nextCrossing.y);
+    float tolerance = 1.0e-5 * max(1.0, min(nextCrossing.x, nextCrossing.y));
+    if(difference <= tolerance)
+    {
+      cell += stepDirection;
+      nextCrossing += crossingStep;
+    }
+    else if(nextCrossing.x < nextCrossing.y)
+    {
+      cell.x += stepDirection.x;
+      nextCrossing.x += crossingStep.x;
+    }
+    else
+    {
+      cell.y += stepDirection.y;
+      nextCrossing.y += crossingStep.y;
+    }
+  }
+  segmentMaximum = min(nextCrossing.x, nextCrossing.y);
+  return cell;
+}
+
+// Deterministic low-frequency sky used only for sensor-image misses. It is a
+// visual background and is intentionally excluded from shadow and scattering
+// queries.
+float proceduralSkyCloudAmount(vec3 direction)
+{
+  vec3 d = normalize(direction);
+  float azimuth = atan(d.z, d.x);
+  float elevation = asin(clamp(d.y, -1.0, 1.0));
+  float pattern = 0.5
+    + 0.23 * sin(3.1 * azimuth + 1.7 * sin(2.2 * elevation))
+    + 0.17 * sin(6.7 * azimuth - 3.4 * elevation + 0.8)
+    + 0.10 * sin(13.0 * azimuth + 5.0 * elevation);
+  float aboveHorizon = smoothstep(-0.04, 0.18, d.y);
+  return smoothstep(0.58, 0.76, pattern) * aboveHorizon;
+}
+
+float proceduralSkyReflectance(float wavelength, vec3 direction)
+{
+  float wavelengthUm = wavelength > 50.0 ? wavelength / 1000.0 : wavelength;
+  vec3 d = normalize(direction);
+  float height = clamp(d.y * 0.5 + 0.5, 0.0, 1.0);
+  float blueResponse = exp(-pow((wavelengthUm - 0.47) / 0.19, 2.0));
+  float clearSky = mix(0.34, 0.10, height)
+    + blueResponse * mix(0.16, 0.38, height);
+  float cloud = proceduralSkyCloudAmount(d);
+  return clamp(mix(clearSky, 0.82, cloud), 0.0, 0.95);
+}
+
+float proceduralSkyTemperature(vec3 direction, float clearSkyTemperature)
+{
+  vec3 d = normalize(direction);
+  float cloud = proceduralSkyCloudAmount(d);
+  float horizonWarmth = 8.0 * (1.0 - clamp(d.y, 0.0, 1.0));
+  return clearSkyTemperature + horizonWarmth + cloud * 22.0;
+}
+
 
 //-------------------------------------------------------------------------------------------------
 // Avoiding self intersections (see Ray Tracing Gems, Ch. 6)
@@ -37,8 +139,10 @@ vec3 World2Tangent(vec3 normal,vec3 tangent,vec3 binormal,vec3 v)
 }
 vec3 Tangent2World(vec3 normal,vec3 tangent,vec3 binormal,vec3 v)
 {
-    //return vec3(dot(tangent,v),dot(binormal,v),dot(normal,v));
-    return vec3(dot(binormal,v),dot(tangent,v),dot(normal,v));
+    // The basis vectors are expressed in world coordinates.  Reconstruct the
+    // world vector from the tangent-space components; dot products perform the
+    // opposite (world-to-tangent) transform and rotate sampled light paths.
+    return normalize(tangent * v.x + binormal * v.y + normal * v.z);
 }
 
 
@@ -362,12 +466,45 @@ int getFacetIdPos(int faceid0, inout vec3 voxelPos0)
         return 1;
 }
 
-
 int SurfFlatten(ivec3 voxelId, ivec3 voxelRes)
 {
     int surf1DId = voxelId.x + voxelId.z * voxelRes.x;
     return surf1DId;
 };
+
+#if defined(VOXELRT) || defined(VOXELLST)
+// OBJ 异质性参数优先于二维 LAD 和冠层默认密度；hexId=-1 时保持原算法。
+float ResolveTurbidDensity(int bufferId, uint canopyId, ivec3 voxelId, ivec3 voxelRes)
+{
+    int mediumId = voxelLinks[bufferId].hexId;
+    if (mediumId >= 0) return max(voxelHexs[mediumId].rho, 0.0);
+    if (setting.islad >= 1) return max(lads[SurfFlatten(voxelId, voxelRes)], 0.0);
+    return max(canopies[canopyId].density, 0.0);
+}
+
+float ResolveClumpingIndex(int bufferId, vec3 direction)
+{
+    int mediumId = voxelLinks[bufferId].hexId;
+    if (mediumId < 0) return 1.0;
+    float length2 = dot(direction, direction);
+    if (length2 <= 1.0e-12) return 1.0;
+    VoxelHex medium = voxelHexs[mediumId];
+    vec3 weights = abs(direction) * inversesqrt(length2);
+    return max(dot(weights, vec3(medium.ax, medium.ay, medium.az))
+               / max(weights.x + weights.y + weights.z, 1.0e-6), 0.0);
+}
+
+// x 为透过率，y 为拦截率，二者使用相同的 rho*G*CI(direction)。
+vec2 ResolveTurbidInteraction(int bufferId, float density, float G,
+                              vec3 direction, float pathLength, float sceneScale)
+{
+    float opticalDepth = max(density, 0.0) * max(G, 0.0)
+        * ResolveClumpingIndex(bufferId, direction)
+        * max(pathLength, 0.0) * max(sceneScale, 0.0);
+    float transmission = exp(-opticalDepth);
+    return vec2(transmission, 1.0 - transmission);
+}
+#endif
 
 // uint SurfFlatten(ivec3 voxelId, ivec3 voxelRes)
 // {
@@ -594,7 +731,9 @@ float calReCor(float lai)
 }
 
 
-void Soilheatflux(in float Tprofile[TLASTNUM],in float Mprofile[TLASTNUM], float Tsi, inout float G, inout float T[TLASTNUM], float dtime)
+void Soilheatflux(in float Tprofile[TLASTNUM],in float Mprofile[TLASTNUM], float Tsi,
+                  float lowerBoundaryTemperature, inout float G,
+                  inout float T[TLASTNUM], float dtime)
 {
 	/*
 	;      integer::bdry    != 1, given temperature as lower B.C.
@@ -620,9 +759,13 @@ void Soilheatflux(in float Tprofile[TLASTNUM],in float Mprofile[TLASTNUM], float
     float lambda=0.8;
     int nnod=8;
     float Tsfc=Tsi; //表面温度；
-    float lbc=Tprofile[nnod-1];//最低处的边界温度；
+    // The 1 m node is a prescribed deep-soil boundary.  Keeping the previous
+    // value here allowed separate sunlit/shaded columns to retain a permanent
+    // shadow imprint at depth.
+    float lbc=lowerBoundaryTemperature;
     float Tsoil[8];  //上一时刻，土壤的温度廓线；
     for(int i=0;i<8;i++) Tsoil[i]=Tprofile[i];
+    Tsoil[nnod-1]=lbc;
 
     float TA[8],TB[8],TC[8],TD[8],TP[8],TQ[8];
     for(int i=0;i<8;i++)
@@ -687,4 +830,4 @@ void Soilheatflux(in float Tprofile[TLASTNUM],in float Mprofile[TLASTNUM], float
 
 
 
-#endif 
+#endif

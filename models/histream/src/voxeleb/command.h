@@ -16,6 +16,7 @@ public:
 
     bool runEB(std::shared_ptr<VoxelebIO> &modelio);
     bool runRT(std::shared_ptr<VoxelebIO> &modelio);
+    bool runFluid(std::shared_ptr<VoxelebIO> &modelio, int iterations);
 
 //    void submit(std::shared_ptr<VoxelebIO> &VoxelebIO,glm::ivec3 dispatchSize,
 //                VkDescriptorSet descSet, VkPipelineLayout pipelineLayout,

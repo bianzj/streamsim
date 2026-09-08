@@ -3,6 +3,43 @@
 //
 
 #include "voxelrt.h"
+#include "src/base/atmosphere_lut.h"
+#include <algorithm>
+#include <cmath>
+#include <filesystem>
+#include <fstream>
+
+namespace {
+float planckRadiance(const float wavelengthNanometers, const float temperatureKelvin) {
+    constexpr double c1 = 1.1910439340652e8;
+    constexpr double c2 = 14388.291040407;
+    const double wavelengthMicrometers = wavelengthNanometers > 50.0f
+        ? static_cast<double>(wavelengthNanometers) / 1000.0
+        : static_cast<double>(wavelengthNanometers);
+    const double wavelength = std::max(1.0e-6, wavelengthMicrometers);
+    const double temperature = std::max(1.0, static_cast<double>(temperatureKelvin));
+    return static_cast<float>(c1 /
+        (std::pow(wavelength, 5.0) * std::expm1(c2 / (temperature * wavelength))));
+}
+
+std::vector<std::string> voxelrtBandNames(const std::vector<float>& waves,
+                                          const bool temperatureOutput) {
+    std::vector<std::string> names;
+    names.reserve(waves.size());
+    for (const float wave : waves) {
+        const float micrometres = wave > 50.0f ? wave / 1000.0f : wave;
+        std::ostringstream label;
+        if (micrometres <= 2.5f)
+            label << "Reflectance [-] @ " << wave << " nm";
+        else if (temperatureOutput)
+            label << "Brightness temperature [K] @ " << wave << " nm";
+        else
+            label << "Spectral radiance [W m-2 sr-1 um-1] @ " << wave << " nm";
+        names.push_back(label.str());
+    }
+    return names;
+}
+}
 
 
 
@@ -60,13 +97,16 @@ bool Voxelrt::upload(std::shared_ptr<FileIO> &fileio, std::shared_ptr<VoxelrtIO>
     // auto & fileio = modelio->m_fileio;
     // auto & meshio = modelio->m_meshio;
 
-    //uploadDefined(fileio,modelio);
+    uploadDefined(fileio,modelio);
     m_pCompo->createCompOptical(fileio, modelio);
+    // Scene voxelization needs this switch before it extracts per-voxel Hex
+    // parameters.  Previously uploadSetting ran after scene creation, so the
+    // UI option never reached the heterogeneous voxel path.
+    uploadSetting(fileio, modelio);
     m_pScene->createPrimObjScene(fileio, modelio);
     m_pGeometry->createGeometry(fileio,modelio);
 //    defineOPO(modelio);
    // uploadMeteo(fileio,modelio);
-    uploadSetting(fileio, modelio);
   //  uploadAero(fileio,modelio);
 
     return true;
@@ -80,9 +120,16 @@ bool Voxelrt::uploadSetting(std::shared_ptr<FileIO> &fileio, std::shared_ptr<Vox
     modelio->isDisplay = fileio->m_pVoxelrtXml->sensorxml.isDisplay;
     modelio->isAlbedo = fileio->m_pVoxelrtXml->sensorxml.isAlbedo;
     modelio->isImage = fileio->m_pVoxelrtXml->sensorxml.isImage;
+    modelio->isRadiationProcess = fileio->m_pVoxelrtXml->sensorxml.isRadiationProcess;
     modelio->imageSize = fileio->m_pVoxelrtXml->sensorxml.resolution;
     modelio->maxDepth = fileio->m_pVoxelrtXml->settingxml.maxDepth;
     modelio->n_sample = fileio->m_pVoxelrtXml->settingxml.n_sample;
+    modelio->heterogeneousVoxel = fileio->m_pVoxelrtXml->settingxml.heterogeneousVoxel;
+    modelio->periodicNeighborCount =
+        fileio->m_pVoxelrtXml->settingxml.periodicNeighborCount;
+    modelio->skyboxEnabled = fileio->m_pVoxelrtXml->settingxml.skyboxEnabled;
+    modelio->acceleratedRadiationSolver =
+        fileio->m_pVoxelrtXml->settingxml.acceleratedRadiationSolver;
 
     return true;
 }
@@ -96,11 +143,18 @@ bool Voxelrt::updateSetting(std::shared_ptr<VoxelrtIO> &modelio){
     modelio->setting.imageSize = modelio->imageSize;
     modelio->setting.n_wave = modelio->n_wave;
     modelio->setting.scale = modelio->stepsize_surface;
-   // modelio->setting.isTemperature = modelio->isTemperature;
+    modelio->setting.isTemperature = modelio->isTemperature ? 1 : 0;
     modelio->setting.isDisplay = modelio->isDisplay;
     modelio->setting.maxDepth = modelio->maxDepth;
+    // Dense vegetation can require hundreds of ordered triangle crossings.
+    // Tie the limit to ray depth and keep it within a practical GPU range.
+    modelio->setting.maxStep = std::clamp(modelio->maxDepth * 128, 128, 2048);
     modelio->setting.n_sample = modelio->n_sample;
     modelio->setting.voxelSize = modelio->voxelSize_XZY;
+    modelio->setting.voxelCount = modelio->n_voxel;
+    modelio->setting.spectralBatchSize = 1;
+    modelio->setting.periodicNeighborCount = modelio->periodicNeighborCount;
+    modelio->setting.skyboxEnabled = modelio->skyboxEnabled ? 1 : 0;
 
 
     return true;
@@ -135,22 +189,34 @@ bool Voxelrt::run(std::shared_ptr<VoxelrtIO> &modelio, std::shared_ptr<FileIO> &
 
 
     modelio->k_node = -1;
+    std::cout << "PROGRESS\t5\t加载体元场景与辐射参数" << std::endl;
 
-    std::cout << "Time Info:" << "    t_"  << std::endl;
 
-
-    if(modelio->isUAVTrave == true) {
+    if(modelio->isUAVTrave && modelio->n_pos > 0) {
 
         for (int kpos = 0; kpos < modelio->n_pos; kpos++) {
             modelio->k_pos = kpos;
             m_pGeometry->updateSensorPos(modelio, kpos);
+            const glm::vec3 position = modelio->uavposes[kpos];
+            std::cout << "OBSERVATION\t航点 " << (kpos + 1) << "/" << modelio->n_pos
+                      << " X=" << position.x << " Y=" << position.y
+                      << " H=" << position.z << std::endl;
 //            Angle angle = modelio->angles[kangle];
 //            std::cout << "Angle Info:"
 //                      << "    vza_" << std::to_string(angle.vza) << "    vaa_" << std::to_string(angle.vaa)
 //                      << "    sza_" << std::to_string(angle.sza) << "    saa_" << std::to_string(angle.saa)
 //                      << std::endl;
-            m_pCommand->runRT(modelio);
-            outputPos(modelio, fileio, -1, kpos);
+            if (modelio->acceleratedRadiationSolver) {
+                m_pCommand->runRTAccelerated(modelio);
+            } else {
+                m_pCommand->runRT(modelio);
+            }
+            if (modelio->isRadiationProcess && kpos == 0) {
+                outputRadiationProcess(modelio);
+            }
+            if (modelio->isImage) {
+                outputPos(modelio, fileio, -1, kpos);
+            }
         }
     }else {
 
@@ -158,17 +224,164 @@ bool Voxelrt::run(std::shared_ptr<VoxelrtIO> &modelio, std::shared_ptr<FileIO> &
             modelio->k_angle = kangle;
             m_pGeometry->updateAngle(modelio, kangle);
             Angle angle = modelio->angles[kangle];
-            std::cout << "Angle Info:"
+            std::cout << "OBSERVATION\t"
                       << "    vza_" << std::to_string(angle.vza) << "    vaa_" << std::to_string(angle.vaa)
                       << "    sza_" << std::to_string(angle.sza) << "    saa_" << std::to_string(angle.saa)
                       << std::endl;
-            m_pCommand->runRT(modelio);
-            output(modelio, fileio, -1, kangle);
+            if (modelio->acceleratedRadiationSolver) {
+                m_pCommand->runRTAccelerated(modelio);
+            } else {
+                m_pCommand->runRT(modelio);
+            }
+            if (modelio->isRadiationProcess && kangle == 0) {
+                outputRadiationProcess(modelio);
+            }
+            if (modelio->isImage) {
+                if (fileio->m_pVoxelrtXml->sensorxml.projection == Projection::PERSPECTIVE)
+                    outputPos(modelio, fileio, -1, -1);
+                else
+                    output(modelio, fileio, -1, kangle);
+            }
+            std::cout << "PROGRESS\t" << 10 + 85 * (kangle + 1) / std::max(1, modelio->n_angle)
+                      << "\t辐射传输观测 " << kangle + 1 << "/" << modelio->n_angle << std::endl;
         }
     }
 
-
+    std::cout << "PROGRESS\t100\t体元辐射传输计算完成" << std::endl;
     return true;
+}
+
+void Voxelrt::outputRadiationProcess(std::shared_ptr<VoxelrtIO>& modelio) {
+    if (!modelio || modelio->n_voxel <= 0 || !modelio->m_voxelio ||
+        !modelio->m_voxelio->m_pDirBuffer || !modelio->m_voxelio->m_pRadsBuffer) {
+        return;
+    }
+
+    const size_t voxelCount = static_cast<size_t>(modelio->n_voxel);
+    const int bandCount = modelio->n_wave;
+    const size_t radiationStride = static_cast<size_t>(DIFFUSENUM) +
+                                   static_cast<size_t>(modelio->n_wave);
+    std::vector<VoxelDir> directions(voxelCount);
+    std::vector<VoxelRad> radiosities(voxelCount * radiationStride);
+    const auto download = [&](const nvvk::Buffer& source, void* destination, VkDeviceSize size) {
+        nvvk::Buffer staging = modelio->m_pAlloc->createBuffer(
+            size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        m_pVirtual->bufferToBuffer(modelio, source, size, staging);
+        void* mapped = modelio->m_pAlloc->map(staging);
+        std::memcpy(destination, mapped, static_cast<size_t>(size));
+        modelio->m_pAlloc->unmap(staging);
+        modelio->m_pAlloc->destroy(staging);
+    };
+    download(*modelio->m_voxelio->m_pDirBuffer, directions.data(),
+             voxelCount * sizeof(VoxelDir));
+    download(*modelio->m_voxelio->m_pRadsBuffer, radiosities.data(),
+             radiosities.size() * sizeof(VoxelRad));
+
+    // VoxelRT has one static radiation field.  Store it beside the TIFFs,
+    // matching FacetRT's root-level three-dimensional scene output.
+    const std::filesystem::path directory = std::filesystem::path(modelio->projectDir);
+    std::filesystem::create_directories(directory);
+    const std::filesystem::path binaryPath = directory / "voxelrt.bin";
+    const std::filesystem::path metadataPath = directory / "voxelrt.json";
+    std::ofstream binary(binaryPath, std::ios::binary | std::ios::trunc);
+    if (!binary) {
+        throw std::runtime_error("Cannot write voxel radiation process file: " + binaryPath.string());
+    }
+    const float scale = std::max(0.0001f, modelio->stepsize_surface);
+    for (size_t voxel = 0; voxel < voxelCount; ++voxel) {
+        const VoxelLink& link = modelio->m_voxelio->voxellinks[voxel];
+        const float position[3] = {
+            (static_cast<float>(link.voxelId.x) + 0.5f) * scale,
+            (static_cast<float>(link.voxelId.y) + 0.5f) * scale,
+            (static_cast<float>(link.voxelId.z) + 0.5f) * scale
+        };
+        binary.write(reinterpret_cast<const char*>(position), sizeof(position));
+        const float sunlitFraction = std::clamp(directions[voxel].solar, 0.0f, 1.0f);
+        const MeshLink* mesh = nullptr;
+        if (link.instanceId >= 0 &&
+            link.instanceId < static_cast<int>(modelio->m_instanceio->instanceLinks.size())) {
+            const uint32_t meshId = modelio->m_instanceio->instanceLinks[link.instanceId].meshId;
+            if (meshId < modelio->m_meshio->meshLinks.size()) {
+                mesh = &modelio->m_meshio->meshLinks[meshId];
+            }
+        }
+        for (int band = 0; band < bandCount; ++band) {
+            const size_t environmentIndex = voxel * radiationStride +
+                static_cast<size_t>(DIFFUSENUM) + static_cast<size_t>(band);
+            const float environmentValue = radiosities[environmentIndex].cumulated;
+            const float environmentRadiance =
+                std::isfinite(environmentValue) ? std::max(0.0f, environmentValue) : 0.0f;
+            const float wavelength = band < static_cast<int>(modelio->waves.size())
+                ? modelio->waves[band] : static_cast<float>(band + 1);
+            float shadedRadiance = environmentRadiance;
+            float sunlitRadiance = environmentRadiance + std::max(0.0f, modelio->light.direct);
+
+            // Longwave radiance is emitted by the local surface.  Compute the
+            // illuminated and shaded states separately, then mix them using
+            // the voxel's solar transmittance/fraction.
+            if (wavelength > 5000.0f && mesh != nullptr &&
+                mesh->thermalId >= 0 &&
+                mesh->thermalId < static_cast<int>(modelio->m_meshio->thermals.size())) {
+                float reflectance = 0.0f;
+                float transmittance = 0.0f;
+                const size_t spectralIndex =
+                    static_cast<size_t>(std::max(0, mesh->spectralId)) *
+                    static_cast<size_t>(std::max(1, modelio->n_wave)) +
+                    static_cast<size_t>(band);
+                if (spectralIndex < modelio->m_meshio->spectrals.size()) {
+                    reflectance = std::clamp(
+                        modelio->m_meshio->spectrals[spectralIndex].reflectance, 0.0f, 1.0f);
+                    transmittance = std::clamp(
+                        modelio->m_meshio->spectrals[spectralIndex].transmittance,
+                        0.0f, 1.0f - reflectance);
+                }
+                const float emissivity = std::max(0.0f, 1.0f - reflectance - transmittance);
+                const float scatteredRadiance =
+                    (reflectance + transmittance) * environmentRadiance;
+                const Thermal& thermal = modelio->m_meshio->thermals[mesh->thermalId];
+                shadedRadiance = scatteredRadiance + emissivity *
+                    planckRadiance(wavelength, thermal.shadedTemperature);
+                sunlitRadiance = scatteredRadiance + emissivity *
+                    planckRadiance(wavelength, thermal.sunlitTemperature);
+            }
+
+            const float averagedRadiance =
+                sunlitFraction * sunlitRadiance +
+                (1.0f - sunlitFraction) * shadedRadiance;
+            binary.write(reinterpret_cast<const char*>(&averagedRadiance), sizeof(averagedRadiance));
+        }
+        binary.write(reinterpret_cast<const char*>(&sunlitFraction), sizeof(sunlitFraction));
+    }
+    binary.close();
+
+    std::ofstream metadata(metadataPath, std::ios::trunc);
+    metadata << std::setprecision(9)
+             << "{\n  \"kind\": \"voxel-radiation-process\",\n"
+             << "  \"model\": \"voxelrt\",\n"
+             << "  \"processType\": \"radiation\",\n"
+             << "  \"geometry\": \"voxel\",\n"
+             << "  \"voxelCount\": " << voxelCount << ",\n"
+             << "  \"voxelSize\": " << scale << ",\n"
+             << "  \"dataFile\": \"" << binaryPath.filename().string() << "\",\n"
+             << "  \"dataType\": \"float32-little-endian\",\n"
+             << "  \"layout\": \"voxel-interleaved\",\n"
+             << "  \"aggregation\": \"sunlitFraction * sunlitRadiance + (1 - sunlitFraction) * shadedRadiance\",\n"
+             << "  \"recordFloats\": " << 4 + bandCount << ",\n"
+             << "  \"positionOffsets\": [0,1,2],\n"
+             << "  \"fields\": [";
+    for (int band = 0; band < bandCount; ++band) {
+        if (band != 0) metadata << ',';
+        const float wavelength = band < static_cast<int>(modelio->waves.size())
+            ? modelio->waves[band] : static_cast<float>(band + 1);
+        metadata << "{\"id\":\"radiosity_" << wavelength
+                 << "\",\"label\":\"平均辐射度 " << wavelength
+                 << " nm [W m⁻² sr⁻¹ μm⁻¹]\",\"offset\":" << 3 + band << '}';
+    }
+    if (bandCount != 0) metadata << ',';
+    metadata << "{\"id\":\"sunlit_fraction\",\"label\":\"光照比例 [-]\",\"offset\":"
+             << 3 + bandCount << "}]\n}\n";
+    std::cout << "PROCESS\t" << metadataPath.string() << std::endl;
 }
 
 
@@ -240,15 +453,20 @@ void Voxelrt::output(std::shared_ptr<VoxelrtIO> &modelio, std::shared_ptr<FileIO
                 const size_t bandOffset = static_cast<size_t>(band) * imageElements;
                 const float value = sourceData[bandOffset + source];
                 if (value != 0.0f) {
-                    orthData[bandOffset + destination] = value;
+                    orthData[bandOffset + destination] = atmosphereCorrectOutputValue(
+                        value, fileio->m_pVoxelrtXml->atmospherexml,
+                        modelio->waves[band], fileio->m_pVoxelrtXml->sensorxml.position.z,
+                        angle.vza, modelio->isTemperature);
                 }
             }
         }
     }
 
     const float time = knode == -1 ? -1.0f : modelio->meteo.t;
-    fileio->writeENVIdata(
-        modelio->projectDir, orthData.data(), width, height, nWave, angle, time, -1);
+    fileio->writeTIFData(
+        modelio->projectDir, orthData.data(), width, height, nWave,
+        angle, time, fileio->m_pVoxelrtXml->atmospherexml.enabled ? "_v_a" : "_v", -1, false,
+        voxelrtBandNames(modelio->waves, modelio->isTemperature));
 }
 
 void Voxelrt::outputPos(std::shared_ptr<VoxelrtIO> &modelio, std::shared_ptr<FileIO> &fileio, int knode, int kpos) {
@@ -275,9 +493,44 @@ void Voxelrt::outputPos(std::shared_ptr<VoxelrtIO> &modelio, std::shared_ptr<Fil
     modelio->m_pAlloc->destroy(pixelBuffer);
 
     Angle angle = modelio->angles[0];
+    const float sensorHeight = kpos >= 0 && kpos < static_cast<int>(modelio->uavposes.size())
+        ? modelio->uavposes[kpos].z : fileio->m_pVoxelrtXml->sensorxml.position.z;
+    const size_t imageElements = static_cast<size_t>(width) * height;
+    std::vector<float> skyZenith(imageElements, -1.0f);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            float zenith = 0.0f;
+            if (atmosphereSkyPixelZenith(
+                    x, y, width, height,
+                    fileio->m_pVoxelrtXml->sensorxml.sensorFov,
+                    angle.vza, angle.vaa, zenith)) {
+                skyZenith[static_cast<size_t>(y) * width + x] = zenith;
+            }
+        }
+    }
+    for (int band = 0; band < nWave; ++band) {
+        const size_t offset = static_cast<size_t>(band) * imageElements;
+        for (size_t pixel = 0; pixel < imageElements; ++pixel) {
+            float& value = outputData[offset + pixel];
+            if ((!std::isfinite(value) || value == 0.0f) && skyZenith[pixel] >= 0.0f) {
+                value = atmosphereSkyOutputValue(
+                    fileio->m_pVoxelrtXml->atmospherexml,
+                    modelio->waves[band], sensorHeight, skyZenith[pixel],
+                    modelio->isTemperature,
+                    fileio->m_pVoxelrtXml->lightxml.skyTemperature);
+            } else {
+                value = atmosphereCorrectOutputValue(
+                    value, fileio->m_pVoxelrtXml->atmospherexml,
+                    modelio->waves[band], sensorHeight,
+                    angle.vza, modelio->isTemperature);
+            }
+        }
+    }
     const float time = knode == -1 ? -1.0f : modelio->meteo.t;
-    fileio->writeENVIdata(
-        modelio->projectDir, outputData.data(), width, height, nWave, angle, time, kpos);
+    fileio->writeTIFData(
+        modelio->projectDir, outputData.data(), width, height, nWave,
+        angle, time, fileio->m_pVoxelrtXml->atmospherexml.enabled ? "_v_a" : "_v", kpos, false,
+        voxelrtBandNames(modelio->waves, modelio->isTemperature));
 }
 
 

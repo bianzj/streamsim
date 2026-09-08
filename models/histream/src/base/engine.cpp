@@ -4,6 +4,29 @@
 
 #include "engine.h"
 
+#include <vector>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <Windows.h>
+#endif
+
+namespace {
+std::filesystem::path executableDirectory()
+{
+#ifdef _WIN32
+    std::vector<wchar_t> buffer(32768, L'\0');
+    const DWORD length = GetModuleFileNameW(nullptr, buffer.data(),
+                                            static_cast<DWORD>(buffer.size()));
+    if (length > 0 && length < buffer.size()) {
+        return std::filesystem::path(std::wstring(buffer.data(), length)).parent_path();
+    }
+#endif
+    return std::filesystem::current_path();
+}
+}
 
 
 void Engine::init(Mode mode)
@@ -65,7 +88,7 @@ void Engine::input(std::string path, std::string V, std::string outputPath){
     }
 
     m_pFileio = std::make_shared<FileIO>();
-    m_pFileio->readXml(m_inputPath, m_mode);
+    m_pFileio->readJson(m_inputPath, m_mode);
     init(m_mode);
 
     if(m_mode == Mode::eRaytracing) {
@@ -115,6 +138,10 @@ bool Engine::create() {
 
 std::string Engine::facetShaderDirectory(const char* name) const
 {
+    const std::filesystem::path deployed = executableDirectory() / "shader" / name;
+    if (std::filesystem::exists(deployed)) {
+        return deployed.string();
+    }
     const std::filesystem::path local = std::filesystem::current_path() / "shader" / name;
     if (std::filesystem::exists(local)) {
         return local.string();

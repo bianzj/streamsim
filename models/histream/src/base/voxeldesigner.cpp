@@ -697,13 +697,21 @@ PrimMesh VoxelDesigner::createTriEllipsoid(Shape shape, float stepSize)
     voxelTriModel.nIndices = 0;
     voxelTriModel.meshId = 0;
 
-    int widthSize = std::ceil(shape.width / stepSize);
-    int heightSize = std::ceil(shape.height / stepSize);
-    int lengthSize = std::ceil(shape.length / stepSize);
+    if (!(stepSize > 0.0f) || !(shape.width > 0.0f) ||
+        !(shape.height > 0.0f) || !(shape.length > 0.0f)) {
+        return voxelTriModel;
+    }
 
-    float widthCenter = (shape.width / stepSize) / 2.0;
-    float heightCenter = (shape.height / stepSize) / 2.0;
-    float lengthCenter = (shape.length / stepSize) / 2.0;
+    // Centre the physical ellipsoid in its discrete bounding box.  Using the
+    // fractional physical size as the centre made any dimension smaller than
+    // one voxel miss the only cell centre and produced an empty primitive.
+    const int widthSize = std::max(1, static_cast<int>(std::ceil(shape.width / stepSize)));
+    const int heightSize = std::max(1, static_cast<int>(std::ceil(shape.height / stepSize)));
+    const int lengthSize = std::max(1, static_cast<int>(std::ceil(shape.length / stepSize)));
+
+    const float widthCenter = widthSize / 2.0f;
+    const float heightCenter = heightSize / 2.0f;
+    const float lengthCenter = lengthSize / 2.0f;
 
     for (int i = 0; i < lengthSize; i++)
     {
@@ -752,7 +760,8 @@ PrimMesh VoxelDesigner::createTriEllipsoid(Shape shape, float stepSize)
                     point[7].y = voxel.y;
                     point[7].z = (voxel.z + 1) ;
 
-                    for (int vi = 0; vi < 6; vi++)
+                    // All eight cell corners are shared by the initial faces.
+                    for (int vi = 0; vi < 8; vi++)
                     {
                         VertexAttribute va;
                         va.pos = point[vi];
@@ -775,15 +784,15 @@ PrimMesh VoxelDesigner::createTriEllipsoid(Shape shape, float stepSize)
                     voxelTriModel.indices.emplace_back(voxelTriModel.nVertices + 4);
                     voxelTriModel.indices.emplace_back(voxelTriModel.nVertices + 5);
 
-                    // 0,3,4,6 forward
+                    // 0,3,4,7 forward
                     voxelTriModel.indices.emplace_back(voxelTriModel.nVertices);
                     voxelTriModel.indices.emplace_back(voxelTriModel.nVertices + 4);
-                    voxelTriModel.indices.emplace_back(voxelTriModel.nVertices + 6);
+                    voxelTriModel.indices.emplace_back(voxelTriModel.nVertices + 7);
                     voxelTriModel.indices.emplace_back(voxelTriModel.nVertices);
+                    voxelTriModel.indices.emplace_back(voxelTriModel.nVertices + 7);
                     voxelTriModel.indices.emplace_back(voxelTriModel.nVertices + 3);
-                    voxelTriModel.indices.emplace_back(voxelTriModel.nVertices + 6);
 
-                    voxelTriModel.nVertices += 6;
+                    voxelTriModel.nVertices += 8;
                     voxelTriModel.nIndices += 6 * 3;
 
                    voxelTriModel.voxelIds.emplace_back(glm::vec3{i, j, k});
@@ -1827,4 +1836,3 @@ PrimMesh VoxelDesigner::createTriEntitiesFromTif_wall(std::string heightPath, gl
 
     return voxelTriModel;
 }
-

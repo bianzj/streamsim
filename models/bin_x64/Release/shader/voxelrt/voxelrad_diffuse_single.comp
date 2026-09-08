@@ -26,6 +26,8 @@
 #include "../global.glsl"
 #include "../settings.h"
 #include "../functions.glsl"
+#include "../background_hapke.glsl"
+#include "../water_brdf.glsl"
 #include "../nanovdb_info.glsl"
 #include "../shade_state_voxel.glsl"
 
@@ -36,7 +38,7 @@ ShadowHitPayload shadow_payload;
 
 layout(local_size_x = GROUP_SIZEX) in;
 
-#define MAXBAND    25
+#define MAXBAND    800
 // #define NUM_VNIR 2001 
 // #define NUM_BAND 2002
 
@@ -46,13 +48,42 @@ float GammaT[DIFFUSE_ANGLE_NUM * DIFFUSE_ANGLE_NUM];
 float GammaSR[DIFFUSE_ANGLE_NUM];
 float GammaST[DIFFUSE_ANGLE_NUM];
 
+uint voxelRadiationIndex(uint bufferId, uint offset)
+{
+    return bufferId * (uint(DIFFUSE_ANGLE_NUM) + uint(setting.n_wave)) + offset;
+}
+
+uint voxelBandRadiationIndex(uint bufferId, uint band)
+{
+    return voxelRadiationIndex(bufferId, uint(DIFFUSE_ANGLE_NUM) + band);
+}
+
+vec3 rotateDiffuseAzimuth(vec3 direction, float angle)
+{
+    float c = cos(angle);
+    float s = sin(angle);
+    return vec3(c * direction.x + s * direction.z,
+                direction.y,
+               -s * direction.x + c * direction.z);
+}
+
+float diffuseAzimuthOffset(ivec3 voxelId)
+{
+    // Independent Cranley-Patterson rotations provide unbiased samples for
+    // compact emitters. The image pass filters these estimates on continuous
+    // soil surfaces, so the variance does not appear as pixel noise.
+    float hashValue = dot(vec3(voxelId), vec3(12.9898, 78.233, 37.719));
+    return fract(sin(hashValue) * 43758.5453) * M_TWO_PI;
+}
+
 // calculate the scattering phase function from solar angle to N angles.
-void Scattering_phase_function_solar_diffuse()
+void Scattering_phase_function_solar_diffuse(float azimuthOffset)
 {
     vec3 directioni = normalize(lightSet.direction);
     for(int jangle = 0; jangle < DIFFUSE_ANGLE_NUM; jangle++)
     {
-        vec3 directionj = normalize(DIFFUSE_DIRECTIONS[jangle]);
+        vec3 directionj = normalize(rotateDiffuseAzimuth(
+            DIFFUSE_DIRECTIONS[jangle], azimuthOffset));
         vec2 gamma = scattering_phase_function_direct_XZY_paper(directioni, -directionj);
         GammaSR[jangle] = gamma.x;
         GammaST[jangle] = gamma.y;
@@ -60,24 +91,26 @@ void Scattering_phase_function_solar_diffuse()
 }
 
 // calculate the scattering phase function from N angles to N angles.
-void Scattering_phase_function_diffuse()
+void Scattering_phase_function_diffuse(float azimuthOffset)
 {
     for(int iangle = 0; iangle < DIFFUSE_ANGLE_NUM; iangle++)
     {
-        vec3 directioni = normalize(DIFFUSE_DIRECTIONS[iangle]);
+        vec3 directioni = normalize(rotateDiffuseAzimuth(
+            DIFFUSE_DIRECTIONS[iangle], azimuthOffset));
         for(int jangle = 0; jangle < DIFFUSE_ANGLE_NUM; jangle++)
         {
-            vec3 directionj = normalize(DIFFUSE_DIRECTIONS[jangle]);
+            vec3 directionj = normalize(rotateDiffuseAzimuth(
+                DIFFUSE_DIRECTIONS[jangle], azimuthOffset));
             vec2 gamma = scattering_phase_function_direct_XZY_paper(directioni, -directionj);
             GammaR[iangle * DIFFUSE_ANGLE_NUM + jangle] = gamma.x;
-            GammaR[iangle * DIFFUSE_ANGLE_NUM + jangle] = gamma.y;
+            GammaT[iangle * DIFFUSE_ANGLE_NUM + jangle] = gamma.y;
         }
     }
 }
 
 // calculate the diffuse term.
 bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVDBLink,
- int kwave,float Esun,float Esky, int kiter)
+ int kwave,float Esun,float Esky, int kiter, float azimuthOffset)
 {
 
   float G,density;
@@ -119,12 +152,13 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
   ////////////////////////////////////////////////////////
   for(uint iangle = 0; iangle < DIFFUSE_ANGLE_NUM; iangle++)
   {
-    directioni0 = DIFFUSE_DIRECTIONS[iangle];
+    directioni0 = rotateDiffuseAzimuth(
+        DIFFUSE_DIRECTIONS[iangle], azimuthOffset);
     directioni = normalize(directioni0);
     Ray ray = Ray(voxelPos0, directioni);
     alpha_toSolar = 1.0;
     alpha_toVoxel = 1.0;
-	  voxelRads[bufferId0*DIFFUSE_ANGLE_NUM+iangle].induced = 0.0;
+	  voxelRads[voxelRadiationIndex(bufferId0, iangle)].induced = 0.0;
 
     /////////////////////////////////////////////////////
     /// Iteration in travel step
@@ -149,7 +183,7 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
            float skyrad = alpha_toVoxel*Esky;
            //skyrad = 1000;
           //skyrad = 0.5;
-          uint index = bufferId0*DIFFUSE_ANGLE_NUM+iangle;
+          uint index = voxelRadiationIndex(bufferId0, iangle);
           atomicAdd(voxelRads[index].induced,
               skyrad,
               gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
@@ -182,6 +216,7 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
           typeId = meshLink.type;
           spectralId = meshLink.spectralId;
           thermalId = meshLink.thermalId;
+          canopy = canopies[canopyId];
           uint spectralIdBase = spectralId*n_wave;
 
 
@@ -192,16 +227,14 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
           {
 
 
-              G = canopies[canopyId].G;
-              // density determined by mesh/isntance or pixel scale?
-              if(setting.islad < 1){
-                  density = canopies[canopyId].density;
-              }else{         
-                  uint surf1DId = SurfFlatten(voxelId, voxelRes);
-                  density = lads[surf1DId]; 
-              }
+              G = canopy.G;
+              density = isParticipatingMedium(canopy) ? canopy.density
+                  : ResolveTurbidDensity(bufferId, canopyId, voxelId, voxelRes);
               float pathLength = Vector2Distance(sstate.position - sstate.lastPosition);
-              alpha_voxel = exp(-density * G * pathLength * scale);
+              alpha_voxel = isParticipatingMedium(canopy)
+                  ? canopyVoxelTransmittance(canopy, density, G, pathLength, scale)
+                  : ResolveTurbidInteraction(bufferId, density, G,
+                      sstate.position - sstate.lastPosition, pathLength, scale).x;
               alpha_toSolar = voxelDirs[bufferId].solar;
 
             // get the phase function for solar direction to induced direction 
@@ -245,20 +278,34 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
               // emitter
               /////////////////////////////
               // thermalRadiance = 100;
-              if(wavelength > 5000){
-                sunlitRadiance = Planck(wavelength,sunlitTemperature);
-                shadedRadiance = Planck(wavelength,shadedTemperature);
-                thermalRadiance = (1-alpha_toSolar)*shadedRadiance + alpha_toSolar*sunlitRadiance;
-                radiance+= (thermalRadiance*(1-alpha_voxel)*emis* alpha_toVoxel);
+              if(isParticipatingMedium(canopy)) {
+                float removedFraction = 1.0 - alpha_voxel;
+                float scatteringFraction = removedFraction * clamp(canopy.scatteringAlbedo, 0.0, 1.0);
+                float absorptionFraction = removedFraction - scatteringFraction;
+                float mediumTemperature = canopy.fixedTemperature > 0.0
+                    ? canopy.fixedTemperature : 0.5 * (sunlitTemperature + shadedTemperature);
+                radiance += Planck(wavelength, mediumTemperature) * canopy.emissionScale
+                    * absorptionFraction * alpha_toVoxel;
+                float scatteringPhase = mediumPhaseHG(canopy,
+                    dot(normalize(lightSet.direction), directioni));
+                radiance += alpha_toSolar * Esun / max(cosSolar, 0.001)
+                    * scatteringFraction * scatteringPhase * alpha_toVoxel;
+              } else {
+                if(wavelength > 5000){
+                  sunlitRadiance = Planck(wavelength,sunlitTemperature);
+                  shadedRadiance = Planck(wavelength,shadedTemperature);
+                  thermalRadiance = (1-alpha_toSolar)*shadedRadiance + alpha_toSolar*sunlitRadiance;
+                  radiance+= (thermalRadiance*(1-alpha_voxel)*emis* alpha_toVoxel);
+                }
+                radiance += (alpha_toSolar * gamma * Esun/cosSolar * alpha_toVoxel *(1-alpha_voxel));
               }
               //////////////////////////////
               /// Solar 
               /////////////////////////////
-              radiance += (alpha_toSolar * gamma * Esun/cosSolar * alpha_toVoxel *(1-alpha_voxel));  
               //////////////////////////////
               /// Save back
               /////////////////////////////
-              atomicAdd(voxelRads[bufferId0*DIFFUSE_ANGLE_NUM+iangle].induced,radiance,
+              atomicAdd(voxelRads[voxelRadiationIndex(bufferId0, iangle)].induced,radiance,
                   gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
             alpha_toVoxel = alpha_toVoxel * alpha_voxel;
             if(alpha_toVoxel < 0.01) break; 
@@ -293,8 +340,8 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
         vec3 ffnormal = sstate.normal;
         bool inSameSides = IsSameSide(wo,wi,ffnormal);
         // THERMAL
-        sunlitTemperature = thermalMaterials[alignBufferId].sunlitTemperature;
-        shadedTemperature = thermalMaterials[alignBufferId].shadedTemperature;
+        sunlitTemperature = thermalMaterials[thermalId].sunlitTemperature;
+        shadedTemperature = thermalMaterials[thermalId].shadedTemperature;
         float radiance=0;
           wavelength = wave[kwave];
           sunlitRadiance = Planck(wavelength,sunlitTemperature);
@@ -303,7 +350,12 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
           // SPECTRAL
           trans = spectralMaterials[spectralId*n_wave+kwave].transmittance;
           refl = spectralMaterials[spectralId*n_wave+kwave].reflectance;
-          emis = 1 - trans - refl;
+          float angularStrength = meshLinks[meshId].angularEffectStrength;
+          emis = typeId == TYPE_WATER
+              ? clamp(1.0 - waterDirectionalReflectance(meshLink.bioId, refl,
+                  -directioni, ffnormal) - trans, 0.0, 1.0)
+              : surfaceThermalEmissivity(
+                  refl, trans, -directioni, ffnormal, angularStrength);
           // //////////////////////////////
           // /// Multiple case
           // /////////////////////////////
@@ -325,7 +377,11 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
           ///////////////////////////////
           if(inSameSides)
           {
-            radiance += (refl * Esun * alpha_toSolar * alpha_toVoxel);
+            float surfaceWeight = typeId == TYPE_WATER
+                ? waterCoxMunkWeight(meshLink.bioId, refl, wi, wo, ffnormal)
+                : backgroundReflectanceWeight(
+                    refl, wi, wo, ffnormal, angularStrength);
+            radiance += (surfaceWeight * Esun * alpha_toSolar * alpha_toVoxel);
           }
           // ////////////////////////////////
           // //emitter
@@ -335,7 +391,7 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
           /// Save back
           /////////////////////////////
      
-          atomicAdd(voxelRads[bufferId0*DIFFUSE_ANGLE_NUM+iangle].induced,radiance,
+          atomicAdd(voxelRads[voxelRadiationIndex(bufferId0, iangle)].induced,radiance,
               gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
 
           alpha_toVoxel = 0;
@@ -352,13 +408,219 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
     {
         float skyrad = alpha_toVoxel*Esky;
         //skyrad = 0.5;
-        uint index = bufferId0*DIFFUSE_ANGLE_NUM+iangle;
+        uint index = voxelRadiationIndex(bufferId0, iangle);
         atomicAdd(voxelRads[index].induced,
             skyrad,
             gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
     }
   }
   return false;
+}
+
+#define SPECTRAL_PACKET_SIZE 4
+
+// Trace geometry once and evaluate up to four adjacent wavelengths along the
+// same ordered intersections. Structural extinction is wavelength-independent
+// in this model; only material scattering/emission is evaluated per band.
+void voxel_raytracing_diffuse_packet(
+    vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVDBLink,
+    int firstBand, int bandCount,
+    float packetEsun[SPECTRAL_PACKET_SIZE],
+    float packetEsky[SPECTRAL_PACKET_SIZE],
+    float azimuthOffset,
+    out float packetRadiance[SPECTRAL_PACKET_SIZE])
+{
+  for(int bandOffset = 0; bandOffset < SPECTRAL_PACKET_SIZE; ++bandOffset)
+    packetRadiance[bandOffset] = 0.0;
+
+  float scale = setting.scale;
+  vec3 semiRange = vec3(floor(setting.voxelSize.x / 2.0 + 0.5), 0,
+                       floor(setting.voxelSize.z / 2.0 + 0.5));
+  ivec3 voxelRes = ivec3(setting.voxelSize);
+  float cosSolar = abs(normalize(lightSet.direction).y);
+  ivec3 voxelId0 = voxelLinks[bufferId0].voxelId;
+
+  for(uint iangle = 0; iangle < DIFFUSE_ANGLE_NUM; ++iangle)
+  {
+    float directionalRadiance[SPECTRAL_PACKET_SIZE];
+    float directionalCorrection[SPECTRAL_PACKET_SIZE];
+    for(int bandOffset = 0; bandOffset < SPECTRAL_PACKET_SIZE; ++bandOffset) {
+      directionalRadiance[bandOffset] = 0.0;
+      directionalCorrection[bandOffset] = 0.0;
+    }
+
+    vec3 direction0 = rotateDiffuseAzimuth(
+        DIFFUSE_DIRECTIONS[iangle], azimuthOffset);
+    vec3 direction = normalize(direction0);
+    Ray ray = Ray(voxelPos0, direction);
+    float alphaToVoxel = 1.0;
+    int kstep = 0;
+
+    for(kstep = 0; kstep <= setting.maxStep; ++kstep)
+    {
+      ClosestHit(ray, 0.00001);
+      if(prd.hitT == INFINITY)
+      {
+        if(direction0.y >= 0) {
+          for(int bandOffset = 0; bandOffset < bandCount; ++bandOffset)
+            compensatedAdd(directionalRadiance[bandOffset],
+                directionalCorrection[bandOffset],
+                alphaToVoxel * packetEsky[bandOffset]);
+        }
+        alphaToVoxel = 0.001;
+        break;
+      }
+
+      ShadeState sstate = GetShadeState(prd);
+      ivec3 alignVoxelId;
+      ivec3 voxelId = getVoxelIdSemi(
+          sstate.position, semiRange, scale, direction, alignVoxelId);
+      int bufferId = nanovdbGet(nanoVDBLink, voxelId);
+      int alignBufferId = nanovdbGet(nanoVDBLink, alignVoxelId);
+
+      if(bufferId >= 0)
+      {
+        uint instanceId = voxelLinks[bufferId].instanceId;
+        uint meshId = instanceLinks[instanceId].meshId;
+        MeshLink meshLink = meshLinks[meshId];
+        uint canopyId = meshLink.canopyId;
+        uint typeId = meshLink.type;
+        uint spectralId = meshLink.spectralId;
+        uint thermalId = meshLink.thermalId;
+        Canopy canopy = canopies[canopyId];
+
+        if(typeId == TYPE_VEGETATION)
+        {
+          float density = isParticipatingMedium(canopy) ? canopy.density
+              : ResolveTurbidDensity(bufferId, canopyId, voxelId, voxelRes);
+          float pathLength = Vector2Distance(
+              sstate.position - sstate.lastPosition);
+          float alphaVoxel = isParticipatingMedium(canopy)
+              ? canopyVoxelTransmittance(
+                    canopy, density, canopy.G, pathLength, scale)
+              : ResolveTurbidInteraction(
+                    bufferId, density, canopy.G,
+                    sstate.position - sstate.lastPosition,
+                    pathLength, scale).x;
+          float alphaToSolar = voxelDirs[bufferId].solar;
+          float gammaR = GammaSR[iangle];
+          float gammaT = GammaST[iangle];
+          float sunlitTemperature =
+              thermalMaterials[thermalId].sunlitTemperature;
+          float shadedTemperature =
+              thermalMaterials[thermalId].shadedTemperature;
+
+          for(int bandOffset = 0; bandOffset < bandCount; ++bandOffset)
+          {
+            int kwave = firstBand + bandOffset;
+            float wavelength = wave[kwave];
+            float trans = spectralMaterials[
+                spectralId * uint(setting.n_wave) + uint(kwave)].transmittance;
+            float refl = spectralMaterials[
+                spectralId * uint(setting.n_wave) + uint(kwave)].reflectance;
+            float emis = 1.0 - trans - refl;
+            float gamma = clamp(
+                abs(gammaR) * (refl + trans) + abs(gammaT) * trans,
+                0.0, 1.0);
+            float radiance = 0.0;
+
+            if(isParticipatingMedium(canopy)) {
+              float removedFraction = 1.0 - alphaVoxel;
+              float scatteringFraction = removedFraction
+                  * clamp(canopy.scatteringAlbedo, 0.0, 1.0);
+              float absorptionFraction =
+                  removedFraction - scatteringFraction;
+              float mediumTemperature = canopy.fixedTemperature > 0.0
+                  ? canopy.fixedTemperature
+                  : 0.5 * (sunlitTemperature + shadedTemperature);
+              radiance += Planck(wavelength, mediumTemperature)
+                  * canopy.emissionScale * absorptionFraction * alphaToVoxel;
+              float scatteringPhase = mediumPhaseHG(
+                  canopy, dot(normalize(lightSet.direction), direction));
+              radiance += alphaToSolar * packetEsun[bandOffset]
+                  / max(cosSolar, 0.001) * scatteringFraction
+                  * scatteringPhase * alphaToVoxel;
+            } else {
+              if(wavelength > 5000) {
+                float thermalRadiance =
+                    (1.0 - alphaToSolar)
+                        * Planck(wavelength, shadedTemperature)
+                    + alphaToSolar
+                        * Planck(wavelength, sunlitTemperature);
+                radiance += thermalRadiance * (1.0 - alphaVoxel)
+                    * emis * alphaToVoxel;
+              }
+              radiance += alphaToSolar * gamma
+                  * packetEsun[bandOffset] / cosSolar
+                  * alphaToVoxel * (1.0 - alphaVoxel);
+            }
+            compensatedAdd(directionalRadiance[bandOffset],
+                directionalCorrection[bandOffset], radiance);
+          }
+
+          alphaToVoxel *= alphaVoxel;
+          if(alphaToVoxel < 0.01) break;
+        }
+      }
+
+      if(alignBufferId >= 0)
+      {
+        uint instanceId = voxelLinks[alignBufferId].instanceId;
+        uint meshId = instanceLinks[instanceId].meshId;
+        uint typeId = meshLinks[meshId].type;
+        uint canopyId = meshLinks[meshId].canopyId;
+        uint spectralId = meshLinks[meshId].spectralId;
+        if(typeId == TYPE_BUILDING) {
+          int faceId = getFaceIdSimple(
+              sstate.position, semiRange, alignVoxelId);
+          alignBufferId += faceId;
+        }
+
+        float alphaToSolar = voxelDirs[alignBufferId].solar;
+        vec3 wo = direction;
+        vec3 wi = lightSet.direction;
+        vec3 faceNormal = sstate.normal;
+        bool inSameSides = IsSameSide(wo, wi, faceNormal);
+        float angularStrength = meshLinks[meshId].angularEffectStrength;
+
+        if(inSameSides) {
+          for(int bandOffset = 0; bandOffset < bandCount; ++bandOffset)
+          {
+            int kwave = firstBand + bandOffset;
+            float refl = spectralMaterials[
+                spectralId * uint(setting.n_wave) + uint(kwave)].reflectance;
+            float surfaceWeight = typeId == TYPE_WATER
+                ? waterCoxMunkWeight(meshLinks[meshId].bioId, refl, wi, wo, faceNormal)
+                : backgroundReflectanceWeight(
+                    refl, wi, wo, faceNormal, angularStrength);
+            compensatedAdd(directionalRadiance[bandOffset],
+                directionalCorrection[bandOffset],
+                surfaceWeight * packetEsun[bandOffset]
+                    * alphaToSolar * alphaToVoxel);
+          }
+        }
+        alphaToVoxel = 0.0;
+        break;
+      }
+
+      ray = Ray(sstate.position, direction);
+      vec3 faceNormal = sstate.normal;
+      ray.origin = OffsetRay(
+          ray.origin,
+          dot(ray.direction, faceNormal) > 0 ? faceNormal : -faceNormal);
+    }
+
+    if(kstep >= setting.maxStep && alphaToVoxel > 0.05) {
+      for(int bandOffset = 0; bandOffset < bandCount; ++bandOffset)
+        compensatedAdd(directionalRadiance[bandOffset],
+            directionalCorrection[bandOffset],
+            alphaToVoxel * packetEsky[bandOffset]);
+    }
+
+    for(int bandOffset = 0; bandOffset < bandCount; ++bandOffset)
+      packetRadiance[bandOffset] += directionalRadiance[bandOffset]
+          * DIFFUSE_HEMISPHERE_AVERAGE_WEIGHT;
+  }
 }
 
 void main()
@@ -368,6 +630,7 @@ void main()
   //------------------------------------------------------------
   // get bufferId, voxelId, instanceId and typeId
   uint bufferId0 = uint(gl_GlobalInvocationID.x);
+  if(bufferId0 >= uint(setting.voxelCount)) return;
   ivec3 voxelId0 = voxelLinks[bufferId0].voxelId;
   if(voxelLinks[bufferId0].isValid==0) return;
   // Get nanoVDBLink: from voxelId to bufferId
@@ -378,29 +641,68 @@ void main()
   uint spectralId = meshLinks[meshId].spectralId;
   uint n_wave = setting.n_wave;
   uint spectralIdBase = spectralId * n_wave;
-
-
-
+  int kwave = setting.n_jump;
+  if(kwave < 0 || kwave >= setting.n_wave || kwave >= MAXBAND) return;
 
   int faceId = voxelLinks[bufferId0].faceId;
-
-  // get center position of a voxel
   float scale = setting.scale;
-  vec3 semiRange = vec3(floor(setting.voxelSize.x/2.0+0.5),0,floor(setting.voxelSize.z/2.0+0.5));
-
-
-  // from vbd space to vk space
-  vec3 voxelPos0 = vec3(voxelId0.x- semiRange.x,
+  vec3 semiRange = vec3(floor(setting.voxelSize.x/2.0+0.5),0,
+                        floor(setting.voxelSize.z/2.0+0.5));
+  vec3 voxelPos0 = vec3(voxelId0.x - semiRange.x,
                         voxelId0.y,
-                        voxelId0.z -semiRange.z); 
-  getFacetIdPos(faceId,  voxelPos0);
-  
+                        voxelId0.z - semiRange.z);
+  getFacetIdPos(faceId, voxelPos0);
+  float azimuthOffset = diffuseAzimuthOffset(voxelId0);
 
-  // calculate the scattering phase function from solar angle to N angles.
-  Scattering_phase_function_solar_diffuse();
+  if(setting.spectralBatchSize > 1)
+  {
+    int bandCount = min(
+        min(setting.spectralBatchSize, SPECTRAL_PACKET_SIZE),
+        setting.n_wave - kwave);
+    float packetEsun[SPECTRAL_PACKET_SIZE];
+    float packetEsky[SPECTRAL_PACKET_SIZE];
+    float sampledRadiance[SPECTRAL_PACKET_SIZE];
+    for(int bandOffset = 0; bandOffset < SPECTRAL_PACKET_SIZE; ++bandOffset) {
+      packetEsun[bandOffset] = 0.0;
+      packetEsky[bandOffset] = 0.0;
+      sampledRadiance[bandOffset] = 0.0;
+    }
+    for(int bandOffset = 0; bandOffset < bandCount; ++bandOffset) {
+      float wavelength = wave[kwave + bandOffset];
+      packetEsun[bandOffset] = wavelength > 5000
+          ? 0.0 : lightSet.direct;
+      packetEsky[bandOffset] = wavelength > 5000
+          ? Planck(wavelength, lightSet.skyTemperature)
+          : lightSet.diffuse;
+    }
 
-  // calculate the scattering phase function from N angles to N angles.
-  Scattering_phase_function_diffuse();
+    const int diffuseSampleSets = 5;
+    for(int kiter = 0; kiter < diffuseSampleSets; ++kiter) {
+      float iterationOffset = azimuthOffset + float(kiter) * 2.39996323;
+      Scattering_phase_function_solar_diffuse(iterationOffset);
+      float iterationRadiance[SPECTRAL_PACKET_SIZE];
+      voxel_raytracing_diffuse_packet(
+          voxelPos0, bufferId0, nanoVDBLink, kwave, bandCount,
+          packetEsun, packetEsky, iterationOffset, iterationRadiance);
+      for(int bandOffset = 0; bandOffset < bandCount; ++bandOffset)
+        sampledRadiance[bandOffset] += iterationRadiance[bandOffset];
+    }
+
+    for(int bandOffset = 0; bandOffset < bandCount; ++bandOffset) {
+      float diffuseRadiance = sampledRadiance[bandOffset]
+          / float(diffuseSampleSets);
+      uint bandIndex = voxelBandRadiationIndex(
+          bufferId0, uint(kwave + bandOffset));
+      voxelRads[bandIndex].cumulated = diffuseRadiance;
+      if(kwave + bandOffset == 0)
+        voxelNetRads[bufferId0].diffuseTrad = diffuseRadiance;
+    }
+    return;
+  }
+  float diffuseRadiance = 0.0;
+
+
+
 
   // set the diffuse in VNIR
   voxelNetRads[bufferId0].diffuseTrad = 0;
@@ -410,67 +712,57 @@ void main()
   if(setting.maxIteration > 1)
   {
       float Esky,Esun,wavelength;               // shortwave
-      for(int kwave = 0; kwave <setting.n_wave; kwave++)
-      {
-
-          wavelength = wave[kwave];
-          float Esun = 0, Esky = 0;
-          float temp=0;
+      wavelength = wave[kwave];
           Esun = lightSet.direct;
           Esky = lightSet.diffuse;
           if(wavelength > 5000){
-            Esun = Planck(wavelength,lightSet.solarTemperature);
-            Esky = Planck(wavelength,lightSet.skyTemperature);
+            // Longwave illumination comes from the configured sky and
+            // surrounding thermal emitters, not a 6000 K solar radiance.
+            Esun = 0.0;
+            Esky = Planck(wavelength, lightSet.skyTemperature);
           }
 
-          for(int kiter=0;kiter< 5;kiter++)
+          const int diffuseSampleSets = 5;
+          float sampledRadiance = 0.0;
+          for(int kiter = 0; kiter < diffuseSampleSets; kiter++)
           {
-              voxel_raytracing_diffuse(voxelPos0, bufferId0, nanoVDBLink, kwave, Esun,Esky,kiter);
+              // The old loop repeated exactly the same 64 rays five times.
+              // Rotate each set by the golden angle and average the five
+              // estimates to suppress discrete-ordinate spokes without
+              // increasing the existing ray count.
+              float iterationOffset = azimuthOffset
+                  + float(kiter) * 2.39996323;
+              Scattering_phase_function_solar_diffuse(iterationOffset);
+              voxel_raytracing_diffuse(voxelPos0, bufferId0, nanoVDBLink,
+                  kwave, Esun, Esky, kiter, iterationOffset);
               groupMemoryBarrier();  
               barrier();
 
+              float iterationRadiance = 0.0;
+              float iterationCorrection = 0.0;
               for(uint iangle=0;iangle < DIFFUSE_ANGLE_NUM;iangle++)
               {
-                  uint index = bufferId0*DIFFUSE_ANGLE_NUM+iangle;
+                  uint index = voxelRadiationIndex(bufferId0, iangle);
                   voxelRads[index].cumulated = voxelRads[index].induced;
+                  compensatedAdd(iterationRadiance, iterationCorrection,
+                      finiteNonnegative(voxelRads[index].induced));
               }
+              sampledRadiance += iterationRadiance
+                  * DIFFUSE_HEMISPHERE_AVERAGE_WEIGHT;
           }// for iteration
 
-    
-          float rads = 0, radtemp = 0, absorb = 1.0;
-          // iteration in diffuse
-          int effeNum = 1;
-          for(int iangle = 0; iangle < DIFFUSE_ANGLE_NUM; iangle++)
-          {
-              uint loc = bufferId0*DIFFUSE_ANGLE_NUM+iangle;
-              radtemp = voxelRads[loc].cumulated;
-              if(radtemp>0.05)
-              {
-                  effeNum = effeNum + 1;
-                  rads = rads + radtemp;
-              }
-          }
-          if (effeNum < 1) effeNum=1;
-          //-------------------------------------------------------
-          // for twince receive and twince emit, but it not work
-          // using effeNum replace this function
-          //--------------------------------------------------------
-          if (typeId0 == TYPE_SOIL || typeId0 == TYPE_BUILDING)
-          {
-              rads = rads/effeNum;
-          }
-          else
-          {rads = rads/effeNum;}
+          // Preserve incoming spectral radiance. Surface absorptance and
+          // reflectance are applied later by the image pass.
+          diffuseRadiance = sampledRadiance / float(diffuseSampleSets);
+    }
 
-          absorb = 1 - spectralMaterials[spectralIdBase + kwave].transmittance -
-                  spectralMaterials[spectralIdBase + kwave].reflectance;
-          rads = rads * absorb;
-  
-          // radSum = 100;
-        
-          atomicAdd(voxelNetRads[bufferId0].diffuseTrad, rads, gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
-      }
-// atomicStore(voxelNetRads[bufferId0].directVrad, radSum, gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
+    // Reuse the existing directional buffer for one environment value per
+    // band, avoiding an additional per-voxel GPU allocation.
+    uint bandIndex = voxelBandRadiationIndex(bufferId0, uint(kwave));
+    voxelRads[bandIndex].cumulated = diffuseRadiance;
+    if(kwave == 0)
+    {
+        voxelNetRads[bufferId0].diffuseTrad = diffuseRadiance;
     }
 }
 

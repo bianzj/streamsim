@@ -1,10 +1,10 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "format": "streamsim-project",
   "name": "urban_tree_building",
   "mode": "eFacetRT",
   "createdAt": "2026-08-29T08:53:25.569Z",
   "updatedAt": "2026-08-29T08:53:25.593Z",
-  "inputFile": "Input.xml",
   "folders": {
     "models": "models",
     "positions": "positions",
@@ -123,8 +123,8 @@
         "params": {
           "SMC": 25,
           "BSMBrightness": 0.5,
-          "BSMlat": 0,
-          "BSMlon": 0
+          "BSMlat": 25,
+          "BSMlon": 45
         }
       },
       {

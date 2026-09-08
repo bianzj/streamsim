@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Shortwave reflectance variance templates. Pixel means are removed at runtime; these files never replace a material's mean spectrum.",
+  "defaultEnabled": false,
+  "license": "CC0-1.0",
+  "textures": [
+    {
+      "id": "concrete",
+      "label": "混凝土",
+      "fileName": "assets/texture-library/concrete_variance.jpg",
+      "sourceAsset": "Concrete034",
+      "sourceUrl": "https://ambientcg.com/view?id=Concrete034",
+      "suggestedRepeatSize": 2.0,
+      "sha256": "8CEB9186D990B31FCE785E06FDC6974C160F1D27C43F6160266F164DEBA713AA"
+    },
+    {
+      "id": "brick",
+      "label": "砖墙",
+      "fileName": "assets/texture-library/brick_variance.jpg",
+      "sourceAsset": "Bricks075A",
+      "sourceUrl": "https://ambientcg.com/view?id=Bricks075A",
+      "suggestedRepeatSize": 2.0,
+      "sha256": "9E5E42EA1EC80A8657B52CD074738BA32752D610B2C16F9A5024FF2AC2EC3CB2"
+    },
+    {
+      "id": "asphalt",
+      "label": "沥青",
+      "fileName": "assets/texture-library/asphalt_variance.jpg",
+      "sourceAsset": "Asphalt031",
+      "sourceUrl": "https://ambientcg.com/view?id=Asphalt031",
+      "suggestedRepeatSize": 3.0,
+      "sha256": "D8301EE35F486BA073BDD5FDA3EA9ED7E40F768AA1DEF75C420BCC5C055E3534"
+    },
+    {
+      "id": "metal",
+      "label": "金属",
+      "fileName": "assets/texture-library/metal_variance.jpg",
+      "sourceAsset": "Metal046B",
+      "sourceUrl": "https://ambientcg.com/view?id=Metal046B",
+      "suggestedRepeatSize": 1.5,
+      "sha256": "7CAF8DDBD06AA730E41DB993FF344EB60D872FF698E5DA117B3527F09BA1877E"
+    }
+  ]
+}

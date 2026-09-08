@@ -26,6 +26,7 @@ layout(push_constant) uniform VisibilityPush {
     mat4 viewProjection;
     vec4 viewDirection;
     uvec4 raster;
+    vec4 periodic;
 } pc;
 
 void main()

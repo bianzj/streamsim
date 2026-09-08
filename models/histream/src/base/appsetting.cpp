@@ -29,6 +29,10 @@ int AppSetting::initWindow()
 		return 0;
 	}
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+	// HiSTREAM runs as a batch engine behind the web UI. A Vulkan surface is
+	// still required, but its helper window must never flash or steal focus.
+	glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+	glfwWindowHint(GLFW_FOCUS_ON_SHOW, GLFW_FALSE);
 	m_window = glfwCreateWindow(SAMPLE_WIDTH, SAMPLE_HEIGHT, PROJECT_NAME, nullptr, nullptr);
 
 	// Setup Vulkan

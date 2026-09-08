@@ -38,6 +38,8 @@ bool Descriptor::createDescriptor(std::shared_ptr<VoxelrtIO> &modelio){
     bindings.addBinding(VoxelrtbindingInd::netRad, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, flags);
     bindings.addBinding(VoxelrtbindingInd::storage, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, flags );
     bindings.addBinding(VoxelrtbindingInd::lad, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, flags);
+    bindings.addBinding(VoxelrtbindingInd::hex, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, flags);
+    bindings.addBinding(VoxelrtbindingInd::waterSet, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, flags);
 
 
     m_descSetLayout = bindings.createLayout(m_device);
@@ -110,6 +112,10 @@ bool Descriptor::createDescriptor(std::shared_ptr<VoxelrtIO> &modelio){
 
     VkDescriptorBufferInfo dbiLad{surfio->m_pBufferLad->buffer, 0, VK_WHOLE_SIZE};
     updates.emplace_back(bindings.makeWrite(m_descSet, VoxelrtbindingInd::lad, &dbiLad));
+    VkDescriptorBufferInfo dbiHex{voxelio->m_pVoxelHexBuffer->buffer, 0, VK_WHOLE_SIZE};
+    updates.emplace_back(bindings.makeWrite(m_descSet, VoxelrtbindingInd::hex, &dbiHex));
+    VkDescriptorBufferInfo dbiWaterSet{meshio->m_pWaterSetBuffer->buffer, 0, VK_WHOLE_SIZE};
+    updates.emplace_back(bindings.makeWrite(m_descSet, VoxelrtbindingInd::waterSet, &dbiWaterSet));
 
     vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(updates.size()), updates.data(), 0, nullptr);
     return true;

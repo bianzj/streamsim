@@ -58,6 +58,16 @@ bool Descriptor::createDescriptor(std::shared_ptr<VoxelebIO> &modelio){
     bindings.addBinding(VoxelebbindingInd::state, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, flags);
     bindings.addBinding(VoxelebbindingInd::lad, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, flags);
     bindings.addBinding(VoxelebbindingInd::waterSet, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, flags);
+    bindings.addBinding(VoxelebbindingInd::fluidVelocityA, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, flags);
+    bindings.addBinding(VoxelebbindingInd::fluidVelocityB, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, flags);
+    bindings.addBinding(VoxelebbindingInd::fluidScalarA, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, flags);
+    bindings.addBinding(VoxelebbindingInd::fluidScalarB, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, flags);
+    bindings.addBinding(VoxelebbindingInd::fluidLbmA, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, flags);
+    bindings.addBinding(VoxelebbindingInd::fluidLbmB, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, flags);
+    bindings.addBinding(VoxelebbindingInd::fluidDensity, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, flags);
+    bindings.addBinding(VoxelebbindingInd::fluidMeta, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, flags);
+    bindings.addBinding(VoxelebbindingInd::fluidParameters, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, flags);
+    bindings.addBinding(VoxelebbindingInd::hex, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, flags);
 
 
     m_descSetLayout = bindings.createLayout(m_device);
@@ -170,6 +180,27 @@ bool Descriptor::createDescriptor(std::shared_ptr<VoxelebIO> &modelio){
 
     VkDescriptorBufferInfo dbiWaterset{meshio->m_pWaterSetBuffer->buffer, 0, VK_WHOLE_SIZE};
     updates.emplace_back(bindings.makeWrite(m_descSet, VoxelebbindingInd::waterSet, &dbiWaterset));
+
+    VkDescriptorBufferInfo dbiFluidVelocityA{modelio->m_pFluidVelocityA->buffer, 0, VK_WHOLE_SIZE};
+    VkDescriptorBufferInfo dbiFluidVelocityB{modelio->m_pFluidVelocityB->buffer, 0, VK_WHOLE_SIZE};
+    VkDescriptorBufferInfo dbiFluidScalarA{modelio->m_pFluidScalarA->buffer, 0, VK_WHOLE_SIZE};
+    VkDescriptorBufferInfo dbiFluidScalarB{modelio->m_pFluidScalarB->buffer, 0, VK_WHOLE_SIZE};
+    VkDescriptorBufferInfo dbiFluidLbmA{modelio->m_pFluidLbmA->buffer, 0, VK_WHOLE_SIZE};
+    VkDescriptorBufferInfo dbiFluidLbmB{modelio->m_pFluidLbmB->buffer, 0, VK_WHOLE_SIZE};
+    VkDescriptorBufferInfo dbiFluidDensity{modelio->m_pFluidDensity->buffer, 0, VK_WHOLE_SIZE};
+    VkDescriptorBufferInfo dbiFluidMeta{modelio->m_pFluidMeta->buffer, 0, VK_WHOLE_SIZE};
+    VkDescriptorBufferInfo dbiFluidParameters{modelio->m_pFluidParameters->buffer, 0, sizeof(FluidParameters)};
+    VkDescriptorBufferInfo dbiHex{voxelio->m_pVoxelHexBuffer->buffer, 0, VK_WHOLE_SIZE};
+    updates.emplace_back(bindings.makeWrite(m_descSet, VoxelebbindingInd::fluidVelocityA, &dbiFluidVelocityA));
+    updates.emplace_back(bindings.makeWrite(m_descSet, VoxelebbindingInd::fluidVelocityB, &dbiFluidVelocityB));
+    updates.emplace_back(bindings.makeWrite(m_descSet, VoxelebbindingInd::fluidScalarA, &dbiFluidScalarA));
+    updates.emplace_back(bindings.makeWrite(m_descSet, VoxelebbindingInd::fluidScalarB, &dbiFluidScalarB));
+    updates.emplace_back(bindings.makeWrite(m_descSet, VoxelebbindingInd::fluidLbmA, &dbiFluidLbmA));
+    updates.emplace_back(bindings.makeWrite(m_descSet, VoxelebbindingInd::fluidLbmB, &dbiFluidLbmB));
+    updates.emplace_back(bindings.makeWrite(m_descSet, VoxelebbindingInd::fluidDensity, &dbiFluidDensity));
+    updates.emplace_back(bindings.makeWrite(m_descSet, VoxelebbindingInd::fluidMeta, &dbiFluidMeta));
+    updates.emplace_back(bindings.makeWrite(m_descSet, VoxelebbindingInd::fluidParameters, &dbiFluidParameters));
+    updates.emplace_back(bindings.makeWrite(m_descSet, VoxelebbindingInd::hex, &dbiHex));
 
     vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(updates.size()), updates.data(), 0, nullptr);
     return true;

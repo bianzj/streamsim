@@ -85,11 +85,16 @@ VoxelebIO(){
     LightSet     light;
     std::vector<Angle> angles;
     std::vector<float> waves;
+    bool isUAVTrave{false};
+    std::vector<glm::vec3> uavposes;
+    std::vector<float> uavViewAzimuths;
+    int n_pos{0};
+    int k_pos{0};
     std::vector<AtomCond> atomconds;
     std::vector<AeroCond>  aeroconds;
 
     // setting infor
-    int n_pipeline = 12;
+    int n_pipeline = 14;
     int n_wave;
     int n_angle;
     int n_node;
@@ -103,7 +108,18 @@ VoxelebIO(){
     bool isDisplay;
     bool isImage;
     bool isProcess;
+    bool isRadiationProcess;
+    bool isEnergyProcess;
     bool isAlbedo;
+    bool heterogeneousVoxel{false};
+    int periodicNeighborCount{0};
+    bool skyboxEnabled{false};
+    int vegetationTemperatureMethod{0};
+    FluidXml fluid;
+    glm::ivec3 fluidGridSize{1, 1, 1};
+    uint64_t fluidCellCount{1};
+    int fluidSubsteps{1};
+    FluidParameters fluidParameters{};
 
     std::shared_ptr<MeshIO> m_meshio;
     std::shared_ptr<InstanceIO> m_instanceio;
@@ -121,6 +137,15 @@ VoxelebIO(){
     std::shared_ptr<nvvk::Buffer> m_pMeteoBuffer;   // Meteo
     std::shared_ptr<AccelStruct>  m_pAccelStruct;
     std::shared_ptr<nvvk::Buffer> m_pBufferAero;
+    std::shared_ptr<nvvk::Buffer> m_pFluidVelocityA;
+    std::shared_ptr<nvvk::Buffer> m_pFluidVelocityB;
+    std::shared_ptr<nvvk::Buffer> m_pFluidScalarA;
+    std::shared_ptr<nvvk::Buffer> m_pFluidScalarB;
+    std::shared_ptr<nvvk::Buffer> m_pFluidLbmA;
+    std::shared_ptr<nvvk::Buffer> m_pFluidLbmB;
+    std::shared_ptr<nvvk::Buffer> m_pFluidDensity;
+    std::shared_ptr<nvvk::Buffer> m_pFluidMeta;
+    std::shared_ptr<nvvk::Buffer> m_pFluidParameters;
 
     // initialization
     VkDevice                       m_device;

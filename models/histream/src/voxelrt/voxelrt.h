@@ -50,6 +50,7 @@ public:
 
     void output(std::shared_ptr<VoxelrtIO> &modelio, std::shared_ptr<FileIO> &fileio, int knode, int kangle);
     void outputVoxel(std::shared_ptr<VoxelrtIO> &modelio, std::shared_ptr<FileIO> &fileio);
+    void outputRadiationProcess(std::shared_ptr<VoxelrtIO> &modelio);
     void outputPos(std::shared_ptr<VoxelrtIO> &modelio, std::shared_ptr<FileIO> &fileio, int knode, int kangle);
 
     std::shared_ptr<Geometry> m_pGeometry;

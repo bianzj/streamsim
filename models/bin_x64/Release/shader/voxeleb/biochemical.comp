@@ -36,6 +36,7 @@ void main()
     //------------------------------------------------------------
     // get bufferId, voxelId, instanceId and typeId
     uint bufferId0 = uint(gl_GlobalInvocationID.x);
+    if(bufferId0 >= uint(setting.voxelCount)) return;
     if(voxelLinks[bufferId0].isValid==0) return;
     ivec3 voxelId0 = voxelLinks[bufferId0].voxelId;
     uint instanceId0 = voxelLinks[bufferId0].instanceId;
@@ -141,7 +142,10 @@ void main()
             // Es: Water (H2O) concentration on leaf surface
             Es = voxelAirs[bufferId0].es;
             //  net radiation, PAR
-            Q = voxelPnets[bufferId0].directPnet;
+            Q = voxelPnets[bufferId0].diffusePnet;
+            if (issunlit == 1) {
+                Q += voxelPnets[bufferId0].directPnet;
+            }
             // intial estimate of the vapour pressure in leaf boundary layer
             eb = ubom.meteo.ea;
             // concentration of O2 

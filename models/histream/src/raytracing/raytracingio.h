@@ -23,6 +23,7 @@
 #include "src/base/structs_cg.h"
 #include "src/base/queue.h"
 #include "src/base/appsetting.h"
+#include "src/base/defined.h"
 
 
 
@@ -49,6 +50,7 @@ public:
         m_meshio = std::make_shared<MeshIO>();
         m_instanceio = std::make_shared<InstanceIO>();
         m_virtualio = std::make_shared<VirtualIO>();
+        m_defined = std::make_shared<DefinedIO>();
         m_pAccelStruct = std::make_shared<AccelStruct>();  // method and resource, have to make
     };
 
@@ -76,6 +78,7 @@ public:
     std::shared_ptr<MeshIO> m_meshio;
     std::shared_ptr<InstanceIO> m_instanceio;
     std::shared_ptr<VirtualIO> m_virtualio;
+    std::shared_ptr<DefinedIO> m_defined;
 
 
    int kangle = 0;
@@ -85,8 +88,8 @@ public:
     // Scene info
     int n_modelmesh = 0;
     int n_instance = 0;
-    glm::vec3 sceneSize;
-    glm::vec3 sceneOrigin;
+    glm::vec3 sceneSize{1.0f, 1.0f, 1.0f};
+    glm::vec3 sceneOrigin{0.0f, 0.0f, 0.0f};
     glm::vec3 voxelSize;
     glm::vec3 voxelOrigin;
     float stepsize_surface;
@@ -98,6 +101,11 @@ public:
     LightSet     light;
     std::vector<Angle> angles;
     std::vector<float> waves;
+    bool isUAVTrave{false};
+    std::vector<glm::vec3> uavposes;
+    std::vector<float> uavViewAzimuths;
+    int n_pos{0};
+    int k_pos{0};
 
     // Setting info
     std::string datestr="000000";
@@ -111,6 +119,9 @@ public:
     glm::ivec2 imageSize;
     int n_sample;
     int maxDepth;
+    int periodicNeighborCount{0};
+    bool skyboxEnabled{false};
+    int dispatchRowCount{0};
     bool isTemperature;
     bool isDisplay;
     bool isImage;

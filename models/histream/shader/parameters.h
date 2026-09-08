@@ -51,7 +51,38 @@ struct Canopy
 	float LIDFb;
 	float hspot;
 	float leafwidth;
+	int structureType; // 0: canopy, 1: rigid, 2: fire/smoke, 3: fog
+	float extinction;
+	float scatteringAlbedo;
+	float asymmetry;
+	float emissionScale;
+	float fixedTemperature;
 };
+
+bool isParticipatingMedium(Canopy canopy)
+{
+	return canopy.structureType == 2 || canopy.structureType == 3;
+}
+
+float canopyVoxelTransmittance(Canopy canopy, float density, float G, float pathLength, float scale)
+{
+	if(canopy.structureType == 1) return 0.0;
+	// Surface intersections can include the empty segment from the previous
+	// object.  A participating-medium sample must never integrate farther than
+	// one voxel diagonal, otherwise a hot voxel creates view-aligned streaks.
+	if(isParticipatingMedium(canopy)) pathLength = clamp(pathLength, 0.0, 1.7320508);
+	float opticalDepth = isParticipatingMedium(canopy)
+		? max(canopy.extinction, 0.0) * pathLength * scale
+		: max(density * G, 0.0) * pathLength * scale;
+	return exp(-opticalDepth);
+}
+
+float mediumPhaseHG(Canopy canopy, float cosTheta)
+{
+	float g = clamp(canopy.asymmetry, -0.99, 0.99);
+	float denominator = max(1.0 + g * g - 2.0 * g * clamp(cosTheta, -1.0, 1.0), 0.0001);
+	return (1.0 - g * g) / (12.5663706144 * pow(denominator, 1.5));
+}
 
 // sphere instance defination
 struct Sphere
@@ -123,6 +154,7 @@ struct MeshLink
 	int thermalId;
 	int canopyId;
 	int bioId;
+	float angularEffectStrength;
     // int leafbioId;
     // int soilsetId;
 	uint64_t vertexAddress;
@@ -145,6 +177,15 @@ struct VoxelLink
 	int faceId;
 	int isValid;
 	int empty_;
+	int hexId;
+};
+
+struct VoxelHex
+{
+    float ax;
+    float ay;
+    float az;
+    float rho;
 };
 
 // transmittance
@@ -235,6 +276,27 @@ struct EBState
 	int count;
 };
 
+struct FluidCellMeta
+{
+    int surfaceIndex;
+    int kind;
+    float lad;
+    float padding;
+};
+
+struct FluidParameters
+{
+    ivec4 grid;
+    vec4 spacingTime; // xyz spacing, w physical scalar-transport dt
+    vec4 ambientWind;
+    vec4 physics;
+    vec4 sources; // smoke source, lattice speed cap, physical speed cap, m/s per lattice speed
+    // Size of the radiative voxel grid used when mapping EB voxels into
+    // the (potentially coarser) fluid grid. Keep this layout in sync with
+    // FluidParameters in src/base/structs_cg.h.
+    vec4 couplingSpacing;
+};
+
 
 
 
@@ -274,6 +336,8 @@ struct SoilSet
     float hapkeB0;
     float hapkeH;
     float hapkeG;
+    int thermalClass;
+    float convectiveScale;
 
     //BSMParam bsm;
 };

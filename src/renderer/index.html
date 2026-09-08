@@ -10,6 +10,7 @@
     <svg class="svg-sprite" aria-hidden="true">
       <symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7V5Z"/></symbol>
       <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></symbol>
+      <symbol id="i-reset" viewBox="0 0 24 24"><path d="M4 8V3m0 0h5M4 3l4 4a8 8 0 1 1-2 8"/></symbol>
       <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7h7l2 2h9v10H3V7Z"/><path d="M3 7V5h7l2 2"/></symbol>
       <symbol id="i-save" viewBox="0 0 24 24"><path d="M5 3h12l3 3v15H4V3h1Z"/><path d="M8 3v6h8V3M8 21v-7h8v7"/></symbol>
       <symbol id="i-cube" viewBox="0 0 24 24"><path d="m12 2 9 5-9 5-9-5 9-5Z"/><path d="m3 7 9 5v10l-9-5V7Zm18 0-9 5v10l9-5V7Z"/></symbol>
@@ -46,10 +47,12 @@
           <button class="button ghost" id="newProjectBtn"><svg><use href="#i-plus"/></svg>新建工程</button>
           <button class="button ghost" id="openXmlBtn"><svg><use href="#i-folder"/></svg>打开工程</button>
           <button class="button ghost" id="saveXmlBtn"><svg><use href="#i-save"/></svg>保存</button>
+          <button class="button ghost" id="saveAsBtn"><svg><use href="#i-save"/></svg>另存为</button>
           <button class="button ghost" id="openImageResultsTopBtn"><svg><use href="#i-layers"/></svg>图像结果</button>
           <button class="button ghost" id="open3dResultsTopBtn"><svg><use href="#i-cube"/></svg>分析</button>
           <button class="button primary" id="runBtn"><svg><use href="#i-play"/></svg><span>运行模拟</span></button>
           <button class="button danger" id="stopBtn" disabled><svg><use href="#i-stop"/></svg>停止</button>
+          <button class="button ghost" id="resetBtn"><svg><use href="#i-reset"/></svg>重置</button>
         </div>
       </header>
 
@@ -61,7 +64,7 @@
               <button class="mode-card" data-mode="eFacetRT"><svg><use href="#i-layers"/></svg><span>面元辐射传输</span><small>Facet RT</small></button>
               <button class="mode-card" data-mode="eFacetEB"><svg><use href="#i-layers"/></svg><span>面元能量平衡</span><small>Facet EB</small></button>
               <button class="mode-card" data-mode="eVoxelRT"><svg><use href="#i-cube"/></svg><span>体元辐射传输</span><small>Voxel RT</small></button>
-              <button class="mode-card active" data-mode="eVoxelEB"><svg><use href="#i-cube"/></svg><span>体元辐射-能量平衡</span><small>Voxel RT–EB</small></button>
+              <button class="mode-card active" data-mode="eVoxelEB"><svg><use href="#i-cube"/></svg><span>体元能量平衡</span><small>VoxelEB</small></button>
               <button class="mode-card wide" data-mode="eRaytracing"><svg><use href="#i-sun"/></svg><span>简单光线追踪</span><small>Simple Ray Tracing</small></button>
             </div>
           </div>
@@ -159,6 +162,17 @@
         <footer><span>project.json 是唯一工程配置和运行入口。</span><button class="button primary" type="submit"><svg><use href="#i-plus"/></svg>创建工程</button></footer>
       </form>
     </div>
+    <div class="drawer-backdrop" id="saveAsDialog" hidden>
+      <form class="project-dialog" id="saveAsForm">
+        <header><div><span class="eyebrow">HiStream Project</span><h2>工程另存为</h2></div><button class="button ghost" id="closeSaveAsBtn" type="button">取消</button></header>
+        <div class="project-form">
+          <label class="dialog-field dialog-field-wide"><span>保存目录</span><input class="input" id="saveAsDirectory" name="directory" placeholder="D:\\HiStreamProjects" required></label>
+          <label class="dialog-field dialog-field-wide"><span>工程名称</span><input class="input" id="saveAsName" name="name" required></label>
+          <div class="project-layout dialog-field-wide"><strong>当前工程</strong><code id="saveAsSourcePath"></code></div>
+        </div>
+        <footer><span>复制输入资源并创建空的 output 目录，不复制已有模拟结果。</span><button class="button primary" type="submit"><svg><use href="#i-save"/></svg>另存为</button></footer>
+      </form>
+    </div>
     <div class="drawer-backdrop" id="geometryDialog" hidden>
       <form class="object-dialog" id="geometryForm">
         <header><div><span class="eyebrow">Procedural OBJ</span><h2>生成简单场景对象</h2></div><button class="button ghost" id="closeGeometryBtn" type="button">取消</button></header>
@@ -168,7 +182,7 @@
             <div class="material-grid three">
               <label class="dialog-field"><span>对象名称</span><input class="input" name="geometryName" value="geometry_1" required></label>
               <label class="dialog-field" id="geometryShapeField"><span id="geometryShapeLabel">包络形状</span><select class="select" name="geometryShape"><option value="ellipsoid">椭球</option><option value="cube">立方体</option></select></label>
-              <label class="dialog-field"><span>生成类型</span><select class="select" name="geometryMode"><option value="surface">几何体</option><option value="chaos">几何体混沌</option><option value="water">水体（水平面）</option><option value="fire">火焰</option></select></label>
+              <label class="dialog-field"><span>生成类型</span><select class="select" name="geometryMode"><option value="surface">几何体</option><option value="chaos">几何体混沌</option><option value="water">水体（水平面）</option><option value="fire">火焰</option><option value="fog">雾</option></select></label>
               <label class="dialog-field"><span>X 尺寸（m）</span><input class="input" name="geometrySizeX" type="number" min="0.000001" step="any" value="2" required></label>
               <label class="dialog-field" id="geometrySizeYField"><span id="geometrySizeYLabel">Y 高度（m）</span><input class="input" name="geometrySizeY" type="number" min="0.000001" step="any" value="2" required></label>
               <label class="dialog-field"><span id="geometrySizeZLabel">Z 尺寸（m）</span><input class="input" name="geometrySizeZ" type="number" min="0.000001" step="any" value="2" required></label>
@@ -215,7 +229,7 @@
               <label class="dialog-field"><span>散射非对称因子</span><input class="input" name="mediumAsymmetry" type="number" min="-0.99" max="0.99" step="0.01" value="0.55"></label>
               <label class="dialog-field"><span>固定温度（K）</span><input class="input" name="mediumTemperature" type="number" min="0" step="1" value="1100"></label>
               <label class="dialog-field"><span>发射倍率</span><input class="input" name="mediumEmissionScale" type="number" min="0" step="0.01" value="1"></label>
-              <div class="notice">坐标统一为 X 南北、Y 向上、Z 东西；火焰介质会衰减、散射并按固定温度发射。当前不生成独立烟雾层。</div>
+              <div class="notice" id="geometryMediumNotice">坐标统一为 X 南北、Y 向上、Z 东西；参与介质会衰减、散射并按固定温度发射。</div>
             </div>
           </section>
           <div class="notice" id="geometryEstimate">预计生成三角面元。</div>
@@ -271,7 +285,7 @@
         <div class="object-form">
           <div class="material-grid three">
             <label class="dialog-field"><span>对象名称</span><input class="input" name="objectName" readonly></label>
-              <label class="dialog-field"><span>对象类型</span><select class="select" id="objectAttributeType" name="objectType"><option value="Vegetation">植被</option><option value="Building">建筑</option><option value="Human">人</option><option value="Vehicle">车辆</option><option value="Ship">船舶</option><option value="Soil">土壤</option><option value="Water">水体</option><option value="Fire">火焰</option><option value="Other">其他</option></select></label>
+              <label class="dialog-field"><span>对象类型</span><select class="select" id="objectAttributeType" name="objectType"><option value="Vegetation">植被</option><option value="Building">建筑</option><option value="Human">人</option><option value="Vehicle">车辆</option><option value="Ship">船舶</option><option value="Soil">土壤</option><option value="Water">水体</option><option value="Fire">火焰</option><option value="Fog">雾</option><option value="Other">其他</option></select></label>
             <label class="dialog-field"><span>OBJ 路径</span><input class="input" name="objectPath" readonly></label>
           </div>
           <section class="material-section">
@@ -321,7 +335,7 @@
               <textarea class="input" name="distributionPoints" rows="7"></textarea>
               <div class="distribution-import">
                 <label class="button ghost" for="distributionTxtFile"><svg><use href="#i-import"/></svg>导入 TXT<input id="distributionTxtFile" type="file" accept=".txt,text/plain" hidden></label>
-                <small>支持空格、Tab 或逗号分隔；至少填写 X、Y，缺省值为 Z=当前高度、缩放=1、旋转角=0。</small>
+                <small>OBJ 与 PRIM 格式一致；至少填写 X北向、Z东向，缺省值为 Y=当前高度、缩放=1、旋转角=0。</small>
               </div>
             </div>
           </section>

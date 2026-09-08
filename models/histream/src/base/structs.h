@@ -28,7 +28,7 @@
 #define SENSOR_FOV    0.5
 #define ANGLE_COR 0.1
 #define DEG2RAD  0.017453292
-#define DIFFUSENUM 50 // 32
+#define DIFFUSENUM 64
 #define N1 2001
 #define N2 161
 
@@ -55,6 +55,8 @@ enum class VoxelEBStage
     budget,
     updateL,
     updateTp,
+    fluidLbm,
+    fluidCommit,
     out
 };
 
@@ -176,10 +178,10 @@ struct FluspectParam
 
 struct BSMParam
 {
-    float SMC;
-    float BSMBrightness;
-    float BSMlat;
-    float BSMlon;
+    float SMC{25.0f};
+    float BSMBrightness{0.5f};
+    float BSMlat{25.0f};
+    float BSMlon{45.0f};
 };
 
 ///--------------------------------------------------------------------------
@@ -226,12 +228,15 @@ struct SensorXml
     std::vector<float> waves;
     bool isImage{true};
     bool isProcess{false};
+    bool isRadiationProcess{false};
+    bool isEnergyProcess{false};
     bool isOrth{false};
     bool isAlbedo{false};
     bool isTemperature{true};
     bool isDisplay{false};
 
     std::vector<glm::vec3> uavPoses;
+    std::vector<float> uavViewAzimuths;
     float sensorFov{60};
 };
 
@@ -244,6 +249,16 @@ struct LightXml {
     float diffuse;
     float skyTemperature{250};
     float solarTemperature{6000};
+};
+
+struct AtmosphereXml
+{
+    bool enabled{false};
+    std::string model{"midlatitude-summer"};
+    float waterVapor{2.0f};
+    std::string aerosol{"rural"};
+    float visibility{23.0f};
+    std::string lutFile;
 };
 
 
@@ -260,6 +275,13 @@ struct SettingXml
     int n_sample{32};
     int maxDepth{5};
     int isUAVtrave{false};
+    bool heterogeneousVoxel{false};
+    int periodicNeighborCount{0};
+    bool skyboxEnabled{false};
+    bool acceleratedRadiationSolver{false};
+    int spectralAccelerationWidth{100};
+    // 0: Ball-Berry empirical coupling; 1: Farquhar mechanistic coupling.
+    int vegetationTemperatureMethod{0};
 
 
 
@@ -277,6 +299,24 @@ struct AeroCondXml
     AeroCond aerocond; // ONE for all
     std::string path;
     float stepsize_atmosphere;
+};
+
+struct FluidXml
+{
+    bool enabled{false};
+    float timeStep{5.0f};
+    int pressureIterations{20}; // Legacy project field; ignored by D3Q19 LBM.
+    float windDirection{0.0f};
+    float buoyancy{0.033f};
+    float dragCoefficient{0.3f};
+    float thermalCoupling{1.0f};
+    float diffusivity{0.1f};
+    float smokeEmission{0.02f};
+    float maxVelocity{30.0f};
+    bool outputWind{false};
+    bool outputAirTemperature{false};
+    float outputHeight{2.0f};
+    float voxelSize{1.0f};
 };
 
 struct Background
@@ -299,6 +339,8 @@ struct Background
     std::string bgSpectralName; // SPECTRAL
     std::string bgThermalName; // TEMPERTURE
     std::string bgPropName; // BSM
+    // Unified 0..1 strength for background optical and thermal Hapke effects.
+    float angularEffectStrength{0.0f};
   //  std::string bgAeroName;
 
     // this is used for a group background
@@ -401,6 +443,8 @@ struct PrimEntity
     bool voxelizeFromObj{false};
     std::string objFile;
     float voxelFillThreshold{0.05f};
+    // A vegetation OBJ may contain both foliage and woody meshes.
+    std::vector<Type> types;
 };
 
 
@@ -480,6 +524,7 @@ struct RaytracingXml
     // run setting
     LightXml lightxml;  // for solar angle
     SensorXml sensorxml; // for viewing angle
+    AtmosphereXml atmospherexml;
 
     SceneXml scenexml;
     // component materials
@@ -526,6 +571,7 @@ struct  VoxelEBXml
     // run setting
     LightXml lightxml;  // for solar angle
     SensorXml sensorxml; // for viewing angle
+    AtmosphereXml atmospherexml;
 
 
     // Scene structural, i.e., background and its result;
@@ -540,6 +586,7 @@ struct  VoxelEBXml
     MeteoXml meteoxml;
     AeroCondXml aerocondxml;
     AtomCondXml atomcondxml;
+    FluidXml fluidxml;
 
 
 };
@@ -556,6 +603,7 @@ struct  VoxelRTXml
     // run setting
     LightXml lightxml;  // for solar angle
     SensorXml sensorxml; // for viewing angle
+    AtmosphereXml atmospherexml;
 
 
     // Scene structural, i.e., background and its result;

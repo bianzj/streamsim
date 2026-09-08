@@ -26,6 +26,12 @@ public:
     // bsm model
     void bsm(OptCoeff bsmCoeff, BSMParam bsm, std::vector<Spectral> &spectral);
 
+    // Resolve every source (model, panel values, imported TXT) onto requested wavelengths.
+    std::vector<Spectral> resolveSpectrals(const SpectralXml& material,
+                                           const std::vector<float>& outputWavelengths,
+                                           const std::vector<float>& customWavelengths,
+                                           const OptCoeff& coefficients);
+
 };
 
 

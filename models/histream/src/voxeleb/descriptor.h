@@ -43,6 +43,16 @@ public:
         state,
         lad,
         waterSet,
+        fluidVelocityA,
+        fluidVelocityB,
+        fluidScalarA,
+        fluidScalarB,
+        fluidLbmA,
+        fluidLbmB,
+        fluidDensity,
+        fluidMeta,
+        fluidParameters,
+        hex,
     };
 
 

@@ -26,6 +26,7 @@
 #include "../global.glsl"
 #include "../functions.glsl"
 #include "../nanovdb_info.glsl"
+#include "fluid_coupling.glsl"
 
 layout(local_size_x = GROUP_SIZEX) in;
 
@@ -37,6 +38,7 @@ void main()
     //------------------------------------------------------------
     // get bufferId, voxelId, instanceId and typeId
     uint bufferId = uint(gl_GlobalInvocationID.x);
+    if(bufferId >= uint(setting.voxelCount)) return;
     if(voxelLinks[bufferId].isValid==0) return;
     //voxelRes: voxel number in 3 dimentions
     ivec3 voxelRes = ivec3(setting.voxelSize);
@@ -49,9 +51,17 @@ void main()
     InstanceLink instanceLink = instanceLinks[instanceId];
     MeshLink meshLink = meshLinks[instanceLink.meshId];
     uint spectralId,canopyId,bioId,typeId;
+    canopyId = meshLink.canopyId;
     bioId = meshLink.bioId;
     typeId = meshLink.type;
-    float Ta = ubom.meteo.Ta;
+    if(typeId == TYPE_VEGETATION && isParticipatingMedium(canopies[canopyId])) {
+        float fixedTemperature = canopies[canopyId].fixedTemperature > 0.0
+            ? canopies[canopyId].fixedTemperature : ubom.meteo.Ta + 273.15;
+        voxelTempes[bufferId].sunlit = fixedTemperature;
+        voxelTempes[bufferId].shaded = fixedTemperature;
+        return;
+    }
+    float Ta = localAirTemperatureC(bufferId);
     float dtime = ubom.meteo.dtime;
     float Ts,Gst;
 
@@ -63,24 +73,10 @@ void main()
                 || (abs(typeId*1.0 - TYPE_WATER*1.0) < 0.1);
     if(type)
     {
-        /// 对温度进行真实的赋值，使得其是缓慢变化的
-        /// 如果 alpha_toSolar 增大，光照组分提升，阴影组分不变
-        /// 如果 alpha_toSolar 减小，光照组分不变，阴影组分提升
-        if (voxelDirs[bufferId].solar_last > -0.5){
-            if (voxelDirs[bufferId].solar > voxelDirs[bufferId].solar_last){
-                float sunlitTemperature = voxelTempes[bufferId].sunlit;
-                float shadedTemperature = voxelTempes[bufferId].shaded;
-                sunlitTemperature = sunlitTemperature + (voxelDirs[bufferId].solar - voxelDirs[bufferId].solar_last) * (shadedTemperature - sunlitTemperature);
-                voxelTempes[bufferId].sunlit = sunlitTemperature;
-            }
-
-            if ((voxelDirs[bufferId].solar < voxelDirs[bufferId].solar_last)){
-                float sunlitTemperature = voxelTempes[bufferId].sunlit;
-                float shadedTemperature = voxelTempes[bufferId].shaded;
-                shadedTemperature = shadedTemperature + (shadedTemperature - sunlitTemperature) * (voxelDirs[bufferId].solar - voxelDirs[bufferId].solar_last) / (1 - voxelDirs[bufferId].solar);
-                voxelTempes[bufferId].shaded = shadedTemperature;
-            }
-        }
+        // sunlit/shaded are conditional energy-balance states.  Keep them
+        // independent here; the current solar fraction mixes them once in
+        // voxelrad_image.comp.  Mixing on both sides preserves the previous
+        // shadow as a false thermal footprint in successive TIFF images.
 
         if(typeId == TYPE_WATER)
         {
@@ -121,32 +117,32 @@ void main()
             voxelTlasts[TlastId].sunlit = Tsunlit-273.15;
             voxelTlasts[TlastId].shaded = Tshaded-273.15;
         }
-        if(soilSets[bioId].method ==2){ //廓线计算
+        if(soilSets[bioId].method == 2){ // 单一实际土柱温度廓线
+            float sunlitFraction = clamp(voxelDirs[bufferId].solar, 0.0, 1.0);
+            float actualSurfaceTemperature = mix(
+                voxelTempes[bufferId].shaded,
+                voxelTempes[bufferId].sunlit,
+                sunlitFraction);
 
-             for(int issunlit = 0;issunlit < 2;issunlit++)
-            {
-                if(issunlit == 0)
-                {
-                    Ts = voxelTempes[bufferId].shaded; 
-                }else
-                {
-                    Ts = voxelTempes[bufferId].sunlit; 
-                }
+            float ToldProfile[TLASTNUM], Mprofile[TLASTNUM], TnewProfile[TLASTNUM];
+            for(int kdepth = 0; kdepth < TLASTNUM; kdepth++){
+                // Both slots now represent the same physical soil column.
+                // mix() also removes any stale split-column state safely.
+                ToldProfile[kdepth] = mix(
+                    voxelTlasts[TlastId + kdepth].shaded,
+                    voxelTlasts[TlastId + kdepth].sunlit,
+                    sunlitFraction);
+                TnewProfile[kdepth] = 0.0;
+                Mprofile[kdepth] = ubom.meteo.sm;
+            }
+            Soilheatflux(ToldProfile, Mprofile,
+                         actualSurfaceTemperature - 273.15,
+                         soilSets[bioId].Tsoil,
+                         Gst, TnewProfile, dtime);
 
-                float ToldProfile[TLASTNUM],Mprofile[TLASTNUM],TnewProfile[TLASTNUM];
-                for(int kdepth = 0;kdepth <TLASTNUM;kdepth++){
-                    if(issunlit == 0) ToldProfile[kdepth] = voxelTlasts[TlastId+kdepth].shaded;
-                    else ToldProfile[kdepth] = voxelTlasts[TlastId+kdepth].sunlit;
-                    TnewProfile[kdepth] = 0;
-                    Mprofile[kdepth] = ubom.meteo.sm;
-                }
-                Soilheatflux(ToldProfile,Mprofile,Ts-273.15,Gst,TnewProfile,dtime);
-
-                for(int kdepth = 0;kdepth <TLASTNUM;kdepth++){
-                    if(issunlit == 0) voxelTlasts[TlastId + kdepth].shaded = TnewProfile[kdepth];
-                    else voxelTlasts[TlastId + kdepth].sunlit = TnewProfile[kdepth];
-                }
-
+            for(int kdepth = 0; kdepth < TLASTNUM; kdepth++){
+                voxelTlasts[TlastId + kdepth].sunlit = TnewProfile[kdepth];
+                voxelTlasts[TlastId + kdepth].shaded = TnewProfile[kdepth];
             }
         }
     }

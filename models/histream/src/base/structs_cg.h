@@ -68,6 +68,10 @@ struct alignas(16) RayRTSetting
     int isTemperature{ 0 };
     float fireflyClampThreshold{ 0 };
     int debugging_mode{ 0 };
+    int periodicNeighborCount{ 0 };
+    int skyboxEnabled{ 0 };
+    int imageOffsetY{ 0 };
+    glm::vec2 sceneSize{ 1.0f, 1.0f };
 };
 
 
@@ -87,7 +91,9 @@ struct alignas(32)  VoxelLstSetting
     int isface{80};
     glm::ivec3 voxelSize{50, 0, 50};
     int islad{0};
-    int dumpyy{0};
+    int voxelCount{0};
+    int periodicNeighborCount{0};
+    int skyboxEnabled{0};
 };
 
 struct alignas(32)  VoxelRTSetting
@@ -106,7 +112,11 @@ struct alignas(32)  VoxelRTSetting
     int isface{80};
     glm::ivec3 voxelSize{50, 0, 50};
     int islad{0};
-    int dumpyy{0};
+    int isTemperature{0};
+    int voxelCount{0};
+    int spectralBatchSize{1};
+    int periodicNeighborCount{0};
+    int skyboxEnabled{0};
 };
 
 // atmospheric radiative transfer linked to modtrain
@@ -141,6 +151,12 @@ struct Canopy
     float LIDFb;  // For dynamic G
     float hspot;      // for the hotspot
     float leafwidth; // for the aerodynamic resistance
+    int structureType{0}; // 0: canopy, 1: rigid, 2: fire/smoke, 3: fog
+    float extinction{0.0f};
+    float scatteringAlbedo{0.0f};
+    float asymmetry{0.0f};
+    float emissionScale{0.0f};
+    float fixedTemperature{0.0f};
 };
 
 
@@ -183,13 +199,14 @@ struct MeshLink
     int thermalId;
     int canopyId;
     int bioId;
+    float angularEffectStrength{0.0f};
 
     uint64_t vertexAddress;
     uint64_t indexAddress;
 };
 
 // voxel link
-struct VoxelLink
+struct alignas(16) VoxelLink
 {
     glm::ivec3 voxelId{0, 0, 0};
     int instanceId{0};
@@ -198,7 +215,19 @@ struct VoxelLink
     int isValid{0}; // is 0 go pass
     int empty_{0};// which faces ? 0 center 1, up, 2 bottom, 3 left, 4 right, 5, forward, 6 backward
     // now only 0 and 1 was used for the veg and soil, respectively;
+    int hexId{-1}; // 异质性体元参数索引；-1 保持均匀体元行为
 };
+
+struct VoxelHex
+{
+    float ax{1.0f};
+    float ay{1.0f};
+    float az{1.0f};
+    float rho{0.0f};
+};
+
+static_assert(sizeof(VoxelLink) == 48, "VoxelLink must match GLSL std430 stride");
+static_assert(sizeof(VoxelHex) == 16, "VoxelHex must match GLSL std430 stride");
 
 
 struct VoxelDir
@@ -281,6 +310,24 @@ struct EBState
     uint32_t count;
 };
 
+struct alignas(16) FluidCellMeta
+{
+    int surfaceIndex{-1};
+    int kind{0}; // 0 air, 1 solid, 2 vegetation, 3 fire, 4 fog
+    float lad{0.0f};
+    float padding{0.0f};
+};
+
+struct alignas(16) FluidParameters
+{
+    glm::ivec4 grid{1, 1, 1, 0};
+    glm::vec4 spacingTime{1.0f, 1.0f, 1.0f, 5.0f}; // xyz spacing, w scalar dt
+    glm::vec4 ambientWind{0.0f, 0.0f, 0.0f, 298.15f};
+    glm::vec4 physics{0.033f, 0.3f, 1.0f, 0.1f};
+    glm::vec4 sources{0.02f, 0.12f, 30.0f, 1.0f}; // smoke, lattice cap, speed cap, velocity scale
+    glm::vec4 couplingSpacing{1.0f, 1.0f, 1.0f, 0.0f};
+};
+
 
 struct LeafBio
 {
@@ -313,6 +360,8 @@ struct SoilSet
     float hapkeB0{1.0f};          // opposition-effect amplitude
     float hapkeH{0.1f};           // opposition-effect angular width
     float hapkeG{0.0f};           // Henyey-Greenstein asymmetry
+    int thermalClass{0};          // 0: ground/building surface, 1: woody solid
+    float convectiveScale{1.0f};  // small branches exchange heat faster than broad surfaces
     //BSMParam bsm;
 };
 

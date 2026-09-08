@@ -49,6 +49,7 @@ void main()
     //------------------------------------------------------------
     // get bufferId, voxelId, instanceId and typeId
     uint bufferId0 = uint(gl_GlobalInvocationID.x);
+    if(bufferId0 >= uint(setting.voxelCount)) return;
     ivec3 voxelId0 = voxelLinks[bufferId0].voxelId;
     if(voxelLinks[bufferId0].isValid==0) return;
     // Get nanoVDBLink: from voxelId to bufferId
@@ -60,6 +61,7 @@ void main()
     uint spectralIdBase = spectralId * NUM_BAND;
     uint canopyId = meshLinks[meshId].canopyId;
     voxelNetRads[bufferId0].directVrad = 0.0;
+    voxelPnets[bufferId0].directPnet = 0.0;
 
     //---------------------------------------------------
     // Iteration in VNIR band
@@ -67,19 +69,34 @@ void main()
     float Rin = ubom.meteo.Rin;               // measurement height 
     float Rli = ubom.meteo.Rli;               // wind speed
 
-    float cosSolar = abs(normalize(lightSet.direction).y);
+    vec3 solarDirection = normalize(lightSet.direction);
+    float cosSolar = abs(solarDirection.y);
     float alpha_toSolar = voxelDirs[bufferId0].solar;
-    for(int kband = 0; kband < NUM_VNIR; kband++)
+    int kstep = max(setting.n_jump, 1);
+    int step_num = (NUM_VNIR + kstep - 1) / kstep;
+    for(int kbandi = 0; kbandi < step_num; kbandi++)
     {
+        int kband_start = kbandi * kstep;
+        int kband_end = min(kband_start + kstep, NUM_VNIR);
+        int kband_center = (kband_start + kband_end - 1) / 2;
+        float directFraction = 0.0;
+        for(int kband = kband_start; kband < kband_end; kband++)
+        {
+            directFraction += atomConds[kband].direct * 0.001;
+        }
         // solar direct radiance: lightSet.Rin*atomConds[kband].direct*0.001
         // transmittance to solar: alpha_toSolar
         // absorb = 1- refl - trans
-        float absorb = 1 - spectralMaterials[spectralIdBase + kband].transmittance - 
-                spectralMaterials[spectralIdBase + kband].reflectance;
-        //---------------------------------
-        // Attention: there is no alpha_solar
-        //---------------------------------
-        float rad =  (Rin * atomConds[kband].direct * 0.001);
+        float absorb = 1 - spectralMaterials[spectralIdBase + kband_center].transmittance -
+                spectralMaterials[spectralIdBase + kband_center].reflectance;
+        // Sunlit/shaded temperatures are conditional components.  Always
+        // solve the sunlit component with unobstructed direct irradiance;
+        // voxelDirs.solar is applied later as the moving sunlit fraction.
+        // Gating the direct term with alpha_toSolar makes both conditional
+        // temperatures shaded exactly under a crown and erases the shadow.
+        float sunAboveHorizon = solarDirection.y > 0.01
+            ? 1.0 : 0.0;
+        float rad = Rin * directFraction * sunAboveHorizon;
 
         // rad = atomConds[kband].direct * 0.001;
         // rad = spectralMaterials[spectralIdBase + kband].reflectance;
@@ -95,8 +112,8 @@ void main()
 
             float lai = canopies[canopyId].lai;
             float p = calReCor(lai);
-            float refl = spectralMaterials[spectralIdBase + kband].reflectance;
-            float trans = spectralMaterials[spectralIdBase + kband].transmittance;
+            float refl = spectralMaterials[spectralIdBase + kband_center].reflectance;
+            float trans = spectralMaterials[spectralIdBase + kband_center].transmittance;
             float w = refl + trans;
             float s = (w - p* w) / (1 - p* w);
             float a = (1-w) / (1 - p *w); 
@@ -113,9 +130,9 @@ void main()
         atomicAdd(voxelNetRads[bufferId0].directVrad, rad, gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
 
         // only for band from 400 nm to 700 nm 
-        if((atomConds[kband].wavelength>=400) && (atomConds[kband].wavelength<=700))
+        if((atomConds[kband_center].wavelength>=400) && (atomConds[kband_center].wavelength<=700))
         {
-            float pnet = rad * atomConds[kband].wavelength * 1e-3 /(AHC);
+            float pnet = rad * atomConds[kband_center].wavelength * 1e-3 /(AHC);
             atomicAdd(voxelPnets[bufferId0].directPnet, pnet,
                 gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
         }

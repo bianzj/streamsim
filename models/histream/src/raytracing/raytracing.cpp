@@ -2,8 +2,32 @@
 // Created by admin on 2024/1/24.
 //
 
+#include <algorithm>
+#include <cmath>
 #include <iomanip>
 #include "raytracing.h"
+#include "src/base/atmosphere_lut.h"
+
+namespace {
+std::vector<std::string> raytracingBandNames(const std::vector<float>& waves,
+                                             bool temperatureOutput)
+{
+    std::vector<std::string> names;
+    names.reserve(waves.size());
+    for (float wave : waves) {
+        const float micrometres = wave > 50.0f ? wave / 1000.0f : wave;
+        std::ostringstream label;
+        if (micrometres <= 2.5f)
+            label << "Reflectance [-] @ " << wave << " nm";
+        else if (temperatureOutput)
+            label << "Brightness temperature [K] @ " << wave << " nm";
+        else
+            label << "Spectral radiance [W m-2 sr-1 um-1] @ " << wave << " nm";
+        names.push_back(label.str());
+    }
+    return names;
+}
+}
 
 
 bool Raytracing::setup( AppSetting &appsetting, std::shared_ptr<RaytracingIO> &raytracingio){
@@ -60,6 +84,7 @@ bool Raytracing::upload(std::shared_ptr<FileIO> &fileio,std::shared_ptr<Raytraci
    // auto & meshio = raytracingio->m_meshio;
 
 
+    fileio->readDefined(raytracingio->m_defined);
     m_pCompo->createCompOptical(fileio, raytracingio);
     m_pScene->createObjScene(fileio,raytracingio);
     m_pGeometry->createGeometry(fileio,raytracingio);
@@ -108,6 +133,12 @@ bool Raytracing::uploadSetting(std::shared_ptr<FileIO> &fileio, std::shared_ptr<
     raytracingio->imageSize = fileio->m_pRaytracingXml->sensorxml.resolution;
     raytracingio->maxDepth = fileio->m_pRaytracingXml->settingxml.maxDepth;
     raytracingio->n_sample = fileio->m_pRaytracingXml->settingxml.n_sample;
+    raytracingio->periodicNeighborCount =
+        fileio->m_pRaytracingXml->settingxml.periodicNeighborCount;
+    raytracingio->skyboxEnabled =
+        fileio->m_pRaytracingXml->settingxml.skyboxEnabled;
+    raytracingio->sceneSize =
+        fileio->m_pRaytracingXml->scenexml.background.sceneSize;
 
     return true;
 }
@@ -123,6 +154,11 @@ bool Raytracing::updateSetting(std::shared_ptr<RaytracingIO> &raytracingio){
     raytracingio->setting.isDisplay = raytracingio->isDisplay;
     raytracingio->setting.maxDepth = raytracingio->maxDepth;
     raytracingio->setting.n_sample = raytracingio->n_sample;
+    raytracingio->setting.periodicNeighborCount = raytracingio->periodicNeighborCount;
+    raytracingio->setting.skyboxEnabled = raytracingio->skyboxEnabled ? 1 : 0;
+    raytracingio->setting.sceneSize = {
+        std::max(0.01f, raytracingio->sceneSize.x),
+        std::max(0.01f, raytracingio->sceneSize.y)};
 
     return true;
     //raytracingio->setting.maxDepth = fileio->m_pXmlInput.
@@ -130,6 +166,8 @@ bool Raytracing::updateSetting(std::shared_ptr<RaytracingIO> &raytracingio){
 
 
 bool Raytracing::run(std::shared_ptr<RaytracingIO> &raytracingio, std::shared_ptr<FileIO> &fileio) {
+
+    std::cout << "PROGRESS\t5\t加载光线追踪场景与观测参数" << std::endl;
 
     /// 清除txt文件信息
     if (raytracingio->isAlbedo)
@@ -145,35 +183,50 @@ bool Raytracing::run(std::shared_ptr<RaytracingIO> &raytracingio, std::shared_pt
     }
 
 
-    for(int kangle = 0; kangle < raytracingio->n_angle; kangle++)
+    if (raytracingio->isUAVTrave && raytracingio->n_pos > 0)
     {
-        raytracingio->kangle = kangle;
-        m_pGeometry->updateAngle(raytracingio,kangle);
-       // updateSetting(raytracingio);
-
-        m_pCommand->run(raytracingio);
-
-        if (raytracingio->isImage)
-        {
-            // output
-            //output(raytracingio,fileio,kangle);
-            outputOrth(raytracingio,fileio,kangle);
+        raytracingio->kangle = 0;
+        for (int kpos = 0; kpos < raytracingio->n_pos; ++kpos) {
+            raytracingio->k_pos = kpos;
+            m_pGeometry->updateSensorPos(raytracingio, kpos);
+            const glm::vec3 position = raytracingio->uavposes[kpos];
+            std::cout << "OBSERVATION\t航点 " << (kpos + 1) << "/" << raytracingio->n_pos
+                      << " X=" << position.x << " Y=" << position.y
+                      << " H=" << position.z << std::endl;
+            m_pCommand->run(raytracingio);
+            if (raytracingio->isImage || raytracingio->isOrth)
+                output(raytracingio, fileio, 0, kpos);
+            std::cout << "PROGRESS\t" << 10 + 85 * (kpos + 1) / std::max(1, raytracingio->n_pos)
+                      << "\t中心投影巡航 " << (kpos + 1) << "/" << raytracingio->n_pos << std::endl;
         }
-
-        if (raytracingio->isOrth)
+    } else {
+        for(int kangle = 0; kangle < raytracingio->n_angle; kangle++)
         {
-            outputOrth(raytracingio,fileio,kangle);
-        }
+            const int beginProgress = 10 + static_cast<int>(80.0 * kangle /
+                std::max(1, raytracingio->n_angle));
+            std::cout << "PROGRESS\t" << beginProgress << "\t光线追踪观测 "
+                      << (kangle + 1) << "/" << raytracingio->n_angle << std::endl;
+            raytracingio->kangle = kangle;
+            m_pGeometry->updateAngle(raytracingio,kangle);
+            m_pCommand->run(raytracingio);
 
-        if (raytracingio->isAlbedo)
-        {
-            outputAlbedo(raytracingio,fileio,kangle);
-        }
+            if (raytracingio->isImage || raytracingio->isOrth) {
+                if (fileio->m_pRaytracingXml->sensorxml.projection == Projection::PERSPECTIVE)
+                    output(raytracingio, fileio, kangle);
+                else
+                    outputOrth(raytracingio, fileio, kangle);
+            }
+            if (raytracingio->isAlbedo) outputAlbedo(raytracingio,fileio,kangle);
 
-        std::cout << "Success: " << kangle << std::endl;
+            std::cout << "Success: " << kangle << std::endl;
+            const int completedProgress = 10 + static_cast<int>(85.0 * (kangle + 1) /
+                std::max(1, raytracingio->n_angle));
+            std::cout << "PROGRESS\t" << completedProgress << "\t完成观测 "
+                      << (kangle + 1) << "/" << raytracingio->n_angle << std::endl;
+        }
     }
 
-
+    std::cout << "PROGRESS\t100\t简单光线追踪计算完成" << std::endl;
     return true;
 }
 
@@ -184,7 +237,7 @@ bool Raytracing::run(std::shared_ptr<RaytracingIO> &raytracingio, std::shared_pt
 
 
 
-void Raytracing::outputOrth(std::shared_ptr<RaytracingIO> &modelio, std::shared_ptr<FileIO> &fileio, int kangle) {
+void Raytracing::outputOrth(std::shared_ptr<RaytracingIO> &modelio, std::shared_ptr<FileIO> &fileio, int kangle, int kpos) {
 VkBufferUsageFlags usage{VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
     int width = modelio->imageSize.x;
     int height = modelio->imageSize.y;
@@ -218,16 +271,6 @@ VkBufferUsageFlags usage{VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TR
 
     // --- 此时数据已安全在 pCpuData 中，不再依赖 pData/data 指针 ---
 
-    // 填充 outImage (使用 pCpuData)
-    fileio->outImage.clear();
-    float *walker = pCpuData;
-    for (int kband = 0; kband < n_wave; kband++) {
-        std::vector<float> outImage1;
-        outImage1.assign(walker, walker + width * height);
-        walker += width * height;
-        fileio->outImage.push_back(outImage1);
-    }
-
     // 【修正3】现在可以安全销毁 Vulkan 资源了
     modelio->m_pAlloc->unmap(pixelBuffer);
     modelio->m_pAlloc->destroy(pixelBuffer);
@@ -253,52 +296,66 @@ VkBufferUsageFlags usage{VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TR
             // 目标图像索引 (使用 long long 防止溢出)
             long long old = (long long)j * width + i;
 
-            // 计算源图像坐标
-            int ii = int(i * cx[0] + j * cx[1] + i * j * cx[2] + cx[3]);
-            int jj = int(i * cy[0] + j * cy[1] + i * j * cy[2] + cy[3]);
-
-            // 【修正4】严格的几何边界检查 (防止越界崩溃)
-            // 必须先检查 ii, jj 是否在图像范围内，再进行后续计算
-            if (ii < 0 || ii >= width || jj < 0 || jj >= height)
+            const double sourceX = i * cx[0] + j * cx[1] + i * j * cx[2] + cx[3];
+            const double sourceY = i * cy[0] + j * cy[1] + i * j * cy[2] + cy[3];
+            if (sourceX < 0.0 || sourceX > width - 1.0 ||
+                sourceY < 0.0 || sourceY > height - 1.0)
             {
                 continue;
             }
 
-            // 计算源图像索引 (标准 Row-Major: y * width + x)
-            // 注意：如果你发现图像旋转了90度，请改回 ii * height + jj，但必须保留上面的 if 检查
-
-            long long orth = (long long)jj * width + ii;
-
-            // 双重保险：检查源索引是否越界
-            if (orth >= (long long)width * height) continue;
+            const int x0 = static_cast<int>(std::floor(sourceX));
+            const int y0 = static_cast<int>(std::floor(sourceY));
+            const int x1 = std::min(x0 + 1, width - 1);
+            const int y1 = std::min(y0 + 1, height - 1);
+            const double fx = sourceX - x0;
+            const double fy = sourceY - y0;
+            const int sampleX[4] = {x0, x1, x0, x1};
+            const int sampleY[4] = {y0, y0, y1, y1};
+            const double sampleWeight[4] = {
+                (1.0 - fx) * (1.0 - fy), fx * (1.0 - fy),
+                (1.0 - fx) * fy, fx * fy};
 
             for(int k = 0; k < n_wave; k++)
             {
                 // 【修正5】使用 long long 计算波段偏移，防止计算溢出
                 long long band_offset = (long long)k * width * height;
                 long long oldd = band_offset + old;
-                long long orthh = band_offset + orth;
-                // 读取数据 (使用 pCpuData)
-                if (pCpuData[orthh] == 0) continue;
-                pData_orth[oldd] = pCpuData[orthh];
+                double valueSum = 0.0;
+                double weightSum = 0.0;
+                for (int sample = 0; sample < 4; ++sample)
+                {
+                    const long long source = band_offset
+                        + static_cast<long long>(sampleY[sample]) * width
+                        + sampleX[sample];
+                    const float value = pCpuData[source];
+                    if (value == 0.0f) continue;
+                    valueSum += sampleWeight[sample] * value;
+                    weightSum += sampleWeight[sample];
+                }
+                if (weightSum > 0.0)
+                    pData_orth[oldd] = atmosphereCorrectOutputValue(
+                        static_cast<float>(valueSum / weightSum),
+                        fileio->m_pRaytracingXml->atmospherexml,
+                        waves[k], fileio->m_pRaytracingXml->sensorxml.position.z,
+                        angle.vza, modelio->isTemperature);
 
             }
         }
     }
 
 
-    if(modelio->istime == false) {
-        fileio->writeENVIdata(modelio->projectDir, pData_orth, width, height, n_wave, angle, -1, -1);
-    } else {
-        fileio->writeENVIdata(modelio->projectDir, pData_orth, width, height, n_wave, angle, -1, -1);
-    }
+    fileio->writeTIFData(
+        modelio->projectDir, pData_orth, width, height, n_wave,
+        angle, -1.0f, fileio->m_pRaytracingXml->atmospherexml.enabled ? "_a" : "", kpos, false,
+        raytracingBandNames(waves, modelio->isTemperature));
 
     // 释放内存
     delete[] pCpuData;    // 记得释放拷贝的源数据
     delete[] pData_orth;  // 释放结果数据
 }
 
-void Raytracing::output(std::shared_ptr<RaytracingIO>& modelio, std::shared_ptr<FileIO>& fileio, int kangle)
+void Raytracing::output(std::shared_ptr<RaytracingIO>& modelio, std::shared_ptr<FileIO>& fileio, int kangle, int kpos)
 {
     VkBufferUsageFlags usage{VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
     int width = modelio->imageSize.x;
@@ -333,16 +390,6 @@ void Raytracing::output(std::shared_ptr<RaytracingIO>& modelio, std::shared_ptr<
 
     // --- 此时数据已安全在 pCpuData 中，不再依赖 pData/data 指针 ---
 
-    // 填充 outImage (使用 pCpuData)
-    fileio->outImage.clear();
-    float *walker = pCpuData;
-    for (int kband = 0; kband < n_wave; kband++) {
-        std::vector<float> outImage1;
-        outImage1.assign(walker, walker + width * height);
-        walker += width * height;
-        fileio->outImage.push_back(outImage1);
-    }
-
     // 【修正3】现在可以安全销毁 Vulkan 资源了
     modelio->m_pAlloc->unmap(pixelBuffer);
     modelio->m_pAlloc->destroy(pixelBuffer);
@@ -351,7 +398,44 @@ void Raytracing::output(std::shared_ptr<RaytracingIO>& modelio, std::shared_ptr<
     std::vector<float> waves = modelio->waves;
     glm::vec2 resolution = modelio->imageSize;
 
-    fileio->writeENVIdata(modelio->projectDir, pCpuData, width, height, n_wave, angle,-1,-1);
+    const size_t imageElements = static_cast<size_t>(width) * height;
+    const float sensorHeight = kpos >= 0 && kpos < static_cast<int>(modelio->uavposes.size())
+        ? modelio->uavposes[kpos].z : fileio->m_pRaytracingXml->sensorxml.position.z;
+    std::vector<float> skyZenith(imageElements, -1.0f);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            float zenith = 0.0f;
+            if (atmosphereSkyPixelZenith(
+                    x, y, width, height,
+                    fileio->m_pRaytracingXml->sensorxml.sensorFov,
+                    angle.vza, angle.vaa, zenith)) {
+                skyZenith[static_cast<size_t>(y) * width + x] = zenith;
+            }
+        }
+    }
+    for (int band = 0; band < n_wave; ++band) {
+        const size_t offset = static_cast<size_t>(band) * imageElements;
+        for (size_t pixel = 0; pixel < imageElements; ++pixel) {
+            float& value = pCpuData[offset + pixel];
+            if ((!std::isfinite(value) || value == 0.0f) && skyZenith[pixel] >= 0.0f) {
+                value = atmosphereSkyOutputValue(
+                    fileio->m_pRaytracingXml->atmospherexml,
+                    waves[band], sensorHeight, skyZenith[pixel],
+                    modelio->isTemperature,
+                    fileio->m_pRaytracingXml->lightxml.skyTemperature);
+            } else {
+                value = atmosphereCorrectOutputValue(
+                    value, fileio->m_pRaytracingXml->atmospherexml,
+                    waves[band], sensorHeight,
+                    angle.vza, modelio->isTemperature);
+            }
+        }
+    }
+
+    fileio->writeTIFData(
+        modelio->projectDir, pCpuData, width, height, n_wave,
+        angle, -1.0f, fileio->m_pRaytracingXml->atmospherexml.enabled ? "_a" : "", kpos, false,
+        raytracingBandNames(waves, modelio->isTemperature));
 
     // 释放内存
     delete[] pCpuData;    // 记得释放拷贝的源数据
@@ -373,25 +457,20 @@ void Raytracing::outputAlbedo(std::shared_ptr<RaytracingIO>& modelio, std::share
     void *data = modelio->m_pAlloc->map(pixelBuffer);
     float *pData = reinterpret_cast<float *>(data);
 
-    fileio->outImage.clear();
+    std::vector<float> meanValues(static_cast<size_t>(n_wave), 0.0f);
     float *walker = pData;
     for (int kband = 0; kband < n_wave; kband++) {
-        std::vector<float> outImage1;
-        outImage1.assign(walker, walker + width * height);
-        walker += width * height;
-        fileio->outImage.push_back(outImage1);
-
-        float sum = 0.0f;
-        int count = 0;
-        for (int i = 0; i < width * height; i++) {
-            if (outImage1[i] > 0.0f) {
-                sum += outImage1[i];
-                count++;
+        double sum = 0.0;
+        size_t count = 0;
+        for (size_t i = 0; i < static_cast<size_t>(width) * height; ++i) {
+            if (walker[i] > 0.0f) {
+                sum += walker[i];
+                ++count;
             }
         }
-        float mean = count == 0 ? 0.0f : sum / count;
-
-        fileio->outImageMeanValue.push_back(mean);
+        meanValues[static_cast<size_t>(kband)] = count == 0
+            ? 0.0f : static_cast<float>(sum / count);
+        walker += static_cast<size_t>(width) * height;
     }
 
     modelio->m_pAlloc->unmap(pixelBuffer);
@@ -411,7 +490,7 @@ void Raytracing::outputAlbedo(std::shared_ptr<RaytracingIO>& modelio, std::share
 
     // 3. 写入数据（每行一个数）
     for (int num=0; num < n_wave; num++) {
-        outfile << waves[num] << " " << angle.sza << " " << angle.saa << " " <<  angle.vza << " " << angle.vaa << " " << fileio->outImageMeanValue[fileio->outImageMeanValue.size() - n_wave + num] << "\n";  // 换行分隔
+        outfile << waves[num] << " " << angle.sza << " " << angle.saa << " " <<  angle.vza << " " << angle.vaa << " " << meanValues[static_cast<size_t>(num)] << "\n";  // 换行分隔
     }
 
     // 4. 关闭文件（析构函数会自动调用，但显式关闭更安全）

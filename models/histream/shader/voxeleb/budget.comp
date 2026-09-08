@@ -27,6 +27,7 @@
 #include "../global.glsl"
 #include "../functions.glsl"
 #include "../nanovdb_info.glsl"
+#include "fluid_coupling.glsl"
 
 #define NUM_VNIR 2001 
 #define NUM_BAND 2002
@@ -39,6 +40,7 @@ void main()
     // Initialization for the position and SSBO index
     //------------------------------------------------------------
     uint bufferId = uint(gl_GlobalInvocationID.x);
+    if(bufferId >= uint(setting.voxelCount)) return;
     //voxelRes: voxel number in 3 dimentions
     ivec3 voxelRes = ivec3(setting.voxelSize);
     uint instanceId = voxelLinks[bufferId].instanceId;
@@ -58,6 +60,20 @@ void main()
     bioId = meshLink.bioId;
     typeId = meshLink.type;
     if(typeId == TYPE_NULL) return;
+    Canopy mediumCanopy = canopies[canopyId];
+    if(typeId == TYPE_VEGETATION && isParticipatingMedium(mediumCanopy)) {
+        float fixedTemperature = mediumCanopy.fixedTemperature > 0.0
+            ? mediumCanopy.fixedTemperature : ubom.meteo.Ta + 273.15;
+        voxelTempes[bufferId].sunlit = fixedTemperature;
+        voxelTempes[bufferId].shaded = fixedTemperature;
+        voxelHeatFlux[bufferId].Hsunlit = 0.0;
+        voxelHeatFlux[bufferId].Hshaded = 0.0;
+        voxelHeatFlux[bufferId].LEsunlit = 0.0;
+        voxelHeatFlux[bufferId].LEshaded = 0.0;
+        voxelHeatFlux[bufferId].Gsunlit = 0.0;
+        voxelHeatFlux[bufferId].Gshaded = 0.0;
+        return;
+    }
     //-------------------------
     // various parameters associated with radiation 
     //-------------------------
@@ -67,11 +83,22 @@ void main()
     float TsunlitOld,TshadedOld;
     TsunlitOld = voxelTempes[bufferId].sunlit;
     TshadedOld = voxelTempes[bufferId].shaded;
+    float Ta = localAirTemperatureC(bufferId);
+    float fallbackSunlit = Ta + 2.0 + 273.15;
+    float fallbackShaded = Ta + 1.0 + 273.15;
+    if (isnan(TsunlitOld) || isinf(TsunlitOld)
+        || TsunlitOld > TMAX_THRESHOLD || TsunlitOld < TMIN_THRESHOLD) {
+        TsunlitOld = fallbackSunlit;
+    }
+    if (isnan(TshadedOld) || isinf(TshadedOld)
+        || TshadedOld > TMAX_THRESHOLD || TshadedOld < TMIN_THRESHOLD) {
+        TshadedOld = fallbackShaded;
+    }
     // in: thermal emittance radiance 
     uint spectralBase = spectralId * NUM_BAND;
     float refl = spectralMaterials[spectralBase + NUM_VNIR].reflectance;
     float trans = spectralMaterials[spectralBase + NUM_VNIR].transmittance;
-    float emis = 1-refl-trans;
+    float emis = clamp(1.0 - refl - trans, 0.0, 1.0);
     float outShadedRad;
     float outSunlitRad;
     // float outShadedRad = Stefen_Boltzmann(TshadedOld,emis);
@@ -88,10 +115,18 @@ void main()
         // float s = (w - p* w) / (1 - p* w);
         // float a = (1-w) / (1 - p *w); 
         // emis = a;
-        outShadedRad = Stefen_Boltzmann(TshadedOld,emis);
-        outSunlitRad = Stefen_Boltzmann(TsunlitOld,emis);
-        netSunlitRad = inSunlitRad - outSunlitRad;
-        netShadedRad = inShadedRad - outShadedRad;
+        // A foliage element exchanges longwave radiation through both leaf
+        // faces.  Voxel temperatures represent the whole leaf element, so
+        // retain both emitting surfaces in its energy balance.
+        outShadedRad = 2.0 * Stefen_Boltzmann(TshadedOld,emis);
+        outSunlitRad = 2.0 * Stefen_Boltzmann(TsunlitOld,emis);
+        // Direct solar irradiance reaches only the illuminated leaf face;
+        // diffuse shortwave and longwave arrive from both hemispheres.
+        float twoSidedDiffuse = 2.0 * inShadedRad;
+        netSunlitRad = twoSidedDiffuse +
+            voxelNetRads[bufferId].directTrad +
+            voxelNetRads[bufferId].directVrad - outSunlitRad;
+        netShadedRad = twoSidedDiffuse - outShadedRad;
     }else if(typeId == TYPE_SOIL || typeId == TYPE_BUILDING || typeId == TYPE_WATER)
     {
         outShadedRad = Stefen_Boltzmann(TshadedOld,emis);
@@ -138,12 +173,13 @@ void main()
     //  Update surface temperature : new
     //-------------------------------------------------------
     float Tsunlit,Tshaded;
-    float Ta = ubom.meteo.Ta;
     float e_to_q = MH20 / MAIR / ubom.meteo.p;
-    float ei_sunlit = es_fun(TsunlitOld);
-    float s_sunlit = s_fun(ei_sunlit, TsunlitOld);
-    float ei_shaded = es_fun(TshadedOld);
-    float s_shaded = s_fun(ei_shaded, TshadedOld);
+    float TsunlitC = TsunlitOld - 273.15;
+    float TshadedC = TshadedOld - 273.15;
+    float ei_sunlit = es_fun(TsunlitC);
+    float s_sunlit = s_fun(ei_sunlit, TsunlitC);
+    float ei_shaded = es_fun(TshadedC);
+    float s_shaded = s_fun(ei_shaded, TshadedC);
     float innovation1 = 0,innovation2 = 0;
     float raa = max(voxelRaas[bufferId].raa, 1.0);
     float rss_sunlit = voxelRsss[bufferId].sunlit;
@@ -151,9 +187,46 @@ void main()
     float diffSunlitRad, diffShadedRad;
     // float diffSunlitRad = netSunlitRad - (voxelHeatFlux[bufferId].LEsunlit + Gsunlit + voxelHeatFlux[bufferId].Hsunlit);
     // float diffShadedRad = netShadedRad - (voxelHeatFlux[bufferId].LEshaded + Gshaded + voxelHeatFlux[bufferId].Hshaded);
-    float lambdas_sunlit = (2.501-0.002361*TsunlitOld)*1E6;
-    float lambdas_shaded = (2.501-0.002361*TshadedOld)*1E6;
+    float lambdas_sunlit = (2.501 - 0.002361 * TsunlitC) * 1E6;
+    float lambdas_shaded = (2.501 - 0.002361 * TshadedC) * 1E6;
     float wc = 0.2;
+    float sensibleDerivative = (RHOA * CP) / raa;
+    float latentDerivativeSunlit = RHOA * lambdas_sunlit * e_to_q *
+        max(s_sunlit, 0.0) / max(raa + max(rss_sunlit, 0.0), 1.0);
+    float latentDerivativeShaded = RHOA * lambdas_shaded * e_to_q *
+        max(s_shaded, 0.0) / max(raa + max(rss_shaded, 0.0), 1.0);
+    if(typeId == TYPE_BUILDING ||
+       (typeId == TYPE_SOIL &&
+        (soilSets[bioId].SMC > 1.0 ? soilSets[bioId].SMC * 0.01 :
+                                     soilSets[bioId].SMC) < 0.03))
+    {
+        latentDerivativeSunlit = 0.0;
+        latentDerivativeShaded = 0.0;
+    }
+    if(typeId == TYPE_WATER)
+    {
+        float evaporationCoefficient = clamp(
+            waterSets[bioId].evaporationCoefficient, 0.0, 1.0);
+        latentDerivativeSunlit *= evaporationCoefficient;
+        latentDerivativeShaded *= evaporationCoefficient;
+    }
+    float storageDerivative = 0.0;
+    float radiativeScale = 1.0;
+    if(typeId == TYPE_SOIL || typeId == TYPE_BUILDING)
+    {
+        if(soilSets[bioId].method == 0)
+        {
+            radiativeScale = 1.0 - GST;
+        }
+        else
+        {
+            float inertia = thermal_inertial(
+                soilSets[bioId].cs, soilSets[bioId].rhos,
+                soilSets[bioId].lambdas);
+            storageDerivative = 2.0 * inertia /
+                sqrt(PI * max(ubom.meteo.dtime, 1.0));
+        }
+    }
     // if(setting.theIteration>5) wc = 0.3;
     // if(setting.theIteration>10) wc = 0.2;
     // if(setting.theIteration>30) wc = 0.1;
@@ -169,10 +242,22 @@ void main()
     // Tshaded = TshadedOld + diffShadedRad * wc / ((RHOA*CP)/raa + 4*SIGMASB*pow(TshadedOld,3));
     if(typeId == TYPE_VEGETATION)
     { 
-        diffSunlitRad = netSunlitRad - (voxelHeatFlux[bufferId].LEsunlit + voxelHeatFlux[bufferId].Gsunlit + voxelHeatFlux[bufferId].Hsunlit);
-        diffShadedRad = netShadedRad - (voxelHeatFlux[bufferId].LEshaded + voxelHeatFlux[bufferId].Gshaded + voxelHeatFlux[bufferId].Hshaded);
-        Tsunlit = TsunlitOld + diffSunlitRad * wc / ((RHOA*CP)/raa + (RHOA*CP)/raa + 4*SIGMASB*pow(TsunlitOld,3));
-        Tshaded = TshadedOld + diffShadedRad * wc / ((RHOA*CP)/raa + (RHOA*CP)/raa + 4*SIGMASB*pow(TshadedOld,3));
+        // Sensible and latent exchange also occur on both leaf faces.  Soil
+        // storage is not part of the leaf energy balance.
+        diffSunlitRad = netSunlitRad - 2.0 *
+            (voxelHeatFlux[bufferId].LEsunlit +
+             voxelHeatFlux[bufferId].Hsunlit);
+        diffShadedRad = netShadedRad - 2.0 *
+            (voxelHeatFlux[bufferId].LEshaded +
+             voxelHeatFlux[bufferId].Hshaded);
+        float denominatorSunlit = 8.0 * emis * SIGMASB *
+            pow(TsunlitOld, 3.0) + 2.0 * sensibleDerivative +
+            2.0 * latentDerivativeSunlit;
+        float denominatorShaded = 8.0 * emis * SIGMASB *
+            pow(TshadedOld, 3.0) + 2.0 * sensibleDerivative +
+            2.0 * latentDerivativeShaded;
+        Tsunlit = TsunlitOld + wc * diffSunlitRad / max(denominatorSunlit, 1.0);
+        Tshaded = TshadedOld + wc * diffShadedRad / max(denominatorShaded, 1.0);
     }else if(typeId == TYPE_WATER)
     {
         float sunlitFraction = clamp(voxelDirs[bufferId].solar, 0.0, 1.0);
@@ -188,8 +273,11 @@ void main()
         float storageRate = max(
             waterSets[bioId].heatCapacity * max(waterSets[bioId].mixingDepth, 0.01)
             / max(ubom.meteo.dtime, 1.0), 1.0);
-        float denominator = storageRate + (RHOA * CP) / max(raa, 1.0)
-                            + 4.0 * SIGMASB * pow(TwaterOld, 3);
+        float latentDerivativeWater = mix(
+            latentDerivativeShaded, latentDerivativeSunlit, sunlitFraction);
+        float denominator = storageRate + sensibleDerivative +
+                            latentDerivativeWater +
+                            4.0 * emis * SIGMASB * pow(TwaterOld, 3.0);
         float Twater = TwaterOld + wc * waterResidual / denominator;
         Tsunlit = Twater;
         Tshaded = Twater;
@@ -199,8 +287,16 @@ void main()
     {
         diffSunlitRad = netSunlitRad - (voxelHeatFlux[bufferId].LEsunlit + Gsunlit + voxelHeatFlux[bufferId].Hsunlit);
         diffShadedRad = netShadedRad - (voxelHeatFlux[bufferId].LEshaded + Gshaded + voxelHeatFlux[bufferId].Hshaded);
-        Tsunlit = TsunlitOld + diffSunlitRad * wc / ((RHOA*CP)/raa + (RHOA*CP)/raa + 4*SIGMASB*pow(TsunlitOld,3));
-        Tshaded = TshadedOld + diffShadedRad * wc / ((RHOA*CP)/raa + (RHOA*CP)/raa + 4*SIGMASB*pow(TshadedOld,3));
+        float denominatorSunlit = radiativeScale * 4.0 * emis * SIGMASB *
+            pow(TsunlitOld, 3.0) + sensibleDerivative +
+            latentDerivativeSunlit + storageDerivative;
+        float denominatorShaded = radiativeScale * 4.0 * emis * SIGMASB *
+            pow(TshadedOld, 3.0) + sensibleDerivative +
+            latentDerivativeShaded + storageDerivative;
+        Tsunlit = TsunlitOld + wc * diffSunlitRad /
+            max(denominatorSunlit, 1.0);
+        Tshaded = TshadedOld + wc * diffShadedRad /
+            max(denominatorShaded, 1.0);
     }// IF TYPE
     int count=0;
     if (abs(diffSunlitRad) > RAD_THRESHOLD) count = count + 1;
@@ -211,15 +307,13 @@ void main()
     //-----------------------------------------
     // adjust bad temperature 
     //-----------------------------------------
-    if(Tsunlit > TMAX_THRESHOLD || Tshaded > TMAX_THRESHOLD)
-    {
-        Tsunlit = Ta + 2.0 + 273.15;
-        Tshaded = Ta + 1.0 + 273.15;
+    if (isnan(Tsunlit) || isinf(Tsunlit)
+        || Tsunlit > TMAX_THRESHOLD || Tsunlit < TMIN_THRESHOLD) {
+        Tsunlit = TsunlitOld;
     }
-    if(Tsunlit < TMIN_THRESHOLD || Tshaded < TMIN_THRESHOLD)
-    {
-        Tsunlit = Ta + 2.0 + 273.15;
-        Tshaded = Ta + 1.0 + 273.15;
+    if (isnan(Tshaded) || isinf(Tshaded)
+        || Tshaded > TMAX_THRESHOLD || Tshaded < TMIN_THRESHOLD) {
+        Tshaded = TshadedOld;
     }
 
 
@@ -234,5 +328,3 @@ void main()
 
 
 }
-
-

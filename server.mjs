@@ -1,32 +1,82 @@
 import { createServer } from 'node:http'
 import { execFile, spawn } from 'node:child_process'
-import { closeSync, copyFileSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, copyFileSync, cpSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { inflateSync } from 'node:zlib'
-import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path'
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createDefaultProject, DEFAULT_SCENE_MODEL, normalizeProject, PROJECT_MODES, projectToXml } from './src/renderer/src/project-schema.js'
+import { createDefaultProject, DEFAULT_SCENE_MODEL, normalizeProject, PROJECT_MODES, sensorBandValues, sensorViewAngles, stringifyProject, validateProject } from './src/renderer/src/project-schema.js'
+import { prepareRuntimeSceneProject } from './tools/runtime-scene.mjs'
 
-const root = dirname(fileURLToPath(import.meta.url))
-const dist = join(root, 'dist')
+const PROJECT_ROOT = dirname(fileURLToPath(import.meta.url))
+const RESOURCE_ROOT = resolve(process.env.STREAMSIM_RESOURCE_ROOT || PROJECT_ROOT)
+const GUI_OUTPUT_DIR = join(RESOURCE_ROOT, 'gui')
 const apiOnly = process.argv.includes('--api-only')
 const modes = new Set(PROJECT_MODES)
-const modelRoot = join(root, 'models')
-const defaultSceneAsset = join(root, 'assets', 'obj-library', 'house_a.obj')
+const MODEL_ROOT = join(PROJECT_ROOT, 'models')
+const MAX_FACET_TRIANGLES = 1_000_000
+const defaultSceneAsset = join(RESOURCE_ROOT, 'assets', 'obj-library', 'building', 'house_a.obj')
 const histreamCandidates = [
-  join(modelRoot, 'bin_x64', 'Release', 'histream.exe'),
-  join(modelRoot, 'bin_x64', 'Debug', 'histream.exe'),
-  join(modelRoot, 'histream', 'bin', 'Debug', 'histream.exe'),
-  join(modelRoot, 'histream', 'bin', 'Release', 'histream.exe')
+  join(RESOURCE_ROOT, 'engine', 'histream.exe'),
+  join(MODEL_ROOT, 'bin_x64', 'Release', 'histream.exe'),
+  join(MODEL_ROOT, 'bin_x64', 'Debug', 'histream.exe'),
+  join(MODEL_ROOT, 'histream', 'bin', 'Debug', 'histream.exe'),
+  join(MODEL_ROOT, 'histream', 'bin', 'Release', 'histream.exe')
 ]
 const mime = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.bmp': 'image/bmp' }
 const resultImageMime = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.bmp': 'image/bmp' }
 let child = null
+let childExecutable = ''
+let resettingProcesses = false
 let projectFile = ''
 let projectDir = ''
 const clients = new Set()
 
 function executable() {
   return histreamCandidates.find(existsSync) || histreamCandidates[0]
+}
+
+function processExists(pid) {
+  if (!pid) return false
+  try { process.kill(pid, 0); return true }
+  catch { return false }
+}
+
+function taskkill(args, label) {
+  return new Promise((resolveTaskkill) => {
+    execFile('taskkill.exe', args, { windowsHide: true, encoding: 'utf8', maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+      resolveTaskkill({ label, killed: !error, detail: String(stdout || stderr || '').trim() })
+    })
+  })
+}
+
+async function resetSimulationProcesses() {
+  if (resettingProcesses) throw new Error('模拟环境正在重置')
+  resettingProcesses = true
+  const running = child
+  const runningPid = running?.pid || 0
+  if (running) running.streamsimReset = true
+  const results = []
+  try {
+    if (process.platform === 'win32') {
+      if (runningPid) results.push(await taskkill(['/PID', String(runningPid), '/T', '/F'], `PID ${runningPid}`))
+      const imageNames = new Set(['histream.exe', 'radiosity_web_runner.exe'])
+      if (childExecutable) imageNames.add(basename(childExecutable))
+      for (const name of imageNames) results.push(await taskkill(['/IM', name, '/T', '/F'], name))
+    } else if (running) {
+      running.kill('SIGKILL')
+      results.push({ label: `PID ${runningPid}`, killed: true, detail: '' })
+    }
+    if (runningPid && processExists(runningPid)) {
+      if (running) running.streamsimReset = false
+      child = running
+      throw new Error(`无法终止模拟进程 PID ${runningPid}`)
+    }
+    child = null
+    childExecutable = ''
+    return { activePid: runningPid || null, terminated: results.filter((item) => item.killed).map((item) => item.label) }
+  } finally {
+    resettingProcesses = false
+  }
 }
 
 
@@ -55,61 +105,351 @@ function sanitizeObjContent(value) {
   return content ? content + '\n' : ''
 }
 
+function normalizeSpectrumContent(value) {
+  const rows = String(value || '').replace(/^\uFEFF/, '').split(/\r?\n/)
+    .map((line) => line.replace(/#.*$/, '').trim()).filter(Boolean)
+  if (rows.length < 2 || rows.length > 3) throw new Error('波谱文件必须为 2 行或 3 行：波长、反射率、可选透射率')
+  const parseRow = (row, label) => {
+    const values = row.split(/[\s,;]+/).filter(Boolean).map(Number)
+    if (values.length < 2 || !values.every(Number.isFinite)) throw new Error(`${label}必须包含至少 2 个有效数值`)
+    return values
+  }
+  const wavelengths = parseRow(rows[0], '第一行波长')
+  const reflectance = parseRow(rows[1], '第二行反射率')
+  const transmittance = rows[2] ? parseRow(rows[2], '第三行透射率') : wavelengths.map(() => 0)
+  if (reflectance.length !== wavelengths.length || transmittance.length !== wavelengths.length) throw new Error('波长、反射率和透射率的数值数量必须相同')
+  if (wavelengths.some((value) => value <= 0)) throw new Error('波长必须大于 0')
+  const points = wavelengths.map((wavelength, index) => ({ wavelength, reflectance: reflectance[index], transmittance: transmittance[index] }))
+    .sort((left, right) => left.wavelength - right.wavelength)
+  if (points.some((point, index) => index > 0 && point.wavelength === points[index - 1].wavelength)) throw new Error('波长不能重复')
+  if (points.some((point) => point.reflectance < 0 || point.transmittance < 0 || point.reflectance > 1 || point.transmittance > 1 || point.reflectance + point.transmittance > 1)) throw new Error('反射率、透射率必须在 0–1 内且二者之和不能超过 1')
+  return [
+    points.map((point) => point.wavelength).join(' '),
+    points.map((point) => point.reflectance).join(' '),
+    points.map((point) => point.transmittance).join(' ')
+  ].join('\n') + '\n'
+}
+
 function normalizeHostPath(value) {
   const source = String(value || "").trim()
   const windowsPath = source.match(/^([A-Za-z]):(.*)$/)
-  if (process.platform === "linux" && windowsPath) return "/mnt/" + windowsPath[1].toLowerCase() + "/" + windowsPath[2].replaceAll("\\", "/")
+  if (process.platform === "linux" && windowsPath) return "/mnt/" + windowsPath[1].toLowerCase() + "/" + windowsPath[2].replaceAll("\\", "/").replace(/^\/+/, '')
   const wslPath = source.match(/^\/mnt\/([A-Za-z])\/(.*)$/)
   if (process.platform === "win32" && wslPath) return wslPath[1].toUpperCase() + ":" + String.fromCharCode(92) + wslPath[2].replaceAll("/", String.fromCharCode(92))
   return source
 }
 
+function histreamRuntimePath(value, enginePath = executable()) {
+  const source = String(value || '').trim()
+  if (process.platform !== 'linux' || extname(enginePath).toLowerCase() !== '.exe') return source
+  const wslPath = source.match(/^\/mnt\/([A-Za-z])\/(.*)$/)
+  return wslPath
+    ? wslPath[1].toUpperCase() + ':\\' + wslPath[2].replaceAll('/', '\\')
+    : source
+}
+
+function windowsPath(value) {
+  const source = String(value || '').trim()
+  const wslPath = source.match(/^\/mnt\/([A-Za-z])\/(.*)$/)
+  return wslPath
+    ? wslPath[1].toUpperCase() + ':\\' + wslPath[2].replace(/^\/+/, '').replaceAll('/', '\\')
+    : source
+}
+
+function projectStoredPath(value, baseDir) {
+  const source = String(value || '').trim()
+  if (!source) return ''
+  const hostPath = normalizeHostPath(source)
+  if (!isAbsolute(hostPath)) return hostPath.replaceAll('\\', '/')
+  const absolutePath = resolve(hostPath)
+  const local = relative(resolve(baseDir), absolutePath)
+  if (local && local !== '..' && !local.startsWith('../') && !isAbsolute(local))
+    return local.replaceAll('\\', '/')
+  return windowsPath(absolutePath)
+}
+
+function normalizeStoredProjectPaths(project, baseDir) {
+  const configuration = project?.configuration
+  if (!configuration) return project
+  if (configuration.outDir) configuration.outDir = projectStoredPath(configuration.outDir, baseDir)
+  if (configuration.meteo?.path) configuration.meteo.path = projectStoredPath(configuration.meteo.path, baseDir)
+  if (configuration.scene?.demFile) configuration.scene.demFile = projectStoredPath(configuration.scene.demFile, baseDir)
+  for (const item of configuration.objects?.items || []) {
+    if (item.fileName) item.fileName = projectStoredPath(item.fileName, baseDir)
+    if (item.positionFile) item.positionFile = projectStoredPath(item.positionFile, baseDir)
+  }
+  for (const item of configuration.spectra || []) {
+    if (item.fileName) item.fileName = projectStoredPath(item.fileName, baseDir)
+    if (item.physicalTexture?.fileName)
+      item.physicalTexture.fileName = projectStoredPath(item.physicalTexture.fileName, baseDir)
+  }
+  return project
+}
+
 function resolveProjectFile(value) {
   let path = normalizeHostPath(value).replace(/^"|"$/g, '')
-  if (!path) throw new Error('请输入已有工程目录、project.json 或 Input.xml 完整路径')
+  if (!path) throw new Error('请输入已有工程目录或 project.json 完整路径')
   path = resolve(path)
   if (!existsSync(path)) throw new Error(`找不到已有工程：${path}`)
 
   if (statSync(path).isDirectory()) {
-    const manifest = join(path, 'project.json')
-    path = existsSync(manifest) ? manifest : join(path, 'Input.xml')
-    if (!existsSync(path)) throw new Error(`工程目录中找不到 project.json 或 Input.xml：${dirname(path)}`)
+    path = join(path, 'project.json')
+    if (!existsSync(path)) throw new Error(`工程目录中找不到 project.json：${dirname(path)}`)
   }
 
   if (!statSync(path).isFile()) throw new Error(`工程入口不是文件：${path}`)
-  if (extname(path).toLowerCase() === '.json') {
-    if (basename(path).toLowerCase() !== 'project.json') throw new Error('工程描述文件必须名为 project.json')
-    let project
-    try {
-      project = JSON.parse(readFileSync(path, 'utf8'))
-    } catch (error) {
-      throw new Error(`project.json 格式错误：${error.message}`)
-    }
-    const inputFile = String(project.inputFile || 'Input.xml').trim()
-    if (!inputFile) throw new Error('project.json 中的 inputFile 为空')
-    const inputPath = isAbsolute(inputFile) ? resolve(inputFile) : resolve(dirname(path), inputFile)
-    if (!existsSync(inputPath) || !statSync(inputPath).isFile()) throw new Error(`找不到 project.json 指定的配置：${inputPath}`)
-    if (extname(inputPath).toLowerCase() !== '.xml') throw new Error('project.json 的 inputFile 必须指向 XML 文件')
-    return inputPath
-  }
-
-  if (extname(path).toLowerCase() !== '.xml') throw new Error('工程入口必须是 project.json 或 XML 文件')
+  if (basename(path).toLowerCase() !== 'project.json') throw new Error('工程入口必须是 project.json')
+  let source
+  try { source = JSON.parse(readFileSync(path, 'utf8')) }
+  catch (error) { throw new Error(`project.json 格式错误：${error.message}`) }
+  const validation = validateProject(source)
+  if (!validation.valid) throw new Error(validation.errors.join('；'))
   return path
 }
 
-function decodeXmlText(value) {
-  return String(value || '')
-    .replaceAll('&amp;', '&')
-    .replaceAll('&lt;', '<')
-    .replaceAll('&gt;', '>')
-    .replaceAll('&quot;', '"')
-    .replaceAll('&apos;', "'")
+function projectFromSource(source) {
+  if (source && typeof source === 'object') return normalizeProject(source)
+  let parsed
+  try { parsed = JSON.parse(String(source || '')) }
+  catch (error) { throw new Error(`project.json 格式错误：${error.message}`) }
+  return normalizeProject(parsed)
 }
 
-function firstXmlTag(xml, tag) {
-  const safeTag = String(tag).replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')
-  const match = String(xml || '').match(new RegExp('<' + safeTag + '(?:\\s[^>]*)?>([\\s\\S]*?)<\\/' + safeTag + '>', 'i'))
-  return match ? decodeXmlText(match[1]).trim() : ''
+const objTriangleCountCache = new Map()
+
+function projectAssetPath(value, baseDir) {
+  const hostPath = normalizeHostPath(value)
+  if (!hostPath) return ''
+  if (isAbsolute(hostPath)) return resolve(hostPath)
+  const localPath = resolve(baseDir, hostPath)
+  const sharedPath = /^assets[\\/]/i.test(hostPath) ? resolve(RESOURCE_ROOT, hostPath) : ''
+  return sharedPath && !existsSync(localPath) && existsSync(sharedPath) ? sharedPath : localPath
+}
+
+function objTriangleCount(path) {
+  if (!path || !existsSync(path) || !statSync(path).isFile()) return 0
+  const info = statSync(path)
+  const cached = objTriangleCountCache.get(path)
+  if (cached?.size === info.size && cached?.mtimeMs === info.mtimeMs) return cached.triangles
+  const source = readFileSync(path, 'utf8')
+  let triangles = 0
+  for (const match of source.matchAll(/^[ \t]*f[ \t]+([^\r\n#]+)/gm)) {
+    const vertices = match[1].trim().split(/[ \t]+/).filter(Boolean).length
+    if (vertices >= 3) triangles += vertices - 2
+  }
+  objTriangleCountCache.set(path, { size: info.size, mtimeMs: info.mtimeMs, triangles })
+  return triangles
+}
+
+function positionInstanceCount(path) {
+  if (!path || !existsSync(path) || !statSync(path).isFile()) return 1
+  let count = 0
+  for (const line of readFileSync(path, 'utf8').split(/\r?\n/)) {
+    const value = line.replace(/#.*/, '').trim()
+    if (value && !value.startsWith('//')) count += 1
+  }
+  return count
+}
+
+function estimateFacetTriangles(project, baseDir) {
+  const details = []
+  let total = 2
+  for (const item of project.configuration?.objects?.items || []) {
+    if (item.type === 'Fire' || item.type === 'Fog' || item.medium) continue
+    const objectPath = projectAssetPath(item.fileName, baseDir)
+    const triangles = item.fileName ? objTriangleCount(objectPath) : 12
+    if (!triangles) continue
+    const positionPath = projectAssetPath(item.positionFile, baseDir)
+    const instances = item.positionFile ? positionInstanceCount(positionPath) : 1
+    const expandedTriangles = triangles * instances
+    total += expandedTriangles
+    details.push({
+      name: String(item.name || basename(objectPath, extname(objectPath)) || '未命名对象'),
+      triangles,
+      instances,
+      expandedTriangles
+    })
+  }
+  details.sort((left, right) => right.expandedTriangles - left.expandedTriangles)
+  return { total, details }
+}
+
+function assertFacetScale(project, baseDir, mode) {
+  const estimate = estimateFacetTriangles(project, baseDir)
+  if (estimate.total <= MAX_FACET_TRIANGLES) return estimate
+  const largest = estimate.details[0]
+  const source = largest
+    ? `最大来源：${largest.name}（${largest.triangles.toLocaleString('zh-CN')} 面 × ${largest.instances.toLocaleString('zh-CN')} 实例 = ${largest.expandedTriangles.toLocaleString('zh-CN')} 面）。`
+    : ''
+  const recommendation = mode === 'eFacetEB'
+    ? '请切换到“体元辐射传输与能量平衡（Voxel RT–EB）”'
+    : '请切换到“体元辐射传输（VoxelRT）”'
+  throw new Error(
+    `面元规模预估为 ${estimate.total.toLocaleString('zh-CN')} 个三角面，超过安全上限 ${MAX_FACET_TRIANGLES.toLocaleString('zh-CN')}。` +
+    `${source}${recommendation}，或减少实例数量、简化 OBJ 后再运行。`)
+}
+
+const atmosphereLutCache = new Map()
+
+function loadAtmosphereLut(path) {
+  const normalized = resolve(normalizeHostPath(path))
+  if (atmosphereLutCache.has(normalized)) return atmosphereLutCache.get(normalized)
+  if (!existsSync(normalized)) throw new Error(`找不到大气查找表：${normalized}`)
+  const spectra = new Map(), waterVapor = new Set(), visibility = new Set(), altitude = new Set(), zenith = new Set()
+  let version2 = false
+  for (const line of readFileSync(normalized, 'utf8').split(/\r?\n/)) {
+    if (!line || line.startsWith('#')) continue
+    if (line.startsWith('atmosphere_model')) { version2 = true; continue }
+    if (line.startsWith('visibility_km')) continue
+    const cells = line.split(',')
+    const model = version2 ? cells[0] : 'midlatitude-summer'
+    const aerosol = version2 ? cells[1] : 'rural'
+    const values = (version2 ? cells.slice(2) : cells).map(Number)
+    if (values.length < (version2 ? 7 : 6) || !values.every(Number.isFinite)) continue
+    const [water, v, a, z, wavelength, transmittance, pathRadiance] = version2
+      ? values : [2, ...values]
+    waterVapor.add(water); visibility.add(v); altitude.add(a); zenith.add(z)
+    const key = `${model}|${aerosol}|${water}|${v}|${a}|${z}`
+    const spectrum = spectra.get(key) || { wavelength: [], transmittance: [], pathRadiance: [] }
+    spectrum.wavelength.push(wavelength)
+    spectrum.transmittance.push(Math.max(0, Math.min(1, transmittance)))
+    spectrum.pathRadiance.push(Math.max(0, pathRadiance))
+    spectra.set(key, spectrum)
+  }
+  const table = {
+    spectra,
+    waterVapor: [...waterVapor].sort((a, b) => a - b),
+    visibility: [...visibility].sort((a, b) => a - b),
+    altitude: [...altitude].sort((a, b) => a - b),
+    zenith: [...zenith].sort((a, b) => a - b)
+  }
+  if (!spectra.size || !table.visibility.length) throw new Error(`大气查找表为空：${normalized}`)
+  atmosphereLutCache.set(normalized, table)
+  return table
+}
+
+function atmosphereAxisBracket(axis, value) {
+  if (value <= axis[0]) return [axis[0], axis[0]]
+  if (value >= axis.at(-1)) return [axis.at(-1), axis.at(-1)]
+  const right = axis.findIndex((item) => item >= value)
+  return [axis[right - 1], axis[right]]
+}
+
+function atmosphereAxisWeight(value, low, high, upper) {
+  if (high <= low) return upper ? 0 : 1
+  const fraction = Math.max(0, Math.min(1, (value - low) / (high - low)))
+  return upper ? fraction : 1 - fraction
+}
+
+function atmosphereSpectralSample(spectrum, wavelength) {
+  const wavelengths = spectrum.wavelength
+  if (wavelength <= wavelengths[0]) return [spectrum.transmittance[0], spectrum.pathRadiance[0]]
+  if (wavelength >= wavelengths.at(-1)) return [spectrum.transmittance.at(-1), spectrum.pathRadiance.at(-1)]
+  let low = 0, high = wavelengths.length - 1
+  while (high - low > 1) {
+    const middle = (low + high) >> 1
+    if (wavelengths[middle] < wavelength) low = middle
+    else high = middle
+  }
+  const weight = (wavelength - wavelengths[low]) / (wavelengths[high] - wavelengths[low])
+  return [
+    spectrum.transmittance[low] + (spectrum.transmittance[high] - spectrum.transmittance[low]) * weight,
+    spectrum.pathRadiance[low] + (spectrum.pathRadiance[high] - spectrum.pathRadiance[low]) * weight
+  ]
+}
+
+function sampleAtmosphereLut(table, model, aerosol, waterVapor, visibility, altitude, zenith, wavelength) {
+  if (wavelength < 350 || wavelength > 14000) return { transmittance: 1, pathRadiance: 0 }
+  const wb = atmosphereAxisBracket(table.waterVapor, waterVapor)
+  const vb = atmosphereAxisBracket(table.visibility, visibility)
+  const ab = atmosphereAxisBracket(table.altitude, altitude)
+  const zb = atmosphereAxisBracket(table.zenith, Math.abs(zenith))
+  let transmittance = 0, pathRadiance = 0, accumulatedWeight = 0
+  for (let iw = 0; iw < 2; iw += 1) for (let iv = 0; iv < 2; iv += 1) for (let ia = 0; ia < 2; ia += 1) for (let iz = 0; iz < 2; iz += 1) {
+    const w = wb[iw]
+    const v = vb[iv], a = ab[ia], z = zb[iz]
+    const weight = atmosphereAxisWeight(waterVapor, wb[0], wb[1], Boolean(iw))
+      * atmosphereAxisWeight(visibility, vb[0], vb[1], Boolean(iv))
+      * atmosphereAxisWeight(altitude, ab[0], ab[1], Boolean(ia))
+      * atmosphereAxisWeight(Math.abs(zenith), zb[0], zb[1], Boolean(iz))
+    if (!weight) continue
+    const spectrum = table.spectra.get(`${model}|${aerosol}|${w}|${v}|${a}|${z}`)
+    if (!spectrum) continue
+    const sample = atmosphereSpectralSample(spectrum, wavelength)
+    transmittance += weight * sample[0]
+    pathRadiance += weight * sample[1]
+    accumulatedWeight += weight
+  }
+  if (!accumulatedWeight) return { transmittance: 1, pathRadiance: 0 }
+  return {
+    transmittance: Math.max(0, Math.min(1, transmittance / accumulatedWeight)),
+    pathRadiance: Math.max(0, pathRadiance / accumulatedWeight)
+  }
+}
+
+function planckRadiance(wavelengthNm, temperatureK) {
+  const wavelengthUm = wavelengthNm > 50 ? wavelengthNm / 1000 : wavelengthNm
+  return 1.19104e8 / (Math.pow(wavelengthUm, 5) * Math.expm1(14387.7 / (temperatureK * wavelengthUm)))
+}
+
+function inversePlanckTemperature(wavelengthNm, radiance) {
+  const wavelengthUm = wavelengthNm > 50 ? wavelengthNm / 1000 : wavelengthNm
+  return 14387.7 / (wavelengthUm * Math.log(1.19104e8 / (radiance * Math.pow(wavelengthUm, 5)) + 1))
+}
+
+
+function outputGeometrySuffix(mode) {
+  if (mode === 'eFacetRT' || mode === 'eFacetEB') return '_f'
+  if (mode === 'eVoxelRT' || mode === 'eVoxelEB') return '_v'
+  return ''
+}
+
+function isEnergyBalanceMode(mode) {
+  return mode === "eFacetEB" || mode === "eVoxelEB"
+}
+
+function processOutputSelection(projectSource, mode) {
+  const sensor = projectFromSource(projectSource).configuration.sensor
+  const legacy = Boolean(sensor.process)
+  const radiation = sensor.radiationProcess == null
+    ? (!isEnergyBalanceMode(mode) && legacy) : Boolean(sensor.radiationProcess)
+  const energy = sensor.energyProcess == null
+    ? (isEnergyBalanceMode(mode) && legacy) : Boolean(sensor.energyProcess)
+  return { radiation, energy }
+}
+
+function processOutputEnabled(projectSource, mode) {
+  const selected = processOutputSelection(projectSource, mode)
+  return isEnergyBalanceMode(mode) ? selected.radiation || selected.energy : selected.radiation
+}
+
+function outputAngleToken(value) {
+  const number = Number(value)
+  return Number.isFinite(number) ? number.toFixed(2) : '0.00'
+}
+
+function outputTimeToken(julianTime) {
+  const value = Number(julianTime)
+  if (!Number.isFinite(value)) return ''
+  let day = Math.floor(value)
+  let minutes = Math.round((value - day) * 1440)
+  if (minutes >= 1440) { day += Math.floor(minutes / 1440); minutes %= 1440 }
+  if (minutes < 0) minutes = 0
+  const hour = String(Math.floor(minutes / 60)).padStart(2, '0')
+  const minute = String(minutes % 60).padStart(2, '0')
+  return 'DOY' + day + '_' + hour + '-' + minute
+}
+
+function outputTiffName(mode, values = {}) {
+  const suffix = outputGeometrySuffix(mode) + (values.atmosphere ? '_a' : '')
+  const vza = outputAngleToken(values.vza)
+  const vaa = outputAngleToken(values.vaa)
+  if (isEnergyBalanceMode(mode)) {
+    const time = String(values.timeToken || outputTimeToken(values.julianTime) || 'UNKNOWN')
+    return 'T=' + time + '_VZA=' + vza + '_VAA=' + vaa + suffix + '.tif'
+  }
+  return 'SZA=' + outputAngleToken(values.sza) + '_SAA=' + outputAngleToken(values.saa) +
+    '_VZA=' + vza + '_VAA=' + vaa + suffix + '.tif'
 }
 
 function writeRadiosityEnvi(jsonPath) {
@@ -164,28 +504,128 @@ function writeRadiosityEnvi(jsonPath) {
 
 function readRadiosityResult(jsonPath) {
   if (!existsSync(jsonPath)) throw new Error(`找不到面元结果：${jsonPath}`)
-  let result
-  try { result = JSON.parse(readFileSync(jsonPath, 'utf8')) } catch (error) { throw new Error(`面元结果格式错误：${error.message}`) }
-  const facetCount = Number(result.facetCount)
+  // 大场景/多波段面元结果 JSON 会超过 512 MB。若用 readFileSync(..., 'utf8') + JSON.parse，
+  // 会触发 V8 单字符串长度上限（0x1fffffe8 字符）：
+  //   Cannot create a string longer than 0x1fffffe8 characters
+  // 这里改为直接基于 Buffer 逐数字解析（与 sampleRadiosityResult 同一思路），
+  // 不把整个文件转换成 JS 字符串，因此不再受该上限限制。
+  const source = readFileSync(jsonPath)
+  const header = source.subarray(0, Math.min(source.length, 1 << 16)).toString('utf8')
+  const facetCount = Number(header.match(/"facetCount"\s*:\s*(\d+)/)?.[1])
   if (!Number.isInteger(facetCount) || facetCount < 1) throw new Error('面元结果缺少有效的 facetCount')
-  const metricSources = [
-    ['radiosity', '辐射度', result.radiosity, true],
-    ['lightEnhancement', '光照增强', result.lightEnhancement, true],
-    ['sunlit', '光照比例', result.sunlit, true],
-    ['temperature', '温度 [K]', result.temperature],
-    ['netRadiation', '净辐射 [W m⁻²]', result.netRadiation],
-    ['sensibleHeat', '显热 [W m⁻²]', result.sensibleHeat],
-    ['latentHeat', '潜热 [W m⁻²]', result.latentHeat],
-    ['storageHeat', '储热 [W m⁻²]', result.storageHeat]
-  ]
-  for (const [, name, values, required] of metricSources) {
-    if (required && (!Array.isArray(values) || values.length < facetCount * 2)) throw new Error(`${name} 数据不完整`)
+  const quantity = String(header.match(/"quantity"\s*:\s*"([^"]*)"/)?.[1] || '')
+  const units = String(header.match(/"units"\s*:\s*"([^"]*)"/)?.[1] || '')
+  const backend = String(header.match(/"backend"\s*:\s*"([^"]*)"/)?.[1] || '')
+  const surfaceCount = facetCount * 2
+
+  const readScalar = (key) => {
+    const keyOffset = source.indexOf('"' + key + '"')
+    if (keyOffset < 0) return undefined
+    const colon = source.indexOf(58, keyOffset)
+    if (colon < 0) return undefined
+    let end = colon + 1
+    while (end < source.length && ![44, 10, 13, 125].includes(source[end])) end += 1
+    const value = Number(source.toString('ascii', colon + 1, end).trim())
+    return Number.isFinite(value) ? value : undefined
   }
-  const metrics = metricSources.filter(([, , values]) => Array.isArray(values) && values.length >= facetCount * 2).map(([id, name, values]) => [id, name, values])
-  return { facetCount, metrics, vertexPositions: Array.isArray(result.vertexPositions) ? result.vertexPositions : [], backend: result.backend, iterations: result.iterations, maxDelta: result.maxDelta }
+  const iterations = readScalar('iterations')
+  const maxDelta = readScalar('maxDelta')
+
+  // 顶层数值数组按固定顺序写入；用递增的 searchFrom 避免对超大文件反复全量扫描。
+  let searchFrom = 0
+  const findArray = (key) => {
+    const keyOffset = source.indexOf('"' + key + '"', searchFrom)
+    if (keyOffset < 0) return -1
+    const arrayOffset = source.indexOf(91, keyOffset)
+    if (arrayOffset < 0) throw new Error('面元结果缺少 ' + key + ' 数组')
+    searchFrom = keyOffset + key.length + 2
+    return arrayOffset
+  }
+  const readFixed = (key, count) => {
+    const arrayOffset = findArray(key)
+    if (arrayOffset < 0) return null
+    const values = new Float32Array(count)
+    let position = arrayOffset + 1
+    for (let index = 0; index < count; index += 1) {
+      while (position < source.length && (source[position] === 32 || source[position] === 9 || source[position] === 10 || source[position] === 13 || source[position] === 44)) position += 1
+      if (position >= source.length) throw new Error(key + ' 数据不完整')
+      const numberStart = position
+      while (position < source.length && source[position] !== 44 && source[position] !== 93) position += 1
+      if (position === numberStart) throw new Error(key + ' 数据不完整')
+      const value = Number(source.toString('ascii', numberStart, position))
+      if (!Number.isFinite(value)) throw new Error(key + ' 包含无效数值')
+      values[index] = value
+    }
+    while (position < source.length && (source[position] === 32 || source[position] === 9 || source[position] === 10 || source[position] === 13)) position += 1
+    if (position >= source.length || source[position] !== 93) throw new Error(key + ' 数据不完整')
+    return values
+  }
+  const readDynamic = (key) => {
+    const arrayOffset = findArray(key)
+    if (arrayOffset < 0) return null
+    const values = []
+    let position = arrayOffset + 1
+    while (true) {
+      while (position < source.length && (source[position] === 32 || source[position] === 9 || source[position] === 10 || source[position] === 13 || source[position] === 44)) position += 1
+      if (position >= source.length || source[position] === 93) break
+      const numberStart = position
+      while (position < source.length && source[position] !== 44 && source[position] !== 93) position += 1
+      const value = Number(source.toString('ascii', numberStart, position))
+      if (!Number.isFinite(value)) throw new Error(key + ' 包含无效数值')
+      values.push(value)
+    }
+    return values
+  }
+
+  const arrays = {}
+  arrays.vertexPositions = readFixed('vertexPositions', facetCount * 9)
+  if (!arrays.vertexPositions) throw new Error('面元结果缺少完整的三角形坐标')
+  arrays.wavelengths = readDynamic('wavelengths')
+  // 文件内的写入顺序：sunlit, radiosity, lightEnhancement, temperature, ...
+  const metricKeys = ['sunlit', 'radiosity', 'lightEnhancement', 'temperature', 'netRadiation', 'sensibleHeat', 'latentHeat', 'storageHeat']
+  for (const key of metricKeys) arrays[key] = readFixed(key, surfaceCount)
+  arrays.bandRadiosity = readFixed('bandRadiosity', surfaceCount * Math.max(1, (arrays.wavelengths || []).length))
+
+  const wavelengths = (arrays.wavelengths || []).filter((value) => Number.isFinite(value) && value > 0)
+  const bandRadiosity = arrays.bandRadiosity || new Float32Array(0)
+  if (bandRadiosity.length && bandRadiosity.length < surfaceCount * Math.max(1, wavelengths.length)) {
+    throw new Error('面元多波段辐亮度数据不完整')
+  }
+
+  const radianceResult = quantity.toLowerCase() === 'spectral radiance'
+  const metricDefinitions = [
+    ['radiosity', radianceResult ? '光谱辐亮度 [W m⁻² sr⁻¹ μm⁻¹]' : '辐射度', true],
+    ['lightEnhancement', '光照增强', true],
+    ['sunlit', '光照比例', true],
+    ['temperature', '温度 [K]', false],
+    ['netRadiation', '净辐射 [W m⁻²]', false],
+    ['sensibleHeat', '显热 [W m⁻²]', false],
+    ['latentHeat', '潜热 [W m⁻²]', false],
+    ['storageHeat', '储热 [W m⁻²]', false]
+  ]
+  const metrics = []
+  for (const [id, name, required] of metricDefinitions) {
+    const values = arrays[id]
+    if (required && !values) throw new Error('面元结果缺少 ' + id + ' 数组')
+    if (values) metrics.push([id, name, values])
+  }
+  return {
+    facetCount,
+    metrics,
+    vertexPositions: arrays.vertexPositions,
+    backend,
+    iterations,
+    maxDelta,
+    wavelengths,
+    bandRadiosity,
+    quantity,
+    units
+  }
 }
 
-function sampleRadiosityResult(jsonPath, maximumFacets = 750000) {
+const THREE_DIMENSIONAL_FACET_SAMPLE_LIMIT = 1000000
+
+function sampleRadiosityResult(jsonPath, maximumFacets = THREE_DIMENSIONAL_FACET_SAMPLE_LIMIT) {
   if (!existsSync(jsonPath)) throw new Error('找不到面元结果：' + jsonPath)
   const source = readFileSync(jsonPath)
   const header = source.subarray(0, Math.min(source.length, 65536)).toString('utf8')
@@ -242,11 +682,16 @@ function sampleRadiosityResult(jsonPath, maximumFacets = 750000) {
     return Number.isFinite(value) ? value : undefined
   }
   const backend = header.match(/"backend"\s*:\s*"([^"]*)"/)?.[1]
+  const quantity = header.match(/"quantity"\s*:\s*"([^"]*)"/)?.[1] || ''
+  const units = header.match(/"units"\s*:\s*"([^"]*)"/)?.[1] || ''
+  const radiosityLabel = quantity.toLowerCase() === 'spectral radiance'
+    ? '光谱辐亮度 [W m⁻² sr⁻¹ μm⁻¹]'
+    : `辐射度${units ? ` [${units.replaceAll('-2', '⁻²')}]` : ' [W m⁻²]'}`
   const vertexPositions = sampleArray('vertexPositions', 9)
   const metricDefinitions = [
-    ['radiosity', '辐射度', true],
-    ['lightEnhancement', '光照增强', true],
-    ['sunlit', '光照比例', true],
+    ['radiosity', radiosityLabel, true],
+    ['lightEnhancement', '光照增强 [-]', true],
+    ['sunlit', '光照比例 [-]', true],
     ['temperature', '温度 [K]'],
     ['netRadiation', '净辐射 [W m⁻²]'],
     ['sensibleHeat', '显热 [W m⁻²]'],
@@ -290,22 +735,160 @@ function isRadiosityResultFile(path) {
   }
 }
 
-function writeRadiosityTiff(jsonPath, inputPath) {
-  const { facetCount, metrics, vertexPositions, backend } = readRadiosityResult(jsonPath)
-  if (!Array.isArray(vertexPositions) || vertexPositions.length < facetCount * 9) throw new Error('面元结果缺少完整的三角形坐标')
-  if (!inputPath || !existsSync(inputPath)) throw new Error('找不到生成影像所需的 Input.xml')
-  const xml = readFileSync(inputPath, 'utf8')
-  const positiveIntegerTag = (tag, fallback) => {
-    const value = Math.round(Number(firstXmlTag(xml, tag)))
+function processResultMetadata(path) {
+  if (extname(path).toLowerCase() !== '.json' || statSync(path).size > 1024 * 1024) return null
+  try {
+    const metadata = JSON.parse(readFileSync(path, 'utf8'))
+    return String(metadata.kind || '').endsWith('-process') ? metadata : null
+  } catch {
+    return null
+  }
+}
+
+// FacetRT and FacetEB use the same display-only sampling limit. Files on disk
+// retain every facet and all process values.
+function readProcessResult(metadataPath, maximumElements = THREE_DIMENSIONAL_FACET_SAMPLE_LIMIT) {
+  const metadata = processResultMetadata(metadataPath)
+  if (!metadata) throw new Error('无效的三维过程结果')
+  const dataPath = resolve(dirname(metadataPath), String(metadata.dataFile || ''))
+  if (!existsSync(dataPath)) throw new Error('找不到过程二进制数据：' + dataPath)
+  const data = readFileSync(dataPath)
+  const recordFloats = Number(metadata.recordFloats)
+  const fields = Array.isArray(metadata.fields)
+    ? metadata.fields.filter((field) => field && typeof field === 'object' && Number.isInteger(Number(field.offset)))
+    : []
+  if (!Number.isInteger(recordFloats) || recordFloats < 1 || !fields.length) throw new Error('过程结果字段定义无效')
+  const recordBytes = recordFloats * 4
+  const sourceCount = Number(metadata.geometry === 'facet' ? metadata.facetCount : metadata.voxelCount)
+  if (!Number.isInteger(sourceCount) || sourceCount < 1) throw new Error('过程结果缺少有效元素数量')
+
+  if (metadata.geometry === 'facet') {
+    const geometryPath = resolve(dirname(metadataPath), String(metadata.geometryFile || '../faceteb.json'))
+    const geometry = sampleRadiosityResult(geometryPath, maximumElements)
+    if (data.length < sourceCount * 2 * recordBytes) throw new Error('面元过程二进制数据不完整')
+    const sampledMetrics = fields.map((field) => ({
+      id: String(field.id || 'field_' + field.offset),
+      label: String(field.label || field.id || '字段 ' + field.offset),
+      values: new Array(geometry.facetCount * 2)
+    }))
+    for (let facet = 0; facet < geometry.facetCount; facet += 1) {
+      const sourceFacet = geometry.facetCount === sourceCount
+        ? facet
+        : Math.min(sourceCount - 1, Math.floor(facet * sourceCount / geometry.facetCount))
+      for (let side = 0; side < 2; side += 1) {
+        const recordOffset = (sourceFacet * 2 + side) * recordBytes
+        for (let metric = 0; metric < sampledMetrics.length; metric += 1) {
+          sampledMetrics[metric].values[facet * 2 + side] =
+            data.readFloatLE(recordOffset + Number(fields[metric].offset) * 4)
+        }
+      }
+    }
+    return {
+      ...geometry,
+      path: metadataPath,
+      metrics: sampledMetrics,
+      processType: metadata.processType,
+      time: metadata.time,
+      node: metadata.node,
+      backend: 'HiStream Facet ' + String(metadata.processType || 'process')
+    }
+  }
+
+  if (metadata.geometry !== 'voxel') throw new Error('不支持的过程几何类型：' + metadata.geometry)
+  if (data.length < sourceCount * recordBytes) throw new Error('体元过程二进制数据不完整')
+  const voxelCount = Math.min(sourceCount, maximumElements)
+  const sourceVoxels = new Uint32Array(voxelCount)
+  for (let voxel = 0; voxel < voxelCount; voxel += 1) {
+    sourceVoxels[voxel] = voxelCount === sourceCount
+      ? voxel
+      : Math.min(sourceCount - 1, Math.floor(voxel * sourceCount / voxelCount))
+  }
+  const positionOffsets = Array.isArray(metadata.positionOffsets) ? metadata.positionOffsets.map(Number) : [0, 1, 2]
+  const voxelPositions = new Array(voxelCount * 3)
+  const metrics = fields.map((field) => ({
+    id: String(field.id || 'field_' + field.offset),
+    label: String(field.label || field.id || '字段 ' + field.offset),
+    values: new Array(voxelCount)
+  }))
+  const profileMetadata = metadata.soilProfile && typeof metadata.soilProfile === 'object'
+    ? metadata.soilProfile : null
+  const profileLayerCount = Number(profileMetadata?.layerCount)
+  const profileOffsets = Array.isArray(profileMetadata?.offsets)
+    ? profileMetadata.offsets.map(Number) : []
+  const hasSoilProfile = Number.isInteger(profileLayerCount) && profileLayerCount > 0 &&
+    profileOffsets.length === profileLayerCount &&
+    profileOffsets.every((offset) => Number.isInteger(offset) && offset >= 0 && offset < recordFloats)
+  const profileDepths = hasSoilProfile && Array.isArray(profileMetadata.depths) &&
+    profileMetadata.depths.length === profileLayerCount
+    ? profileMetadata.depths.map(Number) : Array.from({ length: profileLayerCount }, (_, layer) => layer)
+  const soilProfile = hasSoilProfile ? {
+    layerCount: profileLayerCount,
+    temperatureUnit: String(profileMetadata.temperatureUnit || 'degC'),
+    depthUnit: String(profileMetadata.depthUnit || 'm'),
+    depths: profileDepths,
+    values: Array.from({ length: profileLayerCount }, () => new Array(voxelCount))
+  } : null
+  for (let voxel = 0; voxel < voxelCount; voxel += 1) {
+    const recordOffset = sourceVoxels[voxel] * recordBytes
+    for (let axis = 0; axis < 3; axis += 1) {
+      voxelPositions[voxel * 3 + axis] = data.readFloatLE(recordOffset + positionOffsets[axis] * 4)
+    }
+    for (let metric = 0; metric < metrics.length; metric += 1) {
+      metrics[metric].values[voxel] = data.readFloatLE(recordOffset + Number(fields[metric].offset) * 4)
+    }
+    if (soilProfile) {
+      for (let layer = 0; layer < soilProfile.layerCount; layer += 1) {
+        soilProfile.values[layer][voxel] = data.readFloatLE(recordOffset + profileOffsets[layer] * 4)
+      }
+    }
+  }
+  return {
+    kind: 'voxel',
+    path: metadataPath,
+    voxelCount,
+    sourceVoxelCount: sourceCount,
+    sampled: voxelCount < sourceCount,
+    voxelSize: Number(metadata.voxelSize) || 1,
+    voxelPositions,
+    metrics,
+    soilProfile,
+    processType: metadata.processType,
+    time: metadata.time,
+    node: metadata.node,
+    backend: 'HiStream Voxel ' + String(metadata.processType || 'process')
+  }
+}
+
+function writeRadiosityTiffForAngle(jsonPath, inputPath, mode, viewAngleOverride = null, includeProcess = true, removeStepFiles = false) {
+  const { facetCount, metrics, vertexPositions, backend, bandRadiosity } = readRadiosityResult(jsonPath)
+  if (!vertexPositions || vertexPositions.length < facetCount * 9) throw new Error('面元结果缺少完整的三角形坐标')
+  if (!inputPath || !existsSync(inputPath)) throw new Error('找不到生成影像所需的 project.json')
+  const project = projectFromSource(readFileSync(inputPath, 'utf8'))
+  const { scene, sensor, light, atmosphere = {}, meteo } = project.configuration
+  const positiveInteger = (value, fallback) => {
+    value = Math.round(Number(value))
     return Number.isInteger(value) && value > 0 ? value : fallback
   }
-  const width = positiveIntegerTag('pixelResolutionX', 16)
-  const height = positiveIntegerTag('pixelResolutionY', 16)
-  const controlBand = firstXmlTag(xml, 'controlBand')
-  const wavelengths = String(controlBand || '').split(/[\s,;]+/).map(Number).filter(Number.isFinite)
+  const width = positiveInteger(sensor.x, 512)
+  const height = positiveInteger(sensor.y, 512)
+  const wavelengths = sensorBandValues(sensor)
   if (!wavelengths.length) wavelengths.push(1)
-  const bandNames = wavelengths.map((wavelength, index) => controlBand ? String(wavelength) + ' nm' : 'Band ' + (index + 1))
-  const viewAngles = String(firstXmlTag(xml, 'viewAngles') || '0,0').split(/[,\s]+/).map(Number)
+  const temperatureOutput = isEnergyBalanceMode(mode) && Boolean(sensor.temperature)
+  const imageBandCount = temperatureOutput ? 1 : wavelengths.length
+  const isOpticalWavelength = (wavelength) => {
+    const value = Number(wavelength)
+    const nanometers = value <= 2.5 ? value * 1000 : value
+    return nanometers <= 2500
+  }
+  const bandNames = temperatureOutput
+    ? ['温度 [K]']
+    : wavelengths.map((wavelength, index) => {
+      return isOpticalWavelength(wavelength)
+        ? 'Reflectance [-] @ ' + wavelength + ' nm'
+        : 'Spectral radiance [W m-2 sr-1 um-1] @ ' + wavelength + ' nm'
+    })
+  const viewAngles = viewAngleOverride || [Number(sensor.vza) || 0, Number(sensor.vaa) || 0]
+  const sunAngles = [Number(light.zenith) || 0, Number(light.azimuth) || 0]
   const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
   const subtract3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
   const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
@@ -314,72 +897,154 @@ function writeRadiosityTiff(jsonPath, inputPath) {
     const length = length3(value)
     return length > 1e-9 ? value.map((component) => component / length) : fallback
   }
-  const projection = String(firstXmlTag(xml, 'projection') || 'parallel').trim().toLowerCase()
+  const cameraBasis = (forward) => {
+    const north = [1, 0, 0]
+    const northProjection = dot3(north, forward)
+    let up = north.map((component, axis) => component - northProjection * forward[axis])
+    if (length3(up) <= 1e-9) {
+      const worldUp = [0, 1, 0]
+      const upProjection = dot3(worldUp, forward)
+      up = worldUp.map((component, axis) => component - upProjection * forward[axis])
+    }
+    up = normalize3(up, [1, 0, 0])
+    const right = normalize3(cross3(forward, up), [0, 0, 1])
+    return { right, up: normalize3(cross3(right, forward), up) }
+  }
+  const projection = String(sensor.projection || 'parallel').trim().toLowerCase()
   const perspective = ['perspective', 'central', 'center'].includes(projection)
-  const sceneWidth = Math.max(1e-6, Number(firstXmlTag(xml, 'sceneSizeX')) || 1)
-  const sceneDepth = Math.max(1e-6, Number(firstXmlTag(xml, 'sceneSizeY')) || 1)
-  const sceneHeight = Math.max(0, Number(firstXmlTag(xml, 'Height')) || 0)
-  const positionValues = String(firstXmlTag(xml, 'sensorPosition') || '').split(/[,\s]+/).map(Number)
-  const sensorWorld = positionValues.length >= 3 && positionValues.slice(0, 3).every(Number.isFinite)
-    ? positionValues.slice(0, 3)
+  const sceneWidth = Math.max(1e-6, Number(scene.x) || 1)
+  const sceneDepth = Math.max(1e-6, Number(scene.y) || 1)
+  const sensorPosition = [Number(sensor.positionX), Number(sensor.positionY), Number(sensor.height)]
+  const sensorWorld = sensorPosition.every(Number.isFinite)
+    ? sensorPosition
     : [sceneWidth / 2, sceneDepth / 2, 3000]
   const cameraPosition = [sensorWorld[0] - sceneWidth / 2, Math.max(0.01, sensorWorld[2]), sensorWorld[1] - sceneDepth / 2]
-  const cameraTarget = [0, sceneHeight / 2, 0]
+  const directionFromAngles = (zenithDegrees, azimuthDegrees) => {
+    const zenith = (Number.isFinite(zenithDegrees) ? zenithDegrees : 0) * Math.PI / 180
+    const azimuth = (Number.isFinite(azimuthDegrees) ? azimuthDegrees : 0) * Math.PI / 180
+    return [Math.sin(zenith) * Math.cos(azimuth), Math.cos(zenith), Math.sin(zenith) * Math.sin(azimuth)]
+  }
   let cameraOut, cameraForward, cameraRight, cameraUp, perspectiveTanHalfFov = 1
   if (perspective) {
-    cameraForward = normalize3(subtract3(cameraTarget, cameraPosition), [0, -1, 0])
-    cameraOut = cameraForward.map((component) => -component)
-    cameraRight = normalize3(cross3(cameraForward, [0, 0, -1]), [1, 0, 0])
-    cameraUp = normalize3(cross3(cameraRight, cameraForward), [0, 0, -1])
-    const distance = Math.max(0.01, length3(subtract3(cameraPosition, cameraTarget)))
-    const radius = Math.max(0.01, Math.hypot(sceneWidth, sceneHeight, sceneDepth) / 2)
-    perspectiveTanHalfFov = radius / Math.min(1, width / height) / distance * 1.02
-  } else {
-    const zenith = (Number.isFinite(viewAngles[0]) ? viewAngles[0] : 0) * Math.PI / 180
-    const azimuth = (Number.isFinite(viewAngles[1]) ? viewAngles[1] : 0) * Math.PI / 180
-    cameraOut = [Math.sin(zenith) * Math.sin(azimuth), Math.cos(zenith), Math.sin(zenith) * Math.cos(azimuth)]
+    cameraOut = directionFromAngles(viewAngles[0], viewAngles[1])
     cameraForward = cameraOut.map((component) => -component)
-    cameraRight = [Math.cos(azimuth), 0, -Math.sin(azimuth)]
-    cameraUp = [-Math.cos(zenith) * Math.sin(azimuth), Math.sin(zenith), -Math.cos(zenith) * Math.cos(azimuth)]
+    ;({ right: cameraRight, up: cameraUp } = cameraBasis(cameraForward))
+    const verticalFov = Math.max(0.1, Math.min(120, Number(sensor.fov) || 60))
+    perspectiveTanHalfFov = Math.tan(verticalFov * 0.5 * Math.PI / 180)
+  } else {
+    // Azimuth is clockwise from +X (north) toward +Z (east).
+    cameraOut = directionFromAngles(viewAngles[0], viewAngles[1])
+    cameraForward = cameraOut.map((component) => -component)
+    ;({ right: cameraRight, up: cameraUp } = cameraBasis(cameraForward))
   }
   const horizontalViewLength = Math.hypot(cameraOut[0], cameraOut[2])
   const namingViewAngles = perspective
     ? [Math.acos(Math.max(-1, Math.min(1, cameraOut[1]))) * 180 / Math.PI,
-      horizontalViewLength < 1e-9 ? 0 : (Math.atan2(cameraOut[0], cameraOut[2]) * 180 / Math.PI + 360) % 360]
+      horizontalViewLength < 1e-9 ? 0 : (Math.atan2(cameraOut[2], cameraOut[0]) * 180 / Math.PI + 360) % 360]
     : viewAngles
+  const atmosphereEnabled = Boolean(atmosphere.enabled)
+  const rawAtmosphereModel = String(atmosphere.model || '')
+  const atmosphereModel = ['tropical', 'midlatitude-summer', 'midlatitude-winter'].includes(rawAtmosphereModel)
+    ? rawAtmosphereModel : 'midlatitude-summer'
+  const atmosphereWaterVapor = Math.max(0.5, Math.min(5, Number(atmosphere.waterVapor) || 2))
+  const rawAtmosphereAerosol = String(atmosphere.aerosol || '')
+  const atmosphereAerosol = ['rural', 'urban'].includes(rawAtmosphereAerosol) ? rawAtmosphereAerosol : 'rural'
+  const atmosphereVisibility = Math.max(10, Math.min(50, Number(atmosphere.visibility) || 23))
+  const configuredAtmospherePath = String(atmosphere.lutFile || '')
+  const atmospherePath = configuredAtmospherePath && configuredAtmospherePath !== 'assets/atmosphere/simple_modtran_lut.csv'
+    ? (isAbsolute(configuredAtmospherePath) ? configuredAtmospherePath : resolve(dirname(inputPath), configuredAtmospherePath))
+    : join(RESOURCE_ROOT, 'assets', 'atmosphere', 'simple_modtran_lut.csv')
+  const atmosphereTable = atmosphereEnabled ? loadAtmosphereLut(atmospherePath) : null
+  const atmosphereAltitude = Math.max(0, Number(sensorWorld[2]) || 0) / 1000
+  const thermalOutputWavelength = wavelengths.find((wavelength) => !isOpticalWavelength(wavelength)) || 10500
+  const skyTemperature = Math.max(120, Number(light.skyTemperature) || 250)
+  const skyOutputValue = (wavelengthNm, skyZenithDegrees, asTemperature) => {
+    const wavelength = wavelengthNm > 0 && wavelengthNm <= 50 ? wavelengthNm * 1000 : wavelengthNm
+    const zenithRadians = Math.max(0, Math.min(89.5, skyZenithDegrees)) * Math.PI / 180
+    const correction = atmosphereTable
+      ? sampleAtmosphereLut(atmosphereTable, atmosphereModel, atmosphereAerosol,
+        atmosphereWaterVapor, atmosphereVisibility, atmosphereAltitude,
+        skyZenithDegrees, wavelength)
+      : { transmittance: 1, pathRadiance: 0 }
+    if (wavelength <= 2500) {
+      const spectralWeight = Math.max(0.06, Math.min(2, Math.pow(550 / Math.max(350, Math.min(2500, wavelength)), 1.8)))
+      const aerosol = Math.max(0.4, Math.min(2.3, 23 / atmosphereVisibility))
+      const cosineZenith = Math.max(0.12, Math.cos(zenithRadians))
+      const airMass = 1 / cosineZenith
+      const empiricalTransmittance = Math.exp(-(0.10 * spectralWeight + 0.025 * aerosol) * airMass)
+      const transmittance = atmosphereTable ? correction.transmittance : empiricalTransmittance
+      const horizonBoost = 1 + 0.55 * (1 - cosineZenith)
+      return Math.max(0.002, Math.min(0.85,
+        (1 - transmittance) * 0.55 * spectralWeight * horizonBoost + 0.008 * aerosol * horizonBoost))
+    }
+    let radiance = atmosphereTable ? correction.pathRadiance : 0
+    if (!(radiance > 0)) {
+      const cosineZenith = Math.max(0.05, Math.cos(zenithRadians))
+      const zenithEmissivity = atmosphereTable && correction.transmittance < 0.999
+        ? Math.max(0.08, Math.min(0.995, 1 - correction.transmittance)) : 0.72
+      // Keep the fallback sky visibly directional: zenith radiance uses the
+      // configured emissivity and increases linearly with 1-cos(theta)
+      // toward the horizon radiance.
+      const atmosphericFraction = Math.max(zenithEmissivity, Math.min(1,
+        1 - (1 - zenithEmissivity) * cosineZenith))
+      radiance = planckRadiance(wavelength, skyTemperature) * atmosphericFraction
+    }
+    return asTemperature ? inversePlanckTemperature(wavelength, radiance) : radiance
+  }
   const point = (offset) => [Number(vertexPositions[offset]), Number(vertexPositions[offset + 1]), Number(vertexPositions[offset + 2])]
-  let minimumX = perspective ? -1 : Infinity, maximumX = perspective ? 1 : -Infinity
-  let minimumY = perspective ? -1 : Infinity, maximumY = perspective ? 1 : -Infinity
   for (let vertex = 0; vertex < facetCount * 3; vertex += 1) {
     const position = point(vertex * 3)
     if (!position.every(Number.isFinite)) throw new Error('第 ' + (Math.floor(vertex / 3) + 1) + ' 个面元包含无效坐标')
-    if (!perspective) {
+  }
+  const imageAspect = width / height
+  let viewMinimumX = perspective ? -1 : Infinity
+  let viewMaximumX = perspective ? 1 : -Infinity
+  let viewMinimumY = perspective ? -1 : Infinity
+  let viewMaximumY = perspective ? 1 : -Infinity
+  if (!perspective) {
+    // Match Geometry::createSensor(): the angled source image is fitted to
+    // the scene ground extent, not to the height-dependent mesh bounds.
+    const groundCorners = [
+      [-sceneWidth / 2, 0, -sceneDepth / 2],
+      [-sceneWidth / 2, 0, sceneDepth / 2],
+      [sceneWidth / 2, 0, -sceneDepth / 2],
+      [sceneWidth / 2, 0, sceneDepth / 2]
+    ]
+    for (const position of groundCorners) {
       const projectedX = dot3(position, cameraRight)
       const projectedY = dot3(position, cameraUp)
-      minimumX = Math.min(minimumX, projectedX); maximumX = Math.max(maximumX, projectedX)
-      minimumY = Math.min(minimumY, projectedY); maximumY = Math.max(maximumY, projectedY)
+      viewMinimumX = Math.min(viewMinimumX, projectedX)
+      viewMaximumX = Math.max(viewMaximumX, projectedX)
+      viewMinimumY = Math.min(viewMinimumY, projectedY)
+      viewMaximumY = Math.max(viewMaximumY, projectedY)
     }
   }
-  let rangeX = Math.max(1e-6, maximumX - minimumX)
-  let rangeY = Math.max(1e-6, maximumY - minimumY)
-  const centerX = (minimumX + maximumX) / 2
-  const centerY = (minimumY + maximumY) / 2
-  const imageAspect = width / height
-  if (rangeX / rangeY > imageAspect) rangeY = rangeX / imageAspect
-  else rangeX = rangeY * imageAspect
-  rangeX *= 1.002; rangeY *= 1.002
-  minimumX = centerX - rangeX / 2; maximumX = centerX + rangeX / 2
-  minimumY = centerY - rangeY / 2; maximumY = centerY + rangeY / 2
+  let viewRangeX = Math.max(1e-6, viewMaximumX - viewMinimumX)
+  let viewRangeY = Math.max(1e-6, viewMaximumY - viewMinimumY)
+  const viewCenterX = (viewMinimumX + viewMaximumX) / 2
+  const viewCenterY = (viewMinimumY + viewMaximumY) / 2
+  if (viewRangeX / viewRangeY > imageAspect) viewRangeY = viewRangeX / imageAspect
+  else viewRangeX = viewRangeY * imageAspect
+  viewRangeX *= 1 + 0.5 / width
+  viewRangeY *= 1 + 0.5 / height
+  viewMinimumX = viewCenterX - viewRangeX / 2
+  viewMaximumY = viewCenterY + viewRangeY / 2
+
+  const orthographicScale = 1.0
+  let orthRangeEast = sceneDepth
+  let orthRangeNorth = sceneWidth
+  if (orthRangeEast / orthRangeNorth > imageAspect) orthRangeNorth = orthRangeEast / imageAspect
+  else orthRangeEast = orthRangeNorth * imageAspect
+  orthRangeEast /= orthographicScale
+  orthRangeNorth /= orthographicScale
+  const orthMinimumZ = -orthRangeEast / 2
+  const orthMaximumX = orthRangeNorth / 2
 
   const pixelCount = width * height
-  const depthBuffer = new Float64Array(pixelCount)
-  depthBuffer.fill(-Infinity)
-  const surfaceIndexImage = new Int32Array(pixelCount)
-  surfaceIndexImage.fill(-1)
-  const screenVertex = (position) => {
+  const viewVertex = (position) => {
     if (!perspective) return {
-      x: (dot3(position, cameraRight) - minimumX) / rangeX * width,
-      y: (maximumY - dot3(position, cameraUp)) / rangeY * height,
+      x: (dot3(position, cameraRight) - viewMinimumX) / viewRangeX * width,
+      y: (viewMaximumY - dot3(position, cameraUp)) / viewRangeY * height,
       depth: dot3(position, cameraOut), valid: true
     }
     const relative = subtract3(position, cameraPosition)
@@ -392,42 +1057,103 @@ function writeRadiosityTiff(jsonPath, inputPath) {
     }
   }
   const edge = (a, b, x, y) => (x - a.x) * (b.y - a.y) - (y - a.y) * (b.x - a.x)
-  let visiblePixels = 0
+  const observedSideIndices = new Int32Array(facetCount)
   for (let facet = 0; facet < facetCount; facet += 1) {
     const a3 = point(facet * 9), b3 = point(facet * 9 + 3), c3 = point(facet * 9 + 6)
     const normal = cross3(subtract3(b3, a3), subtract3(c3, a3))
     const centroid = [(a3[0] + b3[0] + c3[0]) / 3, (a3[1] + b3[1] + c3[1]) / 3, (a3[2] + b3[2] + c3[2]) / 3]
     const sideDirection = perspective ? subtract3(cameraPosition, centroid) : cameraOut
     const localSide = dot3(normal, sideDirection) >= 0 ? 0 : 1
-    const valueIndex = facet * 2 + localSide
-    const a = screenVertex(a3), b = screenVertex(b3), c = screenVertex(c3)
-    if (!a.valid || !b.valid || !c.valid) continue
-    const area = edge(a, b, c.x, c.y)
-    if (Math.abs(area) < 1e-10) continue
-    const minPixelX = Math.max(0, Math.floor(Math.min(a.x, b.x, c.x)))
-    const maxPixelX = Math.min(width - 1, Math.ceil(Math.max(a.x, b.x, c.x)) - 1)
-    const minPixelY = Math.max(0, Math.floor(Math.min(a.y, b.y, c.y)))
-    const maxPixelY = Math.min(height - 1, Math.ceil(Math.max(a.y, b.y, c.y)) - 1)
-    for (let y = minPixelY; y <= maxPixelY; y += 1) {
-      for (let x = minPixelX; x <= maxPixelX; x += 1) {
-        const sampleX = x + .5, sampleY = y + .5
-        const weightA = edge(b, c, sampleX, sampleY) / area
-        const weightB = edge(c, a, sampleX, sampleY) / area
-        const weightC = 1 - weightA - weightB
-        if (weightA < -1e-7 || weightB < -1e-7 || weightC < -1e-7) continue
-        const depth = weightA * a.depth + weightB * b.depth + weightC * c.depth
-        const pixel = y * width + x
-        if (depth <= depthBuffer[pixel]) continue
-        if (!Number.isFinite(depthBuffer[pixel])) visiblePixels += 1
-        depthBuffer[pixel] = depth
-        surfaceIndexImage[pixel] = valueIndex
+    observedSideIndices[facet] = facet * 2 + localSide
+  }
+  const rasterizeSurfaceIndices = (projectVertex) => {
+    const depthBuffer = new Float64Array(pixelCount)
+    depthBuffer.fill(-Infinity)
+    const surfaceIndexImage = new Int32Array(pixelCount)
+    surfaceIndexImage.fill(-1)
+    let visiblePixels = 0
+    for (let facet = 0; facet < facetCount; facet += 1) {
+      const valueIndex = observedSideIndices[facet]
+      const a = projectVertex(point(facet * 9))
+      const b = projectVertex(point(facet * 9 + 3))
+      const c = projectVertex(point(facet * 9 + 6))
+      if (!a.valid || !b.valid || !c.valid) continue
+      const area = edge(a, b, c.x, c.y)
+      if (Math.abs(area) < 1e-10) continue
+      const minPixelX = Math.max(0, Math.floor(Math.min(a.x, b.x, c.x)))
+      const maxPixelX = Math.min(width - 1, Math.ceil(Math.max(a.x, b.x, c.x)) - 1)
+      const minPixelY = Math.max(0, Math.floor(Math.min(a.y, b.y, c.y)))
+      const maxPixelY = Math.min(height - 1, Math.ceil(Math.max(a.y, b.y, c.y)) - 1)
+      for (let y = minPixelY; y <= maxPixelY; y += 1) {
+        for (let x = minPixelX; x <= maxPixelX; x += 1) {
+          const sampleX = x + 0.5, sampleY = y + 0.5
+          const weightA = edge(b, c, sampleX, sampleY) / area
+          const weightB = edge(c, a, sampleX, sampleY) / area
+          const weightC = 1 - weightA - weightB
+          if (weightA < -1e-7 || weightB < -1e-7 || weightC < -1e-7) continue
+          const depth = weightA * a.depth + weightB * b.depth + weightC * c.depth
+          const pixel = y * width + x
+          if (depth <= depthBuffer[pixel]) continue
+          if (!Number.isFinite(depthBuffer[pixel])) visiblePixels += 1
+          depthBuffer[pixel] = depth
+          surfaceIndexImage[pixel] = valueIndex
+        }
+      }
+    }
+    return { surfaceIndexImage, visiblePixels }
+  }
+  // Match VoxelRT: first render the requested oblique observation, then map
+  // each nadir ground pixel back into that source image.  Directly rerendering
+  // visible facets from nadir changes crown displacement and occlusion.
+  const observedImage = rasterizeSurfaceIndices(viewVertex)
+  const orthSurfaceIndexImage = new Int32Array(pixelCount)
+  orthSurfaceIndexImage.fill(-1)
+  let orthVisiblePixels = 0
+  const rasterWidth = Math.max(1, width - 1)
+  const rasterHeight = Math.max(1, height - 1)
+  for (let y = 0; y < height; y += 1) {
+    const worldX = orthMaximumX - y / rasterHeight * orthRangeNorth
+    if (worldX < -sceneWidth / 2 || worldX > sceneWidth / 2) continue
+    for (let x = 0; x < width; x += 1) {
+      const worldZ = orthMinimumZ + x / rasterWidth * orthRangeEast
+      if (worldZ < -sceneDepth / 2 || worldZ > sceneDepth / 2) continue
+      const source = viewVertex([worldX, 0, worldZ])
+      if (!source.valid) continue
+      const sourceX = Math.trunc(source.x)
+      const sourceY = Math.trunc(source.y)
+      if (sourceX < 0 || sourceX >= width || sourceY < 0 || sourceY >= height) continue
+      const side = observedImage.surfaceIndexImage[sourceY * width + sourceX]
+      if (side < 0) continue
+      orthSurfaceIndexImage[y * width + x] = side
+      orthVisiblePixels += 1
+    }
+  }
+  const outputSurfaceIndexImage = perspective
+    ? observedImage.surfaceIndexImage : orthSurfaceIndexImage
+  const skyZenithImage = new Float32Array(pixelCount)
+  skyZenithImage.fill(Number.NaN)
+  if (perspective) {
+    const verticalScale = perspectiveTanHalfFov
+    const horizontalScale = perspectiveTanHalfFov * width / height
+    for (let y = 0; y < height; y += 1) {
+      const screenY = (1 - 2 * (y + 0.5) / height) * verticalScale
+      for (let x = 0; x < width; x += 1) {
+        const screenX = (2 * (x + 0.5) / width - 1) * horizontalScale
+        const ray = normalize3([
+          cameraForward[0] + cameraRight[0] * screenX + cameraUp[0] * screenY,
+          cameraForward[1] + cameraRight[1] * screenX + cameraUp[1] * screenY,
+          cameraForward[2] + cameraRight[2] * screenX + cameraUp[2] * screenY
+        ], cameraForward)
+        if (ray[1] > 0) {
+          skyZenithImage[y * width + x] = Math.acos(Math.max(0, Math.min(1, ray[1]))) * 180 / Math.PI
+        }
       }
     }
   }
 
-  const startNode = Math.max(0, Math.round(Number(firstXmlTag(xml, 'startTimeNode')) || 0))
-  const endNode = Math.max(startNode + 1, Math.round(Number(firstXmlTag(xml, 'endTimeNode')) || startNode + 1))
-  const dTime = Math.max(1, Number(firstXmlTag(xml, 'dTime')) || 1800)
+  const startNode = Math.max(0, Math.round(Number(meteo.start) || 0))
+  const endNode = Math.max(startNode + 1, Math.round(Number(meteo.end) || startNode + 1))
+  const dTime = Math.max(1, Number(meteo.dTime) || 1800)
   const clockToken = (seconds, dayOfYear = null) => {
     let totalMinutes = Math.round(seconds / 60)
     let day = dayOfYear
@@ -439,7 +1165,10 @@ function writeRadiosityTiff(jsonPath, inputPath) {
     const minute = String(totalMinutes % 60).padStart(2, '0')
     return (day == null ? '' : 'DOY' + day + '_') + hour + '-' + minute
   }
-  const meteoFile = firstXmlTag(xml, 'filePath')
+  const configuredMeteo = String(meteo.path || '')
+  const meteoFile = configuredMeteo && configuredMeteo !== 'defined/meteo.txt' && configuredMeteo !== 'HiStream 内置气象数据'
+    ? (isAbsolute(configuredMeteo) ? configuredMeteo : resolve(dirname(inputPath), configuredMeteo))
+    : join(dirname(executable()), 'defined', 'meteo.txt')
   const meteoRows = meteoFile && existsSync(meteoFile)
     ? readFileSync(meteoFile, 'utf8').split(/\r?\n/).slice(1).filter((line) => line.trim())
     : []
@@ -458,60 +1187,145 @@ function writeRadiosityTiff(jsonPath, inputPath) {
   const vza = angleToken(namingViewAngles[0])
   const vaa = angleToken(namingViewAngles[1])
   const staticRadiosity = metrics.find(([id]) => id === 'radiosity')?.[2]
+  const surfaceValueCount = facetCount * 2
+  const staticBandValues = (band) => bandRadiosity.length >= surfaceValueCount * wavelengths.length
+    ? bandRadiosity.slice(band * surfaceValueCount, (band + 1) * surfaceValueCount)
+    : staticRadiosity
   const coupledFacetEb = String(backend || '').includes('RT-EB coupled')
-  const stepValues = (time) => {
-    if (!coupledFacetEb) return staticRadiosity
+  // FacetEB step files can be hundreds of MiB each.  Keep only the active
+  // node: retaining all time nodes grows memory linearly with the simulation.
+  let activeStep = null
+  const stepData = (time) => {
+    if (!coupledFacetEb) return null
+    if (activeStep?.token === time.token) return activeStep.data
+    activeStep = null
     const stepPath = join(dirname(jsonPath), '.facet_steps', 'energy_T=' + time.token + '.bin')
     if (!existsSync(stepPath)) throw new Error('缺少 FacetEB 耦合节点结果：' + basename(stepPath))
     const buffer = readFileSync(stepPath)
-    const recordBytes = 7 * 4
-    if (buffer.length < facetCount * 2 * recordBytes) throw new Error('FacetEB 节点结果不完整：' + basename(stepPath))
-    const values = new Float32Array(facetCount * 2)
-    for (let side = 0; side < values.length; side += 1) values[side] = buffer.readFloatLE(side * recordBytes + 4)
-    return values
+    const surfaceCount = facetCount * 2
+    const recordFloats = buffer.length / (surfaceCount * 4)
+    if (!Number.isInteger(recordFloats) || recordFloats < 9) {
+      throw new Error('FacetEB 节点结果不完整：' + basename(stepPath))
+    }
+    const data = { buffer, recordFloats, recordBytes: recordFloats * 4, path: stepPath }
+    activeStep = { token: time.token, data }
+    return data
+  }
+  const releaseStepData = (time) => {
+    if (activeStep?.token !== time.token) return ''
+    const stepPath = activeStep.data.path
+    activeStep = null
+    return stepPath
+  }
+  const rasterizeStepField = (time, fieldIndex) => {
+    const { buffer, recordFloats, recordBytes, path } = stepData(time)
+    if (fieldIndex >= recordFloats) {
+      throw new Error('FacetEB 节点结果缺少逐波段反射率/辐亮度，请重新运行模拟：' + basename(path))
+    }
+    const image = new Float32Array(pixelCount)
+    image.fill(Number.NaN)
+    const fieldOffset = Math.max(0, Math.min(recordFloats - 1, fieldIndex)) * 4
+    for (let pixel = 0; pixel < pixelCount; pixel += 1) {
+      const side = outputSurfaceIndexImage[pixel]
+      if (side >= 0) image[pixel] = buffer.readFloatLE(side * recordBytes + fieldOffset)
+    }
+    return image
   }
   const rasterizeValues = (values) => {
     const image = new Float32Array(pixelCount)
     image.fill(Number.NaN)
     for (let pixel = 0; pixel < pixelCount; pixel += 1) {
-      const side = surfaceIndexImage[pixel]
+      const side = outputSurfaceIndexImage[pixel]
       if (side >= 0) image[pixel] = Number(values[side])
     }
     return image
   }
 
   const tifPaths = []
-  if (firstXmlTag(xml, 'isImage') !== '0') {
-    for (let node = startNode; node < endNode; node += 1) {
+  if (sensor.image !== false) {
+    const imageNodes = isEnergyBalanceMode(mode)
+      ? Array.from({ length: endNode - startNode }, (_, index) => startNode + index)
+      : [startNode]
+    for (const node of imageNodes) {
       const time = timeForNode(node)
-      const radiosityImage = rasterizeValues(stepValues(time))
-      const imageValues = new Float32Array(pixelCount * wavelengths.length)
-      for (let band = 0; band < wavelengths.length; band += 1) imageValues.set(radiosityImage, band * pixelCount)
-      const tifPath = join(dirname(jsonPath), 'T=' + time.token + '_VZA=' + vza + '_VAA=' + vaa + '.tif')
-      writeFloatTiff(tifPath, width, height, wavelengths.length, imageValues, bandNames)
-      tifPaths.push(tifPath)
+      let completed = false
+      try {
+        const imageValues = new Float32Array(pixelCount * imageBandCount)
+        for (let band = 0; band < imageBandCount; band += 1) {
+          const rasterized = coupledFacetEb
+            ? rasterizeStepField(time, temperatureOutput ? 0 : 9 + band)
+            : rasterizeValues(staticBandValues(band))
+          imageValues.set(rasterized, band * pixelCount)
+          const wavelengthValue = temperatureOutput ? thermalOutputWavelength : wavelengths[band]
+          const wavelengthNm = wavelengthValue > 0 && wavelengthValue <= 50 ? wavelengthValue * 1000 : wavelengthValue
+          const correction = atmosphereTable
+            ? sampleAtmosphereLut(atmosphereTable, atmosphereModel, atmosphereAerosol,
+              atmosphereWaterVapor, atmosphereVisibility,
+              atmosphereAltitude, namingViewAngles[0], wavelengthNm)
+            : null
+          const offset = band * pixelCount
+          for (let pixel = 0; pixel < pixelCount; pixel += 1) {
+            const index = offset + pixel
+            const value = imageValues[index]
+            if (!Number.isFinite(value)) {
+              if (Number.isFinite(skyZenithImage[pixel])) {
+                imageValues[index] = skyOutputValue(
+                  wavelengthNm, skyZenithImage[pixel], temperatureOutput)
+              }
+              continue
+            }
+            if (!correction) continue
+            if (temperatureOutput) {
+              const corrected = planckRadiance(wavelengthNm, value) * correction.transmittance + correction.pathRadiance
+              imageValues[index] = corrected > 0 ? inversePlanckTemperature(wavelengthNm, corrected) : value
+            } else {
+              imageValues[index] = value * correction.transmittance + correction.pathRadiance
+            }
+          }
+        }
+        const tifName = isEnergyBalanceMode(mode)
+          ? outputTiffName(mode, { timeToken: time.token, vza, vaa, atmosphere: atmosphereEnabled })
+          : outputTiffName(mode, { sza: sunAngles[0], saa: sunAngles[1], vza, vaa, atmosphere: atmosphereEnabled })
+        const tifPath = join(dirname(jsonPath), tifName)
+        writeFloatTiff(tifPath, width, height, imageBandCount, imageValues, bandNames)
+        tifPaths.push(tifPath)
+        completed = true
+      } finally {
+        const stepPath = releaseStepData(time)
+        if (completed && removeStepFiles && stepPath && existsSync(stepPath)) {
+          try { unlinkSync(stepPath) } catch { /* TIFF 已生成，临时节点文件可稍后清理。 */ }
+        }
+      }
     }
   }
 
   const processPaths = []
-  if (firstXmlTag(xml, 'isProcess') === '1') {
+  if (includeProcess && processOutputEnabled(project, mode) && isEnergyBalanceMode(mode)) {
     const processDirectory = join(dirname(jsonPath), 'process')
     mkdirSync(processDirectory, { recursive: true })
     if (coupledFacetEb) {
+      const selected = processOutputSelection(project, mode)
+      const processTypes = [selected.radiation && 'radiation', selected.energy && 'energy'].filter(Boolean)
       for (let node = startNode; node < endNode; node += 1) {
-        const metadataPath = join(processDirectory, 'energy_T=' + timeForNode(node).token + '.json')
-        if (existsSync(metadataPath)) processPaths.push(metadataPath)
+        for (const type of processTypes) {
+          const processModel = type === 'radiation' ? 'facetrt' : 'faceteb'
+          const metadataPath = join(processDirectory, processModel + '_T=' + timeForNode(node).token + '.json')
+          const legacyPath = join(processDirectory, type + '_T=' + timeForNode(node).token + '_f.json')
+          if (existsSync(metadataPath)) processPaths.push(metadataPath)
+          else if (existsSync(legacyPath)) processPaths.push(legacyPath)
+        }
       }
     } else {
       const startTime = timeForNode(startNode).token
       const endTime = timeForNode(endNode - 1).token
-      const processDataPath = join(processDirectory, 'facet_energy_T=' + (startTime === endTime ? startTime : startTime + '_to_' + endTime) + '.json')
+      const processDataPath = join(processDirectory, 'faceteb_T=' + (startTime === endTime ? startTime : startTime + '_to_' + endTime) + '.json')
       copyFileSync(jsonPath, processDataPath)
       for (let node = startNode; node < endNode; node += 1) {
         const time = timeForNode(node)
-        const metadataPath = join(processDirectory, 'energy_T=' + time.token + '.meta.json')
+        const metadataPath = join(processDirectory, 'faceteb_T=' + time.token + '.meta.json')
         writeFileSync(metadataPath, JSON.stringify({
           kind: 'facet-energy-process',
+          model: 'faceteb',
           node,
           julianTime: time.julianTime,
           time: time.token,
@@ -524,29 +1338,64 @@ function writeRadiosityTiff(jsonPath, inputPath) {
       }
     }
   }
-  return { tifPath: tifPaths[0] || '', tifPaths, processPaths, width, height, bands: wavelengths.length, bandNames, visiblePixels }
+  return { tifPath: tifPaths[0] || '', tifPaths, processPaths, width, height, bands: imageBandCount, bandNames, visiblePixels: orthVisiblePixels }
+}
+
+function writeRadiosityTiff(jsonPath, inputPath, mode) {
+  if (!inputPath || !existsSync(inputPath)) throw new Error('找不到生成影像所需的 project.json')
+  const project = projectFromSource(readFileSync(inputPath, 'utf8'))
+  const { sensor, light } = project.configuration
+  const perspective = ['perspective', 'central', 'center'].includes(String(sensor.projection || 'parallel').trim().toLowerCase())
+  const configuredAngles = sensorViewAngles(sensor, light.azimuth)
+  const angles = perspective ? [null] : (configuredAngles.length ? configuredAngles : [[0, 0]])
+  const results = angles.map((angle, index) => writeRadiosityTiffForAngle(
+    jsonPath, inputPath, mode, angle, index === 0, index === angles.length - 1))
+  const first = results[0]
+  return {
+    ...first,
+    tifPath: results.flatMap((result) => result.tifPaths)[0] || '',
+    tifPaths: results.flatMap((result) => result.tifPaths),
+    processPaths: [...new Set(results.flatMap((result) => result.processPaths))],
+    visiblePixels: results.reduce((sum, result) => sum + result.visiblePixels, 0),
+    angleCount: results.length
+  }
 }
 
 function projectJsonPath(inputPath) {
-  return join(dirname(inputPath), 'project.json')
+  return basename(inputPath).toLowerCase() === 'project.json' ? inputPath : join(dirname(inputPath), 'project.json')
 }
 
 function runtimePaths(baseDir, project = null) {
-  const sourceRoot = process.env.HISTREAM_ROOT || join(modelRoot, "histream")
+  const sourceRoot = process.env.HISTREAM_ROOT || join(MODEL_ROOT, "histream")
+  const configuredOutput = normalizeHostPath(project?.configuration?.outDir || '')
+  const projectOutputPath = configuredOutput
+    ? (isAbsolute(configuredOutput) ? resolve(configuredOutput) : resolve(baseDir, configuredOutput))
+    : join(baseDir, 'output')
   const configuredMeteoRaw = String(project?.configuration?.meteo?.path || "").trim()
   const configuredMeteo = /\/[A-Za-z]:/.test(configuredMeteoRaw) ? "" : normalizeHostPath(configuredMeteoRaw)
   const projectMeteoPath = configuredMeteo && configuredMeteo !== "defined/meteo.txt" && configuredMeteo !== "HiStream 内置气象数据"
     ? (isAbsolute(configuredMeteo) ? resolve(configuredMeteo) : resolve(baseDir, configuredMeteo))
     : ""
   return {
-    outputDir: join(baseDir, "output"),
-    definedDir: join(sourceRoot, "defined"),
-    meteoPath: projectMeteoPath || join(sourceRoot, "defined", "meteo.txt")
+    outputDir: histreamRuntimePath(projectOutputPath),
+    definedDir: histreamRuntimePath(join(sourceRoot, "defined")),
+    meteoPath: histreamRuntimePath(projectMeteoPath || join(sourceRoot, "defined", "meteo.txt")),
+    atmosphereLutPath: histreamRuntimePath(join(RESOURCE_ROOT, 'assets', 'atmosphere', 'simple_modtran_lut.csv')),
+    projectDir: histreamRuntimePath(baseDir),
+    resolveProjectPath: (value) => {
+      const hostPath = normalizeHostPath(value)
+      if (!hostPath) return ''
+      if (isAbsolute(hostPath)) return histreamRuntimePath(hostPath)
+      const localPath = resolve(baseDir, hostPath)
+      const sharedAssetPath = /^assets[\\/]/i.test(hostPath) ? resolve(RESOURCE_ROOT, hostPath) : ''
+      return histreamRuntimePath(sharedAssetPath && !existsSync(localPath) && existsSync(sharedAssetPath)
+        ? sharedAssetPath : localPath)
+    }
   }
 }
 
 function writeProject(path, value) {
-  const project = normalizeProject(value)
+  const project = normalizeStoredProjectPaths(normalizeProject(value), dirname(path))
   project.updatedAt = new Date().toISOString()
   writeFileSync(path, `${JSON.stringify(project, null, 2)}\n`, 'utf8')
   return project
@@ -577,14 +1426,27 @@ function ensureDefaultSceneAsset(project, baseDir) {
 }
 function migrateProject(inputPath, project) {
   if (!project) return project
+  const originalPaths = JSON.stringify({
+    outDir: project.configuration?.outDir,
+    meteo: project.configuration?.meteo?.path,
+    dem: project.configuration?.scene?.demFile,
+    objects: (project.configuration?.objects?.items || []).map((item) => [item.fileName, item.positionFile]),
+    spectra: (project.configuration?.spectra || []).map((item) => [item.fileName, item.physicalTexture?.fileName])
+  })
   const meteoPath = String(project.configuration?.meteo?.path || "")
   const meteoPathRepaired = /\/[A-Za-z]:/.test(meteoPath)
   const sceneMigrated = ensureDefaultSceneAsset(project, dirname(inputPath))
-  if (!sceneMigrated && !meteoPathRepaired) return project
   if (meteoPathRepaired) project.configuration.meteo.path = "defined/meteo.txt"
-  const saved = writeProject(projectJsonPath(inputPath), project)
-  writeFileSync(inputPath, projectToXml(saved, runtimePaths(dirname(inputPath), saved)), "utf8")
-  return saved
+  normalizeStoredProjectPaths(project, dirname(inputPath))
+  const normalizedPaths = JSON.stringify({
+    outDir: project.configuration?.outDir,
+    meteo: project.configuration?.meteo?.path,
+    dem: project.configuration?.scene?.demFile,
+    objects: (project.configuration?.objects?.items || []).map((item) => [item.fileName, item.positionFile]),
+    spectra: (project.configuration?.spectra || []).map((item) => [item.fileName, item.physicalTexture?.fileName])
+  })
+  if (!sceneMigrated && !meteoPathRepaired && originalPaths === normalizedPaths) return project
+  return writeProject(projectJsonPath(inputPath), project)
 }
 
 function openProject(value) {
@@ -593,11 +1455,11 @@ function openProject(value) {
   const stored = readProject(projectFile)
   const migrated = migrateProject(projectFile, stored.project)
   return {
-    path: projectFile,
-    projectDir,
-    content: migrated ? readFileSync(projectFile, 'utf8') : (stored.content || readFileSync(projectFile, 'utf8')),
+    path: windowsPath(projectFile),
+    projectDir: windowsPath(projectDir),
+    content: stringifyProject(migrated || stored.project),
     project: migrated || stored.project,
-    projectPath: stored.projectPath
+    projectPath: windowsPath(stored.projectPath)
   }
 }
 
@@ -609,7 +1471,7 @@ function chooseProjectFile() {
       "Add-Type -AssemblyName System.Windows.Forms",
       "$dialog = New-Object System.Windows.Forms.OpenFileDialog",
       "$dialog.Title = '打开 StreamSim 工程'",
-      "$dialog.Filter = 'HiStream 工程 (*.json;*.xml)|project.json;Input.xml|project.json|project.json|Input.xml|Input.xml|所有文件 (*.*)|*.*'",
+      "$dialog.Filter = 'StreamSim 工程 (project.json)|project.json|JSON 文件 (*.json)|*.json'",
       "$dialog.FileName = 'project.json'",
       "$dialog.Multiselect = $false",
       "$dialog.CheckFileExists = $true",
@@ -625,7 +1487,7 @@ function chooseProjectFile() {
 }
 
 function createProject(data) {
-  const directory = String(data.directory || '').trim().replace(/^"|"$/g, '')
+  const directory = normalizeHostPath(data.directory).replace(/^"|"$/g, '')
   const name = String(data.name || '').trim()
   if (!directory) throw new Error('请输入工程保存目录')
   if (!isAbsolute(directory)) throw new Error('工程保存目录必须是绝对路径')
@@ -635,7 +1497,7 @@ function createProject(data) {
   const target = join(resolve(directory), name)
   if (existsSync(target) && readdirSync(target).length) throw new Error(`工程目录已存在且不为空：${target}`)
   mkdirSync(target, { recursive: true })
-  for (const folder of ['models', 'positions', 'spectral', 'meteorology', 'output']) mkdirSync(join(target, folder), { recursive: true })
+  for (const folder of ['models', 'positions', 'spectral', 'meteorology', 'terrain', 'output']) mkdirSync(join(target, folder), { recursive: true })
 
   const project = createDefaultProject({
     name,
@@ -648,17 +1510,93 @@ function createProject(data) {
   ensureDefaultSceneAsset(project, target)
   project.configuration.outDir = join(target, 'output')
   const jsonPath = join(target, 'project.json')
-  const inputPath = join(target, 'Input.xml')
   const saved = writeProject(jsonPath, project)
-  const content = projectToXml(saved, runtimePaths(target, saved))
-  writeFileSync(inputPath, content, 'utf8')
-  return { path: inputPath, projectDir: target, projectPath: jsonPath, project: saved, content }
+  const content = stringifyProject(saved)
+  return { path: jsonPath, projectDir: target, projectPath: jsonPath, project: saved, content }
+}
+
+function saveProjectAs(data) {
+  const directory = normalizeHostPath(data.directory).replace(/^"|"$/g, '')
+  const name = String(data.name || '').trim()
+  if (!directory) throw new Error('请输入工程保存目录')
+  if (!isAbsolute(directory)) throw new Error('工程保存目录必须是绝对路径')
+  if (!name || name === '.' || name === '..' || /[<>:"/\\|?*\x00-\x1f]/.test(name)) throw new Error('工程名称包含无效字符')
+
+  const sourceFile = resolveProjectFile(data.sourcePath || projectFile)
+  const sourceDirectory = dirname(sourceFile)
+  const target = join(resolve(directory), name)
+  const targetWithinSource = relative(sourceDirectory, target)
+  if (!targetWithinSource || (!targetWithinSource.startsWith('..\\') && !targetWithinSource.startsWith('../') && !isAbsolute(targetWithinSource))) {
+    throw new Error('新工程不能保存在当前工程目录内部')
+  }
+  if (existsSync(target)) {
+    if (!statSync(target).isDirectory()) throw new Error(`目标路径不是目录：${target}`)
+    if (readdirSync(target).length) throw new Error(`工程目录已存在且不为空：${target}`)
+  }
+
+  const validation = validateProject(data.project)
+  if (!validation.valid) throw new Error(validation.errors.join('；'))
+  const project = normalizeStoredProjectPaths(JSON.parse(JSON.stringify(validation.project)), sourceDirectory)
+  const now = new Date().toISOString()
+  project.name = name
+  project.createdAt = now
+  project.updatedAt = now
+  project.configuration.outDir = 'output'
+
+  mkdirSync(target, { recursive: true })
+  for (const folder of ['models', 'positions', 'spectral', 'meteorology', 'terrain']) {
+    const source = join(sourceDirectory, folder)
+    const destination = join(target, folder)
+    if (existsSync(source) && statSync(source).isDirectory()) cpSync(source, destination, { recursive: true, errorOnExist: true })
+    else mkdirSync(destination, { recursive: true })
+  }
+  mkdirSync(join(target, 'output'), { recursive: true })
+
+  const jsonPath = join(target, 'project.json')
+  const saved = writeProject(jsonPath, project)
+  const content = stringifyProject(saved)
+  return { path: jsonPath, projectDir: target, projectPath: jsonPath, project: saved, content }
 }
 
 function resolveAsset(value) {
   const source = normalizeHostPath(value).replace(/^"|"$/g, '')
   if (!source) throw new Error('资源路径为空')
   return isAbsolute(source) ? resolve(source) : resolve(projectDir, source)
+}
+
+function csvCell(value) {
+  return `"${String(value ?? '').replaceAll('"', '""')}"`
+}
+
+function appendRasterStatistics(path, width, height, bands, values, bandNames = []) {
+  const name = basename(path)
+  const isTimeSeries = name.startsWith('T=')
+  const mode = name.includes('_f.') ? (isTimeSeries ? 'FacetEB' : 'FacetRT')
+    : name.includes('_v.') ? (isTimeSeries ? 'VoxelEB' : 'VoxelRT') : 'Raytracing'
+  const statisticsPath = join(dirname(path), `result_statistics_${mode.toLowerCase()}.csv`)
+  const pixelCount = width * height
+  const rows = []
+  for (let band = 0; band < bands; band += 1) {
+    let count = 0, mean = 0, moment = 0, minimum = Infinity, maximum = -Infinity
+    const offset = band * pixelCount
+    for (let pixel = 0; pixel < pixelCount; pixel += 1) {
+      const value = Number(values[offset + pixel])
+      if (!Number.isFinite(value)) continue
+      count += 1
+      const delta = value - mean
+      mean += delta / count
+      moment += delta * (value - mean)
+      minimum = Math.min(minimum, value); maximum = Math.max(maximum, value)
+    }
+    rows.push([
+      csvCell(name), mode, csvCell(filenameToken(name, 'T')), filenameToken(name, 'VZA'), filenameToken(name, 'VAA'),
+      band, csvCell(bandNames[band] || `Band ${band + 1}`), count,
+      count ? minimum : '', count ? maximum : '', count ? mean : '', count ? Math.sqrt(moment / count) : ''
+    ].join(','))
+  }
+  if (!existsSync(statisticsPath)) appendFileSync(statisticsPath, 'file,mode,time,vza,vaa,band_index,band_name,count,min,max,mean,stddev\n', 'utf8')
+  appendFileSync(statisticsPath, rows.join('\n') + '\n', 'utf8')
+  return statisticsPath
 }
 
 function writeFloatTiff(path, width, height, bands, values, bandNames = []) {
@@ -720,10 +1658,27 @@ function writeFloatTiff(path, width, height, bands, values, bandNames = []) {
   header.writeUInt32LE(0, entry)
   for (const part of extraData) part.buffer.copy(header, part.offset)
   writeFileSync(path, Buffer.concat([header, image]))
+  appendRasterStatistics(path, width, height, bands, values, bandNames)
   return path
 }
 
-function convertEnviToTiff(headerPath) {
+function filenameToken(stem, key) {
+  const source = String(stem || '')
+  const marker = String(key || '').toUpperCase() + '='
+  const upper = source.toUpperCase()
+  const start = upper.indexOf(marker)
+  if (start < 0) return ''
+  const value = source.slice(start + marker.length)
+  const boundaries = ['_H=', '_T=', '_TIME=', '_SZA=', '_SAA=', '_VZA=', '_VAA=', '_F', '_V', '_A']
+  let end = value.length
+  for (const boundary of boundaries) {
+    const index = value.toUpperCase().indexOf(boundary)
+    if (index >= 0) end = Math.min(end, index)
+  }
+  return value.slice(0, end)
+}
+
+function convertEnviToTiff(headerPath, mode) {
   const metadata = enviMetadata(readFileSync(headerPath, 'utf8'))
   const width = Number(metadata.samples), height = Number(metadata.lines), bands = Number(metadata.bands)
   const type = Number(metadata['data type'] || 4)
@@ -736,37 +1691,109 @@ function convertEnviToTiff(headerPath) {
   for (let index = 0; index < values.length; index += 1) values[index] = source.readFloatLE(index * 4)
   const names = String(metadata['band names'] || '').replace(/[{}]/g, '').split(',').map((value) => value.trim()).filter(Boolean)
   const stem = basename(headerPath, extname(headerPath))
-  const julianTime = Number(stem.match(/(?:^|_)t=(-?\d+(?:\.\d+)?)/i)?.[1])
-  const vza = stem.match(/(?:^|_)VZA=(-?\d+(?:\.\d+)?)/i)?.[1]
-  const vaa = stem.match(/(?:^|_)VAA=(-?\d+(?:\.\d+)?)/i)?.[1]
+  const julianTime = Number(filenameToken(stem, 'T'))
+  const vza = filenameToken(stem, 'VZA')
+  const vaa = filenameToken(stem, 'VAA')
+  const sza = filenameToken(stem, 'SZA')
+  const saa = filenameToken(stem, 'SAA')
   let standardName = ''
-  if (Number.isFinite(julianTime) && vza != null && vaa != null) {
-    let day = Math.floor(julianTime)
-    let minutes = Math.round((julianTime - day) * 1440)
-    if (minutes >= 1440) { day += Math.floor(minutes / 1440); minutes %= 1440 }
-    const hour = String(Math.floor(minutes / 60)).padStart(2, '0')
-    const minute = String(minutes % 60).padStart(2, '0')
-    const angle = (value) => Number(value).toFixed(2)
-    standardName = 'T=DOY' + day + '_' + hour + '-' + minute +
-      '_VZA=' + angle(vza) + '_VAA=' + angle(vaa) + '.tif'
+  if (isEnergyBalanceMode(mode) && Number.isFinite(julianTime) && vza !== '' && vaa !== '') {
+    standardName = outputTiffName(mode, { julianTime, vza, vaa })
+  } else if (!isEnergyBalanceMode(mode) && sza !== '' && saa !== '' && vza !== '' && vaa !== '') {
+    standardName = outputTiffName(mode, { sza, saa, vza, vaa })
   }
-  const tiffPath = standardName ? join(dirname(headerPath), standardName) : headerPath.slice(0, -extname(headerPath).length) + '.tif'
+  if (!standardName) {
+    const suffix = outputGeometrySuffix(mode)
+    standardName = stem.endsWith(suffix) ? stem + '.tif' : stem + suffix + '.tif'
+  }
+  const tiffPath = join(dirname(headerPath), standardName)
   writeFloatTiff(tiffPath, width, height, bands, values, names)
+  if (mode === "eVoxelRT" || mode === "eVoxelEB" || mode === "eRaytracing") {
+    unlinkSync(imagePath)
+    unlinkSync(headerPath)
+  }
   return tiffPath
 }
 
-function convertEnviResults(directory) {
+function convertEnviResults(directory, mode) {
   if (!existsSync(directory) || !statSync(directory).isDirectory()) return []
-  return readdirSync(directory, { withFileTypes: true }).filter((entry) => entry.isFile() && extname(entry.name).toLowerCase() === '.hdr').map((entry) => convertEnviToTiff(join(directory, entry.name))).filter(Boolean)
+  const energyBalance = isEnergyBalanceMode(mode)
+  return readdirSync(directory, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && extname(entry.name).toLowerCase() === '.hdr')
+    .filter((entry) => {
+      const stem = basename(entry.name, extname(entry.name))
+      const hasTime = filenameToken(stem, 'T') !== ''
+      return energyBalance ? hasTime : !hasTime
+    })
+    .map((entry) => convertEnviToTiff(join(directory, entry.name), mode))
+    .filter(Boolean)
 }
 
 function tiffObservation(name) {
   const stem = basename(name, extname(name))
-  const time = stem.match(/(?:^|_)T=(.+?)(?=_VZA=|$)/i)?.[1] || stem.match(/(?:^|_)TIME=(.+?)(?=_VZA=|$)/i)?.[1] || ''
-  const vza = stem.match(/(?:^|_)VZA=(-?\d+(?:\.\d+)?)/i)?.[1] || ''
-  const vaa = stem.match(/(?:^|_)VAA=(-?\d+(?:\.\d+)?)/i)?.[1] || ''
-  const parts = [time && 'T=' + time, vza && 'VZA=' + vza + '°', vaa && 'VAA=' + vaa + '°'].filter(Boolean)
-  return { simulationTime: time, viewZenith: vza, viewAzimuth: vaa, observationLabel: parts.join(' · ') }
+  const outputHeight = filenameToken(stem, 'H')
+  const time = filenameToken(stem, 'T') || filenameToken(stem, 'TIME')
+  const sza = filenameToken(stem, 'SZA')
+  const saa = filenameToken(stem, 'SAA')
+  const vza = filenameToken(stem, 'VZA')
+  const vaa = filenameToken(stem, 'VAA')
+  const parts = [
+    outputHeight && 'H=' + outputHeight,
+    time && 'T=' + time,
+    sza && 'SZA=' + sza + '°',
+    saa && 'SAA=' + saa + '°',
+    vza && 'VZA=' + vza + '°',
+    vaa && 'VAA=' + vaa + '°'
+  ].filter(Boolean)
+  return {
+    outputHeight,
+    simulationTime: time,
+    solarZenith: sza,
+    solarAzimuth: saa,
+    viewZenith: vza,
+    viewAzimuth: vaa,
+    observationLabel: parts.join(' · ')
+  }
+}
+
+function deleteTiffResults(value) {
+  const directory = resolveAsset(value)
+  if (!existsSync(directory) || !statSync(directory).isDirectory()) throw new Error(`找不到模拟结果目录：` + directory)
+  if (dirname(directory) === directory) throw new Error(`不能删除磁盘根目录中的结果`)
+  const processDirectory = join(directory, `process`)
+  const directories = [directory, ...(existsSync(processDirectory) && statSync(processDirectory).isDirectory() ? [processDirectory] : [])]
+  const paths = directories.flatMap((currentDirectory) => readdirSync(currentDirectory, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && ([`.tif`, `.tiff`].includes(extname(entry.name).toLowerCase()) || /^result_statistics(?:_[a-z0-9-]+)?\.csv$/i.test(entry.name)))
+    .map((entry) => join(currentDirectory, entry.name)))
+  for (const path of paths) unlinkSync(path)
+  return { directory: windowsPath(directory), deleted: paths.length }
+}
+
+function isThreeDimensionalResultFile(path) {
+  if (extname(path).toLowerCase() !== ".json") return false
+  if (isRadiosityResultFile(path)) return true
+  return processResultMetadata(path) != null
+}
+
+function deleteThreeDimensionalResults(value) {
+  const directory = resolveAsset(value)
+  if (!existsSync(directory) || !statSync(directory).isDirectory()) throw new Error("找不到模拟结果目录：" + directory)
+  if (dirname(directory) === directory) throw new Error("不能删除磁盘根目录中的结果")
+  const processDirectory = join(directory, "process")
+  const directories = [directory, ...(existsSync(processDirectory) && statSync(processDirectory).isDirectory() ? [processDirectory] : [])]
+  const metadataPaths = directories.flatMap((currentDirectory) => readdirSync(currentDirectory, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && extname(entry.name).toLowerCase() === ".json")
+    .map((entry) => join(currentDirectory, entry.name)))
+    .filter(isThreeDimensionalResultFile)
+  const paths = [...metadataPaths]
+  for (const metadataPath of metadataPaths) {
+    const metadata = processResultMetadata(metadataPath)
+    if (!metadata?.dataFile) continue
+    const dataPath = resolve(dirname(metadataPath), String(metadata.dataFile))
+    if (dirname(dataPath) === dirname(metadataPath) && existsSync(dataPath) && statSync(dataPath).isFile()) paths.push(dataPath)
+  }
+  for (const path of paths) unlinkSync(path)
+  return { directory: windowsPath(directory), deleted: paths.length }
 }
 
 function listResults(value) {
@@ -776,33 +1803,61 @@ function listResults(value) {
   const directories = [directory, ...(existsSync(processDirectory) && statSync(processDirectory).isDirectory() ? [processDirectory] : [])]
   const files = directories.flatMap((currentDirectory) => readdirSync(currentDirectory, { withFileTypes: true })
     .filter((entry) => entry.isFile())
-    .filter((entry) => ['.tif', '.tiff', '.json'].includes(extname(entry.name).toLowerCase()))
+    .filter((entry) => ['.tif', '.tiff', '.json', '.csv'].includes(extname(entry.name).toLowerCase()))
     .map((entry) => {
       const path = join(currentDirectory, entry.name)
       const info = statSync(path)
       const extension = extname(entry.name).toLowerCase()
-      let kind = ['.tif', '.tiff'].includes(extension) ? 'tiff' : extension === '.json' && isRadiosityResultFile(path) ? 'facet' : 'file'
+      let kind = ['.tif', '.tiff'].includes(extension) ? 'tiff' : extension === '.csv' ? 'text' : extension === '.json' && isRadiosityResultFile(path) ? 'facet' : 'file'
       let process = {}
-      if (extension === '.json' && /^energy_T=.*(?:\.meta)?\.json$/i.test(entry.name) && info.size < 1024 * 1024) {
-        try {
-          process = JSON.parse(readFileSync(path, 'utf8'))
-          if (String(process.kind || '').includes('energy-process')) kind = 'process'
-        } catch {}
+      if (extension === '.json') {
+        process = processResultMetadata(path) || {}
+        if (process.kind) kind = 'process'
       }
       const observation = kind === 'tiff' ? tiffObservation(entry.name) : {}
-      const displayName = kind === 'facet' ? '面元三维' : kind === 'process' ? '能量过程 · ' + String(process.time || entry.name) : entry.name
-      return { name: displayName, path, size: info.size, modifiedAt: info.mtime.toISOString(), kind, ...observation, processTime: process.time, node: process.node }
+      const resultType = kind === 'tiff' && /^fluid_wind_/i.test(entry.name) ? 'wind' : ''
+      const inferredProcessModel = process.processType === 'fluid'
+        ? 'voxelfluid'
+        : process.processType === 'radiation'
+          ? (process.geometry === 'voxel' ? 'voxelrt' : 'facetrt')
+          : (process.geometry === 'voxel' ? 'voxeleb' : 'faceteb')
+      // 兼容旧结果：旧流体过程曾错误写作 voxeleb，列表中仍按流体过程命名。
+      const processModel = String(process.processType === 'fluid'
+        ? inferredProcessModel : (process.model || inferredProcessModel)).toLowerCase()
+      const processModelLabels = {
+        facetrt: '面元辐射传输', voxelrt: '体元辐射传输',
+        faceteb: '面元能量平衡', voxeleb: '体元能量平衡',
+        voxelfluid: '体元流体力学'
+      }
+      const facetModelLabel = basename(path).toLowerCase().includes('faceteb')
+        ? '面元能量平衡' : '面元辐射传输'
+      const displayName = kind === 'text' && /^result_statistics(?:_[a-z0-9-]+)?\.csv$/i.test(entry.name)
+        ? '统计结果 · ' + entry.name
+        : kind === 'facet'
+        ? facetModelLabel + ' · ' + (facetModelLabel.includes('能量平衡') ? '最终时刻' : '静态')
+        : kind === 'process'
+          ? (processModelLabels[processModel] || processModel) + ' · ' + String(process.time || '静态')
+          : entry.name
+      return { name: displayName, path, size: info.size, modifiedAt: info.mtime.toISOString(), kind, resultType, ...observation, processTime: process.time, processType: process.processType, processModel, node: process.node }
     }))
     .filter((entry) => entry.kind !== 'file')
     .sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt))
-  const latestFacet = files.find((entry) => entry.kind === 'facet')
+  const hasFacetTimeSeries = files.some((entry) =>
+    entry.kind === 'process' && ['facetrt', 'faceteb'].includes(entry.processModel) && entry.processTime)
+  // faceteb.json is the shared full-resolution geometry and final-state
+  // backing store for all per-time FacetRT/FacetEB process files. When the
+  // time series exists, listing it as another "final time" is redundant.
+  const latestFacet = files.find((entry) => entry.kind === 'facet' && !(
+    hasFacetTimeSeries && basename(entry.path).toLowerCase() === 'faceteb.json'))
   return {
-    directory,
+    directory: windowsPath(directory),
     files: [
       ...files.filter((entry) => entry.kind === 'tiff'),
+      ...files.filter((entry) => entry.kind === 'text'),
       ...files.filter((entry) => entry.kind === 'process'),
       ...(latestFacet ? [latestFacet] : [])
     ].sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt))
+      .map((entry) => ({ ...entry, path: windowsPath(entry.path) }))
   }
 }
 
@@ -866,7 +1921,68 @@ function unpackTiffLzw(source) {
   return Buffer.from(output)
 }
 
-function readTiff(path, requestedBand = 0) {
+function twoPercentStretch(samples, count, fallbackMinimum, fallbackMaximum) {
+  if (count < 1) return { minimum: fallbackMinimum, maximum: fallbackMaximum }
+  const sorted = samples.subarray(0, count)
+  sorted.sort()
+  const percentile = (fraction) => {
+    const position = (count - 1) * fraction
+    const lower = Math.floor(position)
+    const upper = Math.ceil(position)
+    if (lower === upper) return sorted[lower]
+    const weight = position - lower
+    return sorted[lower] * (1 - weight) + sorted[upper] * weight
+  }
+  const minimum = percentile(.02)
+  const maximum = percentile(.98)
+  return Number.isFinite(minimum) && Number.isFinite(maximum) && maximum > minimum
+    ? { minimum, maximum }
+    : { minimum: fallbackMinimum, maximum: fallbackMaximum }
+}
+
+function thermalSurfaceStretch(samples, count, zeroCount, totalCount, fallbackMinimum, fallbackMaximum) {
+  const ordinary = twoPercentStretch(samples, count, fallbackMinimum, fallbackMaximum)
+  if (count < 64 || zeroCount / Math.max(1, totalCount) < .01) return { ...ordinary, mode: 'percentile' }
+
+  // A finite-scene horizon commonly contains three populations: invalid zero,
+  // surface temperature and a narrow, warmer sky-temperature plateau. Locate
+  // the strong surface/sky gap so surface structure is not compressed into a
+  // few grey levels. The raw range and high-temperature overlay stay intact.
+  const sorted = samples.subarray(0, count)
+  sorted.sort()
+  const first = Math.floor(count * .30)
+  const last = Math.min(count - 2, Math.floor(count * .92))
+  let split = -1
+  let largestGap = 0
+  for (let index = first; index <= last; index += 1) {
+    const gap = sorted[index + 1] - sorted[index]
+    if (gap > largestGap) { largestGap = gap; split = index }
+  }
+  const centralRange = sorted[Math.floor((count - 1) * .90)] - sorted[Math.floor((count - 1) * .10)]
+  if (split < 0 || largestGap < Math.max(2, centralRange * .12)) {
+    return { ...ordinary, mode: 'percentile' }
+  }
+  const surfaceCount = split + 1
+  const upperCount = count - surfaceCount
+  const detail = twoPercentStretch(sorted, surfaceCount, sorted[0], sorted[split])
+  const upper98 = sorted[surfaceCount + Math.floor(Math.max(0, upperCount - 1) * .98)]
+  return {
+    ...detail,
+    mode: 'thermal-surface',
+    excludedMinimum: sorted[surfaceCount],
+    excludedCeiling: upper98
+  }
+}
+
+function stretchedByte(value, minimum, maximum, inverted = false) {
+  if (!Number.isFinite(value)) return 0
+  const range = maximum - minimum
+  const normalized = range > 0 ? (value - minimum) / range : .5
+  const displayed = inverted ? 1 - normalized : normalized
+  return Math.max(0, Math.min(255, Math.round(displayed * 255)))
+}
+
+function readTiff(path, requestedBand = 0, includeValues = false) {
   const data = readFileSync(path)
   if (data.length < 8) throw new Error('TIFF 文件头不完整')
   const littleEndian = data.toString('ascii', 0, 2) === 'II'
@@ -920,6 +2036,21 @@ function readTiff(path, requestedBand = 0) {
   const sampleFormats = tagValue(339, [1]).map(Number)
   const orientation = Number(tagValue(274, [1])[0])
   const predictor = Number(tagValue(317, [1])[0])
+  const noDataText = String(tagValue(42113, '') || '').trim()
+  const noData = noDataText && Number.isFinite(Number(noDataText)) ? Number(noDataText) : null
+  const pixelScale = tagValue(33550, []).map(Number)
+  const tiePoint = tagValue(33922, []).map(Number)
+  const geoKeys = tagValue(34735, []).map(Number)
+  const geoAscii = String(tagValue(34737, '') || '').replace(/\|+$/, '').trim()
+  const geoKey = (key) => {
+    for (let index = 4; index + 3 < geoKeys.length; index += 4) {
+      if (geoKeys[index] === key && geoKeys[index + 1] === 0) return geoKeys[index + 3]
+    }
+    return null
+  }
+  const modelType = geoKey(1024)
+  const projectedCode = geoKey(3072)
+  const linearUnit = geoKey(3076)
   if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1) throw new Error('TIFF 缺少有效的宽度或高度')
   if (![1, 2].includes(planar)) throw new Error(`暂不支持 TIFF planar configuration ${planar}`)
   if (![1, 5, 8, 32773, 32946].includes(compression)) throw new Error(`暂不支持 TIFF compression ${compression}`)
@@ -1002,30 +2133,317 @@ function readTiff(path, requestedBand = 0) {
     return [x, y]
   }
   const band = Math.max(0, Math.min(samples - 1, Number(requestedBand) || 0))
-  let minimum = Infinity, maximum = -Infinity
+  const description = typeof tagValue(270, '') === 'string' ? tagValue(270, '') : ''
+  const describedBands = description.match(/(?:band names|image bands|metrics)\s*[:=]\s*\{?([^}\r\n]+)\}?/i)?.[1]
+  const bandNames = describedBands ? describedBands.split(',').map((value) => value.trim()).filter(Boolean) : samples === 3 && photometric === 2 ? ['红色', '绿色', '蓝色'] : Array.from({ length: samples }, (_, index) => `波段 ${index + 1}`)
+  const activeBandName = String(bandNames[band] || '')
+  const wavelengthNanometres = Number(activeBandName.match(/@\s*([0-9.]+)\s*nm/i)?.[1])
+  const thermalBand = /temperature|热红外|thermal/i.test(activeBandName) || (Number.isFinite(wavelengthNanometres) && wavelengthNanometres >= 3000)
+  let minimum = Infinity, maximum = -Infinity, elevationSum = 0, elevationCount = 0
+  const values = includeValues ? new Float64Array(outputWidth * outputHeight) : null
   const valueAt = (x, y) => {
     const [sourceX, sourceY] = sourceCoordinates(x, y)
-    return sourceValueAt(sourceX, sourceY, band)
+    const value = sourceValueAt(sourceX, sourceY, band)
+    return noData != null && value === noData ? Number.NaN : value
   }
   for (let y = 0; y < outputHeight; y += 1) for (let x = 0; x < outputWidth; x += 1) {
     const value = valueAt(x, y)
-    if (Number.isFinite(value)) { minimum = Math.min(minimum, value); maximum = Math.max(maximum, value) }
+    if (values) values[y * outputWidth + x] = value
+    if (Number.isFinite(value)) {
+      minimum = Math.min(minimum, value); maximum = Math.max(maximum, value)
+      elevationSum += value; elevationCount += 1
+    }
   }
   if (!Number.isFinite(minimum)) { minimum = 0; maximum = 0 }
   const scale = Math.min(1, 768 / Math.max(outputWidth, outputHeight))
   const previewWidth = Math.max(1, Math.round(outputWidth * scale))
   const previewHeight = Math.max(1, Math.round(outputHeight * scale))
   const pixels = Buffer.alloc(previewWidth * previewHeight)
-  const range = maximum - minimum
+  const previewValues = new Float64Array(previewWidth * previewHeight)
+  const finiteSamples = new Float64Array(previewWidth * previewHeight)
+  let finiteSampleCount = 0
+  let zeroSampleCount = 0
   for (let y = 0; y < previewHeight; y += 1) for (let x = 0; x < previewWidth; x += 1) {
     const value = valueAt(Math.min(outputWidth - 1, Math.floor(x / scale)), Math.min(outputHeight - 1, Math.floor(y / scale)))
-    const normalized = Number.isFinite(value) ? (range ? (value - minimum) / range : .5) : 0
-    pixels[y * previewWidth + x] = Math.max(0, Math.min(255, Math.round((photometric === 0 ? 1 - normalized : normalized) * 255)))
+    const index = y * previewWidth + x
+    previewValues[index] = value
+    if (Number.isFinite(value)) {
+      if (thermalBand && value <= 0) zeroSampleCount += 1
+      else finiteSamples[finiteSampleCount++] = value
+    }
   }
-  const description = typeof tagValue(270, '') === 'string' ? tagValue(270, '') : ''
-  const describedBands = description.match(/(?:band names|image bands|metrics)\s*[:=]\s*\{?([^}\r\n]+)\}?/i)?.[1]
-  const bandNames = describedBands ? describedBands.split(',').map((value) => value.trim()).filter(Boolean) : samples === 3 && photometric === 2 ? ['红色', '绿色', '蓝色'] : Array.from({ length: samples }, (_, index) => `波段 ${index + 1}`)
-  return { kind: 'tiff', path, width: outputWidth, height: outputHeight, bands: samples, band, bandNames, previewWidth, previewHeight, minimum, maximum, pixels: pixels.toString('base64') }
+  const stretch = thermalBand
+    ? thermalSurfaceStretch(finiteSamples, finiteSampleCount, zeroSampleCount,
+      previewWidth * previewHeight, minimum, maximum)
+    : twoPercentStretch(finiteSamples, finiteSampleCount, minimum, maximum)
+  for (let index = 0; index < pixels.length; index += 1) {
+    pixels[index] = stretchedByte(previewValues[index], stretch.minimum, stretch.maximum, photometric === 0)
+  }
+  let hotspotPixels = null
+  let hotspotCount = 0
+  let hotspotThreshold = null
+  if (thermalBand && maximum > stretch.maximum) {
+    const stretchRange = Math.max(0, stretch.maximum - stretch.minimum)
+    const ordinaryThreshold = stretch.maximum + Math.max(stretchRange * 2, Math.abs(stretch.maximum) * .05, 1e-9)
+    const excludedThreshold = Number.isFinite(stretch.excludedCeiling)
+      ? stretch.excludedCeiling + Math.max(Math.abs(stretch.excludedCeiling) * .05, 2) : -Infinity
+    hotspotThreshold = Math.max(ordinaryThreshold, excludedThreshold)
+    if (maximum > hotspotThreshold) {
+      hotspotPixels = Buffer.alloc(previewWidth * previewHeight)
+      const hotspotRange = maximum - hotspotThreshold
+      for (let index = 0; index < hotspotPixels.length; index += 1) {
+        const value = previewValues[index]
+        if (!Number.isFinite(value) || value <= hotspotThreshold) continue
+        const normalized = Math.sqrt(Math.max(0, Math.min(1, (value - hotspotThreshold) / hotspotRange)))
+        hotspotPixels[index] = Math.max(48, Math.round(normalized * 255))
+        hotspotCount += 1
+      }
+    }
+  }
+  const bits = Number(bitsPerSample[0] || 8)
+  const sampleFormat = Number(sampleFormats[0] || 1)
+  const dataType = `${sampleFormat === 3 ? 'Float' : sampleFormat === 2 ? 'Int' : 'UInt'}${bits}`
+  const coordinateType = modelType === 1 ? '投影坐标' : modelType === 2 ? '经纬度坐标' : '未声明坐标系'
+  const crs = projectedCode && projectedCode !== 32767 ? `EPSG:${projectedCode}` : geoAscii || coordinateType
+  const unit = linearUnit === 9001 ? 'm' : modelType === 2 ? '°' : ''
+  const terrainScale = Math.min(1, 96 / Math.max(outputWidth, outputHeight))
+  const terrainWidth = Math.max(2, Math.round(outputWidth * terrainScale))
+  const terrainHeight = Math.max(2, Math.round(outputHeight * terrainScale))
+  const terrainValues = []
+  for (let y = 0; y < terrainHeight; y += 1) for (let x = 0; x < terrainWidth; x += 1) {
+    const sourceX = Math.min(outputWidth - 1, Math.round(x * (outputWidth - 1) / Math.max(1, terrainWidth - 1)))
+    const sourceY = Math.min(outputHeight - 1, Math.round(y * (outputHeight - 1) / Math.max(1, terrainHeight - 1)))
+    const value = valueAt(sourceX, sourceY)
+    terrainValues.push(Number.isFinite(value) ? value : null)
+  }
+  return {
+    kind: 'tiff', path: windowsPath(path), width: outputWidth, height: outputHeight,
+    bands: samples, band, bandNames, previewWidth, previewHeight, minimum, maximum,
+    stretchMinimum: stretch.minimum, stretchMaximum: stretch.maximum, stretchPercent: 2,
+    stretchMode: stretch.mode || 'percentile',
+    stretchExcludedMinimum: Number.isFinite(stretch.excludedMinimum) ? stretch.excludedMinimum : null,
+    pixels: pixels.toString('base64'), noData, dataType, coordinateType, crs, unit,
+    thermalBand, wavelengthNanometres: Number.isFinite(wavelengthNanometres) ? wavelengthNanometres : null,
+    hotspotThreshold, hotspotCount,
+    hotspotPixels: hotspotPixels && hotspotCount ? hotspotPixels.toString('base64') : null,
+    pixelSizeX: Number.isFinite(pixelScale[0]) ? pixelScale[0] : null,
+    pixelSizeY: Number.isFinite(pixelScale[1]) ? pixelScale[1] : null,
+    originX: tiePoint.length >= 6 ? tiePoint[3] : null,
+    originY: tiePoint.length >= 6 ? tiePoint[4] : null,
+    georeferenced: pixelScale.length >= 2 && tiePoint.length >= 6,
+    mean: elevationCount ? elevationSum / elevationCount : 0,
+    terrainWidth, terrainHeight, terrainValues,
+    ...(values ? { values } : {})
+  }
+}
+
+function readWindTiff(path) {
+  const speed = readTiff(path, 0, true)
+  if (speed.bands < 4) throw new Error('风速 TIFF 必须包含速度、X、垂直和 Y 四个波段')
+  const componentX = readTiff(path, 1, true)
+  const componentY = readTiff(path, 3, true)
+  const targetArrowsAcross = 28
+  const step = Math.max(1, Math.ceil(Math.max(speed.width, speed.height) / targetArrowsAcross))
+  const firstX = Math.min(speed.width - 1, Math.floor(step / 2))
+  const firstY = Math.min(speed.height - 1, Math.floor(step / 2))
+  const arrows = []
+  for (let y = firstY; y < speed.height; y += step) {
+    for (let x = firstX; x < speed.width; x += step) {
+      const index = y * speed.width + x
+      const u = Number(componentX.values[index])
+      const v = Number(componentY.values[index])
+      const magnitude = Number(speed.values[index])
+      if (Number.isFinite(u) && Number.isFinite(v) && Number.isFinite(magnitude)) {
+        arrows.push([x, y, u, v, magnitude])
+      }
+    }
+  }
+  const result = { ...speed }
+  delete result.values
+  return {
+    ...result,
+    kind: 'wind',
+    band: 0,
+    bandNames: ['水平风速大小', 'X 分量', '垂直分量', 'Y 分量'],
+    arrows,
+    arrowStep: step,
+    adaptive: true
+  }
+}
+
+function compareTiffResults(firstPath, secondPath, requestedBand = 0, requestedScatterPoints = 4000) {
+  const band = Math.max(0, Math.floor(Number(requestedBand) || 0))
+  const first = readTiff(firstPath, band, true)
+  const second = readTiff(secondPath, band, true)
+  const commonBands = Math.min(first.bands, second.bands)
+  if (band >= commonBands) throw new Error(`所选波段超出共同波段范围（共 ${commonBands} 个）`)
+  if (first.width !== second.width || first.height !== second.height) {
+    throw new Error(`图像尺寸不一致：A 为 ${first.width} × ${first.height}，B 为 ${second.width} × ${second.height}`)
+  }
+  if (first.georeferenced && second.georeferenced) {
+    const different = first.crs !== second.crs || ['pixelSizeX', 'pixelSizeY', 'originX', 'originY']
+      .some((key) => Math.abs(Number(first[key]) - Number(second[key])) > 1e-8)
+    if (different) throw new Error('两幅图像的坐标系、原点或像元大小不一致，无法逐像元比较')
+  }
+
+  let validPixels = 0, meanDifference = 0, sumAbsolute = 0, sumSquared = 0
+  let differenceMinimum = Infinity, differenceMaximum = -Infinity
+  let meanFirst = 0, meanSecond = 0, covariance = 0, varianceFirst = 0, varianceSecond = 0
+  for (let index = 0; index < first.values.length; index += 1) {
+    const a = first.values[index], b = second.values[index]
+    if (!Number.isFinite(a) || !Number.isFinite(b)) continue
+    const difference = b - a
+    validPixels += 1
+    meanDifference += (difference - meanDifference) / validPixels
+    sumAbsolute += Math.abs(difference)
+    sumSquared += difference * difference
+    differenceMinimum = Math.min(differenceMinimum, difference)
+    differenceMaximum = Math.max(differenceMaximum, difference)
+    const deltaFirst = a - meanFirst
+    meanFirst += deltaFirst / validPixels
+    const deltaSecond = b - meanSecond
+    meanSecond += deltaSecond / validPixels
+    covariance += deltaFirst * (b - meanSecond)
+    varianceFirst += deltaFirst * (a - meanFirst)
+    varianceSecond += deltaSecond * (b - meanSecond)
+  }
+  if (!validPixels) throw new Error('两幅图像没有可共同比较的有效像元')
+
+  const maxScatterPoints = Math.max(100, Math.min(10000, Math.floor(Number(requestedScatterPoints) || 4000)))
+  const scatterTarget = Math.min(validPixels, maxScatterPoints)
+  const scatter = []
+  const differenceSamples = new Float64Array(validPixels)
+  let validIndex = 0
+  for (let index = 0; index < first.values.length; index += 1) {
+    const a = first.values[index], b = second.values[index]
+    if (!Number.isFinite(a) || !Number.isFinite(b)) continue
+    if (validIndex >= Math.floor(scatter.length * validPixels / scatterTarget)) scatter.push([a, b])
+    differenceSamples[validIndex] = b - a
+    validIndex += 1
+  }
+  differenceSamples.sort()
+  const percentile = (fraction) => {
+    const position = (differenceSamples.length - 1) * fraction
+    const lower = Math.floor(position), upper = Math.ceil(position)
+    if (lower === upper) return differenceSamples[lower]
+    const weight = position - lower
+    return differenceSamples[lower] * (1 - weight) + differenceSamples[upper] * weight
+  }
+  const differencePercentileMinimum = percentile(.02)
+  const differencePercentileMaximum = percentile(.98)
+
+  const previewScale = Math.min(1, 768 / Math.max(first.width, first.height))
+  const previewWidth = Math.max(1, Math.round(first.width * previewScale))
+  const previewHeight = Math.max(1, Math.round(first.height * previewScale))
+  const differenceLimit = Math.max(Math.abs(differencePercentileMinimum), Math.abs(differencePercentileMaximum), Number.EPSILON)
+  const differencePixels = Buffer.alloc(previewWidth * previewHeight * 4)
+  const negative = [36, 111, 211], neutral = [255, 255, 255], positive = [227, 74, 66]
+  for (let y = 0; y < previewHeight; y += 1) for (let x = 0; x < previewWidth; x += 1) {
+    const sourceX = Math.min(first.width - 1, Math.floor(x / previewScale))
+    const sourceY = Math.min(first.height - 1, Math.floor(y / previewScale))
+    const sourceIndex = sourceY * first.width + sourceX
+    const a = first.values[sourceIndex], b = second.values[sourceIndex]
+    const offset = (y * previewWidth + x) * 4
+    if (!Number.isFinite(a) || !Number.isFinite(b)) {
+      differencePixels[offset + 3] = 0
+      continue
+    }
+    const difference = b - a
+    const ratio = differenceLimit > 0 ? Math.min(1, Math.abs(difference) / differenceLimit) : 0
+    const target = difference < 0 ? negative : positive
+    for (let channel = 0; channel < 3; channel += 1) differencePixels[offset + channel] = Math.round(neutral[channel] + (target[channel] - neutral[channel]) * ratio)
+    differencePixels[offset + 3] = 255
+  }
+
+  const bandNames = Array.from({ length: commonBands }, (_, index) => {
+    const firstName = first.bandNames[index] || `波段 ${index + 1}`
+    const secondName = second.bandNames[index] || `波段 ${index + 1}`
+    return firstName === secondName ? firstName : `${firstName} / ${secondName}`
+  })
+  const correlationDenominator = Math.sqrt(varianceFirst * varianceSecond)
+  return {
+    kind: 'change', firstPath: windowsPath(firstPath), secondPath: windowsPath(secondPath),
+    width: first.width, height: first.height, band, bands: commonBands, bandNames,
+    previewWidth, previewHeight, differencePixels: differencePixels.toString('base64'),
+    differenceMinimum, differenceMaximum, differencePercentileMinimum, differencePercentileMaximum, differenceLimit,
+    validPixels, meanDifference, mae: sumAbsolute / validPixels,
+    rmse: Math.sqrt(sumSquared / validPixels),
+    correlation: correlationDenominator > 0 ? covariance / correlationDenominator : null,
+    meanFirst, meanSecond, scatter
+  }
+}
+
+function inspectAsciiGrid(data) {
+  const text = data.toString('utf8').replace(/^\uFEFF/, '')
+  const lines = text.split(/\r?\n/)
+  const header = new Map()
+  let dataStart = 0
+  const keys = new Set(['ncols', 'nrows', 'xllcorner', 'xllcenter', 'yllcorner', 'yllcenter', 'cellsize', 'nodata_value'])
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = lines[index].trim().match(/^(\S+)\s+(.+)$/)
+    const key = match?.[1]?.toLowerCase()
+    if (!match || !keys.has(key)) { dataStart = index; break }
+    header.set(key, Number(match[2]))
+    dataStart = index + 1
+  }
+  const width = Number(header.get('ncols'))
+  const height = Number(header.get('nrows'))
+  const cellSize = Number(header.get('cellsize'))
+  if (![width, height].every((value) => Number.isInteger(value) && value > 0) || !(cellSize > 0))
+    throw new Error('ASC 缺少有效的 NCOLS、NROWS 或 CELLSIZE')
+  if (width * height > 25_000_000) throw new Error('DEM 栅格超过 2500 万像元，请先裁剪或降采样')
+  const values = lines.slice(dataStart).join(' ').trim().split(/\s+/).filter(Boolean).map(Number)
+  if (values.length !== width * height || values.some((value) => !Number.isFinite(value)))
+    throw new Error(`ASC 高程数据数量无效，应为 ${width * height} 个数值`)
+  const noDataValue = header.has('nodata_value') ? Number(header.get('nodata_value')) : null
+  let minimum = Infinity
+  let maximum = -Infinity
+  let elevationSum = 0
+  let elevationCount = 0
+  for (const value of values) {
+    if (noDataValue != null && value === noDataValue) continue
+    minimum = Math.min(minimum, value)
+    maximum = Math.max(maximum, value)
+    elevationSum += value
+    elevationCount += 1
+  }
+  if (!Number.isFinite(minimum)) throw new Error('ASC 中没有有效高程像元')
+  const terrainScale = Math.min(1, 96 / Math.max(width, height))
+  const terrainWidth = Math.max(2, Math.round(width * terrainScale))
+  const terrainHeight = Math.max(2, Math.round(height * terrainScale))
+  const terrainValues = []
+  for (let y = 0; y < terrainHeight; y += 1) for (let x = 0; x < terrainWidth; x += 1) {
+    const sourceX = Math.min(width - 1, Math.round(x * (width - 1) / Math.max(1, terrainWidth - 1)))
+    const sourceY = Math.min(height - 1, Math.round(y * (height - 1) / Math.max(1, terrainHeight - 1)))
+    const value = values[sourceY * width + sourceX]
+    terrainValues.push(noDataValue != null && value === noDataValue ? null : value)
+  }
+  return {
+    format: 'ESRI ASCII Grid', width, height, bands: 1, dataType: '文本数值',
+    pixelSizeX: cellSize, pixelSizeY: cellSize, unit: 'm', noData: noDataValue,
+    minimum, maximum, relief: maximum - minimum, coordinateType: '局部/投影坐标',
+    crs: 'ASC 未内嵌 CRS', georeferenced: header.has('xllcorner') || header.has('xllcenter'),
+    originX: header.get('xllcorner') ?? header.get('xllcenter') ?? null,
+    originY: header.get('yllcorner') ?? header.get('yllcenter') ?? null,
+    mean: elevationCount ? elevationSum / elevationCount : 0,
+    terrainWidth, terrainHeight, terrainValues
+  }
+}
+
+function inspectDemFile(path, extension) {
+  if (extension === '.asc') return inspectAsciiGrid(readFileSync(path))
+  const raster = readTiff(path, 0)
+  if (raster.bands !== 1) throw new Error(`DEM 必须是单波段栅格，当前文件有 ${raster.bands} 个波段`)
+  return {
+    format: 'GeoTIFF', width: raster.width, height: raster.height, bands: raster.bands,
+    dataType: raster.dataType, pixelSizeX: raster.pixelSizeX, pixelSizeY: raster.pixelSizeY,
+    unit: raster.unit, noData: raster.noData, minimum: raster.minimum, maximum: raster.maximum,
+    relief: raster.maximum - raster.minimum, coordinateType: raster.coordinateType,
+    crs: raster.crs, georeferenced: raster.georeferenced,
+    originX: raster.originX, originY: raster.originY, mean: raster.mean,
+    terrainWidth: raster.terrainWidth, terrainHeight: raster.terrainHeight,
+    terrainValues: raster.terrainValues
+  }
 }
 
 function readEnvi(path, requestedBand = 0) {
@@ -1067,18 +2485,26 @@ function readEnvi(path, requestedBand = 0) {
   const previewWidth = Math.max(1, Math.round(width * scale))
   const previewHeight = Math.max(1, Math.round(height * scale))
   const pixels = Buffer.alloc(previewWidth * previewHeight)
-  const range = maximum - minimum
+  const previewValues = new Float64Array(previewWidth * previewHeight)
+  const finiteSamples = new Float64Array(previewWidth * previewHeight)
+  let finiteSampleCount = 0
   for (let y = 0; y < previewHeight; y += 1) for (let x = 0; x < previewWidth; x += 1) {
     const value = valueAt(Math.min(width - 1, Math.floor(x / scale)), Math.min(height - 1, Math.floor(y / scale)))
-    pixels[y * previewWidth + x] = Number.isFinite(value) ? Math.round((range ? (value - minimum) / range : 0.5) * 255) : 0
+    const index = y * previewWidth + x
+    previewValues[index] = value
+    if (Number.isFinite(value)) finiteSamples[finiteSampleCount++] = value
   }
-  return { kind: 'envi', path, width, height, bands, band, bandNames, previewWidth, previewHeight, minimum, maximum, pixels: pixels.toString('base64') }
+  const stretch = twoPercentStretch(finiteSamples, finiteSampleCount, minimum, maximum)
+  for (let index = 0; index < pixels.length; index += 1) {
+    pixels[index] = stretchedByte(previewValues[index], stretch.minimum, stretch.maximum)
+  }
+  return { kind: 'envi', path: windowsPath(path), width, height, bands, band, bandNames, previewWidth, previewHeight, minimum, maximum, stretchMinimum: stretch.minimum, stretchMaximum: stretch.maximum, stretchPercent: 2, pixels: pixels.toString('base64') }
 }
 
 async function api(request, response, url) {
   if (request.method === 'GET' && url.pathname === '/api/defaults') {
     const path = executable()
-    return json(response, 200, { executable: path, executableExists: existsSync(path), radiosityExecutable: path, radiosityExecutableExists: existsSync(path), projectFile, platform: process.platform, versions: { node: process.versions.node, three: '0.185.1' } })
+    return json(response, 200, { executable: windowsPath(path), executableExists: existsSync(path), radiosityExecutable: windowsPath(path), radiosityExecutableExists: existsSync(path), projectFile: windowsPath(projectFile), platform: process.platform, versions: { node: process.versions.node, three: '0.185.1' } })
   }
   if (request.method === 'GET' && url.pathname === '/api/events') {
     response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' })
@@ -1109,7 +2535,17 @@ async function api(request, response, url) {
       const result = createProject(await body(request))
       projectFile = result.path
       projectDir = result.projectDir
-      return json(response, 201, result)
+      return json(response, 201, { ...result, path: windowsPath(result.path), projectDir: windowsPath(result.projectDir), projectPath: windowsPath(result.projectPath) })
+    } catch (error) {
+      return json(response, 400, { error: error.message })
+    }
+  }
+  if (request.method === 'POST' && url.pathname === '/api/project/save-as') {
+    try {
+      const result = saveProjectAs(await body(request))
+      projectFile = result.path
+      projectDir = result.projectDir
+      return json(response, 201, { ...result, path: windowsPath(result.path), projectDir: windowsPath(result.projectDir), projectPath: windowsPath(result.projectPath) })
     } catch (error) {
       return json(response, 400, { error: error.message })
     }
@@ -1131,7 +2567,7 @@ async function api(request, response, url) {
       const positionPath = join(positionsDir, `${name.slice(0, -4)}_position.txt`)
       writeFileSync(path, content, 'utf8')
       if (!existsSync(positionPath)) writeFileSync(positionPath, '0 0 0 1 0\n', 'utf8')
-      return json(response, 201, { path, name, positionPath, relativePath: join('models', name) })
+      return json(response, 201, { path: windowsPath(path), name, positionPath: windowsPath(positionPath), relativePath: join('models', name).replaceAll('\\', '/') })
     } catch (error) { return json(response, 400, { error: error.message }) }
   }
   if (request.method === 'POST' && url.pathname === '/api/project/import-meteo') {
@@ -1148,7 +2584,77 @@ async function api(request, response, url) {
       mkdirSync(meteorologyDir, { recursive: true })
       const path = join(meteorologyDir, name)
       writeFileSync(path, content, 'utf8')
-      return json(response, 201, { path, name, relativePath: join('meteorology', name) })
+      return json(response, 201, { path: windowsPath(path), name, relativePath: join('meteorology', name).replaceAll('\\', '/') })
+    } catch (error) { return json(response, 400, { error: error.message }) }
+  }
+  if (request.method === 'POST' && url.pathname === '/api/project/import-dem') {
+    let importedPath = ''
+    try {
+      const data = await body(request)
+      const targetProjectFile = data.projectPath ? resolveProjectFile(data.projectPath) : projectFile
+      const targetProjectDir = targetProjectFile ? dirname(targetProjectFile) : projectDir
+      if (!targetProjectDir || !targetProjectFile) throw new Error('请先新建或打开工程')
+      const sourceName = basename(String(data.name || '').trim())
+      const extension = extname(sourceName).toLowerCase()
+      if (!sourceName || !new Set(['.tif', '.tiff', '.asc']).has(extension))
+        throw new Error('DEM 仅支持单波段 GeoTIFF（TIF/TIFF）或 ESRI ASCII Grid（ASC）')
+      const encoded = String(data.contentBase64 || '')
+      if (!encoded || encoded.length > 90 * 1024 * 1024) throw new Error('DEM 文件为空或超过 64MB')
+      const content = Buffer.from(encoded, 'base64')
+      if (!content.length || content.length > 64 * 1024 * 1024) throw new Error('DEM 文件为空或超过 64MB')
+      const terrainDir = join(targetProjectDir, 'terrain')
+      mkdirSync(terrainDir, { recursive: true })
+      const stem = sourceName.slice(0, -extension.length).replace(/[^\p{L}\p{N}_-]+/gu, '_').replace(/^_+|_+$/g, '') || 'terrain'
+      let name = `${stem}${extension}`
+      for (let suffix = 2; existsSync(join(terrainDir, name)); suffix += 1) name = `${stem}_${suffix}${extension}`
+      importedPath = join(terrainDir, name)
+      writeFileSync(importedPath, content)
+      const metadata = inspectDemFile(importedPath, extension)
+      const warnings = []
+      if (metadata.coordinateType === '经纬度坐标') warnings.push('源文件为经纬度坐标；建议重投影到米制坐标后再模拟')
+      if (!metadata.georeferenced) warnings.push('文件未包含完整地理参考；HiStream 仍会把整幅栅格映射到场景范围')
+      if (!['Float32', 'Int16'].includes(metadata.dataType)) warnings.push(`当前像元类型为 ${metadata.dataType}；建议使用 Float32 或 Int16`)
+      return json(response, 201, {
+        path: windowsPath(importedPath), name,
+        relativePath: join('terrain', name).replaceAll('\\', '/'), metadata, warnings
+      })
+    } catch (error) {
+      if (importedPath && existsSync(importedPath)) unlinkSync(importedPath)
+      return json(response, 400, { error: error.message })
+    }
+  }
+  if (request.method === 'POST' && url.pathname === '/api/project/dem-info') {
+    try {
+      const data = await body(request)
+      const targetProjectFile = data.projectPath ? resolveProjectFile(data.projectPath) : projectFile
+      const targetProjectDir = targetProjectFile ? dirname(targetProjectFile) : projectDir
+      if (!targetProjectDir) throw new Error('请先新建或打开工程')
+      const storedPath = normalizeHostPath(data.path).replace(/^"|"$/g, '')
+      if (!storedPath) throw new Error('DEM 路径为空')
+      const demPath = isAbsolute(storedPath) ? resolve(storedPath) : resolve(targetProjectDir, storedPath)
+      const extension = extname(demPath).toLowerCase()
+      if (!new Set(['.tif', '.tiff', '.asc']).has(extension))
+        throw new Error('DEM 仅支持 TIF、TIFF 或 ASC')
+      if (!existsSync(demPath) || !statSync(demPath).isFile()) throw new Error(`找不到 DEM：${demPath}`)
+      return json(response, 200, { path: windowsPath(demPath), metadata: inspectDemFile(demPath, extension) })
+    } catch (error) {
+      return json(response, 400, { error: error.message })
+    }
+  }
+  if (request.method === 'POST' && url.pathname === '/api/project/import-spectrum') {
+    try {
+      const data = await body(request)
+      if (!projectDir || !projectFile) throw new Error('请先新建或打开工程')
+      const name = basename(String(data.name || '').trim())
+      const allowedExtensions = new Set(['.txt', '.dat', '.csv'])
+      if (!name || !allowedExtensions.has(extname(name).toLowerCase())) throw new Error('只能导入 TXT、DAT 或 CSV 波谱文件')
+      if (Buffer.byteLength(String(data.content || ''), 'utf8') > 5 * 1024 * 1024) throw new Error('波谱文件超过 5MB')
+      const content = normalizeSpectrumContent(data.content)
+      const spectralDir = join(projectDir, 'spectral')
+      mkdirSync(spectralDir, { recursive: true })
+      const path = join(spectralDir, name)
+      writeFileSync(path, content, 'utf8')
+      return json(response, 201, { path: windowsPath(path), name, relativePath: join('spectral', name).replaceAll('\\', '/') })
     } catch (error) { return json(response, 400, { error: error.message }) }
   }
   if (request.method === 'POST' && url.pathname === '/api/project/distribution') {
@@ -1156,7 +2662,7 @@ async function api(request, response, url) {
       const data = await body(request)
       if (!projectDir || !projectFile) throw new Error('请先新建或打开工程')
       if (!Array.isArray(data.instances) || !data.instances.length) throw new Error('实例分布不能为空')
-      if (data.instances.length > 10000) throw new Error('单个 OBJ 最多支持 10000 个实例')
+      if (data.instances.length > 100000) throw new Error('单个 OBJ 最多支持 100000 个实例')
       const positionsDir = resolve(projectDir, 'positions')
       mkdirSync(positionsDir, { recursive: true })
       const safeName = basename(String(data.name || 'object')).replace(/\.[^.]+$/, '').replace(/[^\p{L}\p{N}_-]+/gu, '_') || 'object'
@@ -1168,7 +2674,7 @@ async function api(request, response, url) {
         return values.join(' ')
       })
       writeFileSync(path, `${lines.join('\n')}\n`, 'utf8')
-      return json(response, 200, { path, count: lines.length })
+      return json(response, 200, { path: windowsPath(path), relativePath: projectStoredPath(path, projectDir), count: lines.length })
     } catch (error) {
       return json(response, 400, { error: error.message })
     }
@@ -1179,7 +2685,7 @@ async function api(request, response, url) {
       const path = resolveAsset(data.path)
       if (!existsSync(path) || !statSync(path).isFile()) throw new Error(`找不到场景资源：${path}`)
       if (statSync(path).size > 80 * 1024 * 1024) throw new Error('预览资源超过 80MB，请使用简化模型')
-      return json(response, 200, { path, content: readFileSync(path, 'utf8') })
+      return json(response, 200, { path: windowsPath(path), content: readFileSync(path, 'utf8') })
     } catch (error) {
       return json(response, 400, { error: error.message })
     }
@@ -1188,78 +2694,107 @@ async function api(request, response, url) {
     try {
       const data = await body(request)
       const path = resolveProjectFile(data.path || projectFile)
-      let content = String(data.content || '')
-      let project = null
-      let savedProjectPath = ''
-      if (data.project) {
-        savedProjectPath = projectJsonPath(path)
-        project = writeProject(savedProjectPath, data.project)
-        ensureDefaultSceneAsset(project, dirname(path))
-        project = writeProject(savedProjectPath, project)
-        content = projectToXml(project, runtimePaths(dirname(path), project))
+      let candidate = data.project
+      if (!candidate) {
+        try { candidate = JSON.parse(String(data.content || '')) }
+        catch (error) { throw new Error(`project.json 格式错误：${error.message}`) }
       }
-      writeFileSync(path, content, 'utf8')
+      const validation = validateProject(candidate)
+      if (!validation.valid) throw new Error(validation.errors.join('；'))
+      let project = validation.project
+      ensureDefaultSceneAsset(project, dirname(path))
+      project = writeProject(path, project)
+      const content = stringifyProject(project)
       projectFile = path
       projectDir = dirname(path)
-      return json(response, 200, { path, content, project, projectPath: savedProjectPath })
+      return json(response, 200, { path: windowsPath(path), content, project, projectPath: windowsPath(path) })
     } catch (error) {
       return json(response, 400, { error: error.message })
     }
   }
   if (request.method === 'POST' && url.pathname === '/api/run') {
+    let runtimeScene = null
     try {
       const data = await body(request)
+      if (resettingProcesses) throw new Error('模拟环境正在重置，请稍后再运行')
       if (child) throw new Error('已有模拟任务正在运行')
       if (!modes.has(data.mode)) throw new Error('不支持的计算模式')
       const input = resolveProjectFile(data.inputPath || projectFile)
       projectFile = input
       projectDir = dirname(input)
       const stored = readProject(input)
-      if (stored.project) migrateProject(input, stored.project)
-      let engine, args, radiosityJsonPath = ''
-      engine = data.executable || executable()
-      if (!existsSync(engine)) throw new Error(`找不到 HiStream：${engine}`)
+      const project = stored.project ? migrateProject(input, stored.project) : null
+      if (!project) throw new Error('无法读取工程配置')
+      runtimeScene = prepareRuntimeSceneProject(input, project, {
+        resolveAssetPath: (value) => projectAssetPath(value, projectDir)
+      })
+      const runInput = runtimeScene.inputPath
+      emit({
+        type: 'stdout',
+        text: `实例边界筛选：原始 ${runtimeScene.total.toLocaleString('zh-CN')} 个，保留 ${runtimeScene.kept.toLocaleString('zh-CN')} 个，完整包围盒在域外跳过 ${runtimeScene.excluded.toLocaleString('zh-CN')} 个；跨界对象仅计算域内部分${runtimeScene.clippedObjects ? `；预裁切 ${runtimeScene.clippedObjects} 个单实例 OBJ，三角面 ${runtimeScene.sourceTriangles.toLocaleString('zh-CN')} → ${runtimeScene.retainedTriangles.toLocaleString('zh-CN')}` : ''}${runtimeScene.invalid ? `，忽略无效记录 ${runtimeScene.invalid.toLocaleString('zh-CN')} 条` : ''}`
+      })
       const facetMode = data.mode === 'eFacetRT' || data.mode === 'eFacetEB'
+      if (facetMode) {
+        const estimate = assertFacetScale(runtimeScene.project, projectDir, data.mode)
+        emit({ type: 'stdout', text: `面元规模预检：约 ${estimate.total.toLocaleString('zh-CN')} 个三角面` })
+      }
+      const projectSource = readFileSync(input, "utf8")
+      const keepThreeDimensionalResults = processOutputEnabled(projectSource, data.mode)
+      let engine, args, radiosityJsonPath = ''
+      engine = normalizeHostPath(data.executable || executable())
+      if (!existsSync(engine)) throw new Error(`找不到 HiStream：${windowsPath(engine)}`)
       if (facetMode) {
         const outputDirectory = join(projectDir, 'output')
         mkdirSync(outputDirectory, { recursive: true })
-        radiosityJsonPath = join(outputDirectory,
-          data.mode === 'eFacetRT' ? 'radiosity_gpu.json' : 'faceteb.json')
-        args = [data.mode, input, radiosityJsonPath]
+        const resultName = data.mode === "eFacetRT" ? "facetrt.json" : "faceteb.json"
+        radiosityJsonPath = join(outputDirectory, keepThreeDimensionalResults ? resultName : ".streamsim-transient-" + data.mode + ".json")
+        args = [data.mode, histreamRuntimePath(runInput, engine),
+          histreamRuntimePath(radiosityJsonPath, engine)]
       } else {
-        args = [data.mode, input]
+        args = [data.mode, histreamRuntimePath(runInput, engine)]
       }
       const startedAt = Date.now()
       const workingDirectory = facetMode ? dirname(engine) : projectDir
       child = spawn(engine, args, { cwd: workingDirectory, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+      childExecutable = engine
       const running = child
-      emit({ type: 'started', pid: running.pid, command: `"${engine}" ${args.map((item) => `"${item}"`).join(' ')}` })
+      emit({ type: 'started', pid: running.pid, command: `"${windowsPath(engine)}" ${args.map((item) => `"${windowsPath(item)}"`).join(' ')}` })
       running.stdout.on('data', (chunk) => emit({ type: 'stdout', text: chunk.toString() }))
       running.stderr.on('data', (chunk) => emit({ type: 'stderr', text: chunk.toString() }))
-      running.on('error', (error) => emit({ type: 'error', text: error.message }))
+      running.on('error', (error) => {
+        runtimeScene?.cleanup()
+        if (!running.streamsimReset) emit({ type: 'error', text: error.message })
+      })
       running.on('close', (code, signal) => {
+        if (running.streamsimReset) {
+          runtimeScene?.cleanup()
+          if (child === running) child = null
+          if (!child) childExecutable = ''
+          return
+        }
         let finalCode = code
         if (code === 0 && radiosityJsonPath) {
           try {
-            const tif = writeRadiosityTiff(radiosityJsonPath, input)
-            if (tif.tifPaths.length) emit({ type: 'stdout', text: '已生成 ' + tif.tifPaths.length + ' 个逐时 TIFF（' + tif.width + ' × ' + tif.height + '，' + tif.bands + ' 波段）' })
-            if (tif.processPaths.length) emit({ type: 'stdout', text: '已保留 ' + tif.processPaths.length + ' 个逐时面元能量过程索引' })
+            const tif = writeRadiosityTiff(radiosityJsonPath, input, data.mode)
+            if (tif.tifPaths.length) {
+              const timing = isEnergyBalanceMode(data.mode) ? ' 个逐时间 TIFF' : ' 个 TIFF'
+              emit({ type: 'stdout', text: '已生成 ' + tif.tifPaths.length + timing + '（' + tif.width + ' × ' + tif.height + '，' + tif.bands + ' 波段）' })
+            }
+            if (tif.processPaths.length) emit({ type: 'stdout', text: '已保存 ' + tif.processPaths.length + ' 个时间节点索引' })
           } catch (error) {
             finalCode = 1
             emit({ type: 'error', text: `结果影像生成失败：${error.message}` })
+          } finally {
+            if (!keepThreeDimensionalResults && existsSync(radiosityJsonPath)) unlinkSync(radiosityJsonPath)
           }
         }
-        if (code === 0 && !radiosityJsonPath) {
-          const outputTag = firstXmlTag(readFileSync(input, 'utf8'), 'outDir')
-          const outputPath = resolveAsset(outputTag || projectDir)
-          const converted = convertEnviResults(outputPath)
-          if (converted.length) emit({ type: 'stdout', text: `已生成 ${converted.length} 个 TIFF 图像结果` })
-        }
         emit({ type: 'closed', code: finalCode, signal, elapsed: Date.now() - startedAt })
-        if (child === running) child = null
+        runtimeScene?.cleanup()
+        if (child === running) { child = null; childExecutable = '' }
       })
-      return json(response, 200, { pid: running.pid, inputPath: input })
+      return json(response, 200, { pid: running.pid, inputPath: windowsPath(input) })
     } catch (error) {
+      runtimeScene?.cleanup()
       return json(response, 400, { error: error.message })
     }
   }
@@ -1268,6 +2803,22 @@ async function api(request, response, url) {
     if (process.platform === 'win32') spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true })
     else child.kill('SIGTERM')
     return json(response, 200, { stopped: true })
+  }
+  if (request.method === 'POST' && url.pathname === '/api/reset') {
+    try {
+      return json(response, 200, await resetSimulationProcesses())
+    } catch (error) {
+      return json(response, 500, { error: error.message })
+    }
+  }
+  if (request.method === 'POST' && url.pathname === '/api/results/delete-all') {
+    try {
+      if (child) throw new Error('模拟运行中，不能删除结果')
+      const data = await body(request)
+      return json(response, 200, data.kind === "3d" ? deleteThreeDimensionalResults(data.path) : deleteTiffResults(data.path))
+    } catch (error) {
+      return json(response, 400, { error: error.message })
+    }
   }
   if (request.method === 'POST' && url.pathname === '/api/results/list') {
     try {
@@ -1284,27 +2835,53 @@ async function api(request, response, url) {
       if (!existsSync(path) || !statSync(path).isFile()) throw new Error(`找不到模拟结果：${path}`)
       const extension = extname(path).toLowerCase()
       if (extension === '.hdr') return json(response, 200, readEnvi(path, data.band))
-      if (extension === '.tif' || extension === '.tiff') return json(response, 200, readTiff(path, data.band))
-      if (extension === '.json' && isRadiosityResultFile(path)) return json(response, 200, sampleRadiosityResult(path))
+      if (extension === '.tif' || extension === '.tiff') {
+        const result = /^fluid_wind_/i.test(basename(path))
+          ? readWindTiff(path)
+          : readTiff(path, data.band)
+        return json(response, 200, result)
+      }
+      if (extension === '.json' && isRadiosityResultFile(path)) {
+        const result = sampleRadiosityResult(path)
+        return json(response, 200, { ...result, path: windowsPath(result.path) })
+      }
+      if (extension === '.json' && processResultMetadata(path)) {
+        const result = readProcessResult(path)
+        return json(response, 200, { ...result, path: windowsPath(result.path) })
+      }
       if (resultImageMime[extension]) {
         if (statSync(path).size > 32 * 1024 * 1024) throw new Error('图像结果超过 32MB，请在资源管理器中打开')
-        return json(response, 200, { kind: 'image', path, mimeType: resultImageMime[extension], data: readFileSync(path).toString('base64') })
+        return json(response, 200, { kind: 'image', path: windowsPath(path), mimeType: resultImageMime[extension], data: readFileSync(path).toString('base64') })
       }
       if (['.txt', '.csv', '.dat', '.log', '.json'].includes(extension)) {
         if (statSync(path).size > 4 * 1024 * 1024) throw new Error('文本结果超过 4MB，请在外部程序中打开')
-        return json(response, 200, { kind: 'text', path, content: readFileSync(path, 'utf8') })
+        return json(response, 200, { kind: 'text', path: windowsPath(path), content: readFileSync(path, 'utf8') })
       }
-      return json(response, 200, { kind: 'file', path })
+      return json(response, 200, { kind: 'file', path: windowsPath(path) })
+    } catch (error) {
+      return json(response, 400, { error: error.message })
+    }
+  }
+  if (request.method === 'POST' && url.pathname === '/api/results/change') {
+    try {
+      const data = await body(request)
+      const firstPath = resolveAsset(data.firstPath)
+      const secondPath = resolveAsset(data.secondPath)
+      for (const path of [firstPath, secondPath]) {
+        if (!existsSync(path) || !statSync(path).isFile()) throw new Error(`找不到模拟结果：${path}`)
+        if (!['.tif', '.tiff'].includes(extname(path).toLowerCase())) throw new Error('变化分析目前仅支持 TIFF 图像')
+      }
+      return json(response, 200, compareTiffResults(firstPath, secondPath, data.band, data.maxScatterPoints))
     } catch (error) {
       return json(response, 400, { error: error.message })
     }
   }
   if (request.method === 'POST' && url.pathname === '/api/open') {
     const data = await body(request)
-    const path = resolve(normalizeHostPath(data.path || projectDir || root))
+    const path = resolve(normalizeHostPath(data.path || projectDir || process.env.STREAMSIM_DATA_ROOT || PROJECT_ROOT))
     if (!existsSync(path)) return json(response, 400, { error: `找不到路径：${path}` })
     if (process.platform === 'win32') spawn('explorer.exe', statSync(path).isFile() ? ['/select,', path] : [path], { detached: true, windowsHide: true })
-    return json(response, 200, { ok: true, path })
+    return json(response, 200, { ok: true, path: windowsPath(path) })
   }
   return false
 }
@@ -1318,9 +2895,9 @@ const server = createServer(async (request, response) => {
       return json(response, 404, { error: 'API 不存在' })
     }
     if (apiOnly) return json(response, 404, { error: '开发模式请访问 http://127.0.0.1:5173' })
-    let path = resolve(dist, `.${decodeURIComponent(url.pathname)}`)
-    if (url.pathname === '/' || !existsSync(path)) path = join(dist, 'index.html')
-    if (!path.startsWith(dist) || !existsSync(path)) return json(response, 404, { error: '文件不存在' })
+    let path = resolve(GUI_OUTPUT_DIR, `.${decodeURIComponent(url.pathname)}`)
+    if (url.pathname === '/' || !existsSync(path)) path = join(GUI_OUTPUT_DIR, 'index.html')
+    if (!path.startsWith(GUI_OUTPUT_DIR) || !existsSync(path)) return json(response, 404, { error: '文件不存在' })
     response.writeHead(200, { 'Content-Type': mime[extname(path)] || 'application/octet-stream' })
     createReadStream(path).pipe(response)
   } catch (error) {
@@ -1328,7 +2905,10 @@ const server = createServer(async (request, response) => {
   }
 })
 
-server.listen(4173, '127.0.0.1', () => console.log(`STREAMSIM: http://127.0.0.1:${apiOnly ? 5173 : 4173}`))
+const port = Number(process.env.STREAMSIM_PORT || 4173)
+server.listen(port, '127.0.0.1', () => console.log(`STREAMSIM: http://127.0.0.1:${apiOnly ? 5173 : port}`))
+
+export { server }
 
 function shutdown() {
   if (child) child.kill('SIGTERM')

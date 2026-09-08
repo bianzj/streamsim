@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "wavelengthUnit": "nm",
+  "valueUnit": "fraction",
+  "usage": "quick-test-only",
+  "spectra": [
+    { "id": "crop_maize_green", "label": "玉米健康叶片", "file": "crop_maize_green.txt", "tirReflectance": 0.025, "tirTransmittance": 0.0 },
+    { "id": "crop_wheat_green", "label": "小麦健康叶片", "file": "crop_wheat_green.txt", "tirReflectance": 0.030, "tirTransmittance": 0.0 },
+    { "id": "crop_rice_green", "label": "水稻健康叶片", "file": "crop_rice_green.txt", "tirReflectance": 0.025, "tirTransmittance": 0.0 },
+    { "id": "crop_senescent", "label": "衰老作物叶片", "file": "crop_senescent.txt", "tirReflectance": 0.045, "tirTransmittance": 0.0 },
+    { "id": "tree_broadleaf_green", "label": "阔叶树健康叶片", "file": "tree_broadleaf_green.txt", "tirReflectance": 0.025, "tirTransmittance": 0.0 },
+    { "id": "tree_conifer_needle", "label": "针叶树针叶", "file": "tree_conifer_needle.txt", "tirReflectance": 0.035, "tirTransmittance": 0.0 },
+    { "id": "soil_dry_loam", "label": "干燥壤土", "file": "soil_dry_loam.txt", "tirReflectance": 0.070, "tirTransmittance": 0.0 },
+    { "id": "soil_wet_loam", "label": "湿润壤土", "file": "soil_wet_loam.txt", "tirReflectance": 0.035, "tirTransmittance": 0.0 },
+    { "id": "urban_asphalt", "label": "沥青路面", "file": "urban_asphalt.txt", "tirReflectance": 0.050, "tirTransmittance": 0.0 },
+    { "id": "urban_concrete", "label": "混凝土", "file": "urban_concrete.txt", "tirReflectance": 0.080, "tirTransmittance": 0.0 },
+    { "id": "water_clear", "label": "清洁水体", "file": "water_clear.txt", "tirReflectance": 0.020, "tirTransmittance": 0.0 }
+  ]
+}

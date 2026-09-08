@@ -22,6 +22,10 @@ struct RayRTSetting
 	int isTemperature;
 	float fireflyClampThreshold;
 	int debugging_mode;
+	int periodicNeighborCount;
+	int skyboxEnabled;
+	int imageOffsetY;
+	vec2 sceneSize;
 };
 
 struct VoxellstSetting
@@ -40,7 +44,9 @@ struct VoxellstSetting
 	int isface;
 	ivec3 voxelSize; // xzy
 	int islad;
-	int dumpy_;
+	int voxelCount;
+	int periodicNeighborCount;
+	int skyboxEnabled;
 };
 
 struct VoxelrtSetting
@@ -59,7 +65,11 @@ struct VoxelrtSetting
 	int isface;
 	ivec3 voxelSize; // xzy
 	int islad;
-	int dumpy_;
+	int isTemperature;
+	int voxelCount;
+	int spectralBatchSize;
+	int periodicNeighborCount;
+	int skyboxEnabled;
 };
 
 

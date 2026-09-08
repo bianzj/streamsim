@@ -192,15 +192,12 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
 
 
               G = canopies[canopyId].G;
-              // density determined by mesh/isntance or pixel scale?
-              if(setting.islad < 1){
-                  density = canopies[canopyId].density;
-              }else{         
-                  uint surf1DId = SurfFlatten(voxelId, voxelRes);
-                  density = lads[surf1DId]; 
-              }
+              density = ResolveTurbidDensity(bufferId, canopyId, voxelId, voxelRes);
               float pathLength = Vector2Distance(sstate.position - sstate.lastPosition);
-              alpha_voxel = exp(-density * G * pathLength * scale);
+              alpha_voxel = isParticipatingMedium(canopies[canopyId])
+                  ? canopyVoxelTransmittance(canopies[canopyId], density, G, pathLength, scale)
+                  : ResolveTurbidInteraction(bufferId, density, G,
+                      sstate.position - sstate.lastPosition, pathLength, scale).x;
               alpha_toSolar = voxelDirs[bufferId].solar;
 
             // get the phase function for solar direction to induced direction 
@@ -322,7 +319,8 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
           if(inSameSides)
           {
             float surfaceWeight = surfaceReflectanceWeight(
-                typeId, bioId, refl, wi, wo, ffnormal);
+                typeId, bioId, refl, wi, wo, ffnormal,
+                meshLinks[meshId].angularEffectStrength);
             radiance += (surfaceWeight * Esun * alpha_toSolar * alpha_toVoxel);
           }
           // ////////////////////////////////
@@ -366,6 +364,7 @@ void main()
   //------------------------------------------------------------
   // get bufferId, voxelId, instanceId and typeId
   uint bufferId0 = uint(gl_GlobalInvocationID.x);
+  if(bufferId0 >= uint(setting.voxelCount)) return;
   ivec3 voxelId0 = voxelLinks[bufferId0].voxelId;
   if(voxelLinks[bufferId0].isValid==0) return;
   // Get nanoVDBLink: from voxelId to bufferId
@@ -402,6 +401,7 @@ void main()
 
   // set the diffuse in VNIR
   voxelNetRads[bufferId0].diffuseVrad = 0;
+  voxelPnets[bufferId0].diffusePnet = 0;
 
   // maxIteration is scattering times.
   // induced in primary time is calculated at solar file.
@@ -409,9 +409,10 @@ void main()
   {
 
       int kband_start = 0, kband_end = 0, kband_center;
-      // int kstep = setting.bandTstep;
-      int kstep = 50;
-      int step_num = int(NUM_VNIR/kstep)+1;
+      // Fixed shortwave samples are spaced by 1 nm; n_jump is the configured
+      // spectral acceleration width in nanometres for VoxelEB.
+      int kstep = max(setting.n_jump, 1);
+      int step_num = (NUM_VNIR + kstep - 1) / kstep;
       
       float EEsun = 0,EEsky =0;
       for(int kbandi = 0; kbandi <step_num; kbandi++)
@@ -419,14 +420,16 @@ void main()
           kband_start = kbandi*kstep;
           kband_end = kband_start+kstep;
 
-          if(kband_start > NUM_VNIR) break;
+          if(kband_start >= NUM_VNIR) break;
           if(kband_end > NUM_VNIR) kband_end = NUM_VNIR;
           kband_center = int((kband_end + kband_start)/2);
           float Esun = 0, Esky = 0, wavelengthwidth = 0;
           float temp=0;
           for(int kbandj = kband_start; kbandj < kband_end; kbandj++)
           {
-              wavelengthwidth = atomConds[kbandj].wavelength - atomConds[kbandj-1].wavelength;
+              wavelengthwidth = kbandj == 0
+                  ? 1.0
+                  : atomConds[kbandj].wavelength - atomConds[kbandj-1].wavelength;
               Esun = Esun + Rin*atomConds[kbandj].direct*0.001;
               Esky = Esky + Rin*atomConds[kbandj].diffuse*0.001;
               temp = temp +1;
@@ -447,29 +450,15 @@ void main()
 
     
           float rads = 0, radtemp = 0, absorb = 1.0;
-          // iteration in diffuse
-          int effeNum = 1;
+          float radsCorrection = 0.0;
+          // Fixed-weight equal-solid-angle quadrature.
           for(int iangle = 0; iangle < DIFFUSE_ANGLE_NUM; iangle++)
           {
               uint loc = bufferId0*DIFFUSE_ANGLE_NUM+iangle;
               radtemp = voxelRads[loc].cumulated;
-              if(radtemp>0.05)
-              {
-                  effeNum = effeNum + 1;
-                  rads = rads + radtemp;
-              }
+              compensatedAdd(rads, radsCorrection, finiteNonnegative(radtemp));
           }
-          if (effeNum < 1) effeNum=1;
-          //-------------------------------------------------------
-          // for twince receive and twince emit, but it not work
-          // using effeNum replace this function
-          //--------------------------------------------------------
-          if (typeId0 == TYPE_SOIL || typeId0 == TYPE_BUILDING)
-          {
-              rads = rads/effeNum;
-          }
-          else
-          {rads = rads/effeNum;}
+          rads *= DIFFUSE_HEMISPHERE_AVERAGE_WEIGHT;
 
           absorb = 1 - spectralMaterials[spectralIdBase + kband_center].transmittance -
                   spectralMaterials[spectralIdBase + kband_center].reflectance;
@@ -478,9 +467,15 @@ void main()
           // radSum = 100;
         
           atomicAdd(voxelNetRads[bufferId0].diffuseVrad, rads, gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
+          if(atomConds[kband_center].wavelength >= 400.0 &&
+             atomConds[kband_center].wavelength <= 700.0)
+          {
+              float pnet = rads * atomConds[kband_center].wavelength * 1e-3 / AHC;
+              atomicAdd(voxelPnets[bufferId0].diffusePnet, pnet,
+                  gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
+          }
       }
+
 // atomicStore(voxelNetRads[bufferId0].directVrad, radSum, gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
     }
 }
-
-
