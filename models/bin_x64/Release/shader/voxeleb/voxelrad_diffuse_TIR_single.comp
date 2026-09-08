@@ -206,7 +206,7 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
               //////////////////////////////
             /// Multiple case
             /////////////////////////////
-            if(kiter > 0)
+            if(kiter > 0 && !isParticipatingMedium(canopies[canopyId]))
             {
                float radianceCorrection = 0.0;
                for(int jangle=0;jangle<DIFFUSE_ANGLE_NUM;jangle++)
@@ -226,12 +226,26 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
             // emitter
             /////////////////////////////
             // thermalRadiance = 100;
-            radiance+= (thermalRadiance*(1-alpha_voxel)*emis* alpha_toVoxel);
+            if(isParticipatingMedium(canopies[canopyId])) {
+              float removedFraction = 1.0 - alpha_voxel;
+              float scatteringFraction = removedFraction
+                  * clamp(canopies[canopyId].scatteringAlbedo, 0.0, 1.0);
+              float absorptionFraction = removedFraction - scatteringFraction;
+              float mediumTemperature = canopies[canopyId].fixedTemperature > 0.0
+                  ? canopies[canopyId].fixedTemperature
+                  : 0.5 * (sunlitTemperature + shadedTemperature);
+              radiance += Stefen_Boltzmann(mediumTemperature, 1)
+                  * canopies[canopyId].emissionScale * absorptionFraction * alpha_toVoxel;
+            } else {
+              radiance+= (thermalRadiance*(1-alpha_voxel)*emis* alpha_toVoxel);
+            }
             // radiance = shadedTemperature;
             //////////////////////////////
             /// Solar 
             /////////////////////////////
-            radiance += (alpha_toSolar * gamma * Esun/cosSolar * alpha_toVoxel *(1-alpha_voxel));  
+            if(!isParticipatingMedium(canopies[canopyId])) {
+              radiance += (alpha_toSolar * gamma * Esun/cosSolar * alpha_toVoxel *(1-alpha_voxel));
+            }
             //////////////////////////////
             /// Save back
             /////////////////////////////

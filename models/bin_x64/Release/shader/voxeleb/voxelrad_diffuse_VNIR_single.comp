@@ -248,7 +248,17 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
               //////////////////////////////
               /// Solar 
               /////////////////////////////
-              radiance += (alpha_toSolar * gamma * Esun/cosSolar * alpha_toVoxel *(1-alpha_voxel));  
+              if(isParticipatingMedium(canopies[canopyId])) {
+                float removedFraction = 1.0 - alpha_voxel;
+                float scatteringFraction = removedFraction
+                    * clamp(canopies[canopyId].scatteringAlbedo, 0.0, 1.0);
+                float scatteringPhase = mediumPhaseHG(canopies[canopyId],
+                    dot(directions, -directioni));
+                radiance += alpha_toSolar * Esun / max(cosSolar, 0.001)
+                    * alpha_toVoxel * scatteringFraction * scatteringPhase;
+              } else {
+                radiance += (alpha_toSolar * gamma * Esun/cosSolar * alpha_toVoxel *(1-alpha_voxel));
+              }
               //////////////////////////////
               /// Save back
               /////////////////////////////

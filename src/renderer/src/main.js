@@ -3004,7 +3004,11 @@ async function generateGeometryObject(event) {
       materialName: type === 'Vegetation' || medium ? 'leaf_c3' : type === 'Water' ? 'water_set' : 'soil_dry', canopyName,
       fileName: imported.path, positionFile: savedDistribution.path,
       shape: values.shape, dimensions: [values.sizeX, values.sizeY, values.sizeZ],
-      meshes: meshNames.map((name) => ({ name, spectralName, thermalName })),
+      meshes: meshNames.map((name) => ({
+        name, spectralName, thermalName,
+        materialName: medium ? 'leaf_c3' : type === 'Water' ? 'water_set' : type === 'Vegetation' ? 'leaf_c3' : 'soil_dry',
+        canopyName
+      })),
       distribution, instanceCount: 1, sourceKind: 'prim',
       ...(medium ? { medium: { kind: values.mode, radiationOnly: true, coordinateOrder: 'XYZ' } } : {}),
       generation: { type: values.mode === 'fire' ? '火焰' : values.mode === 'fog' ? '雾' : values.mode === 'chaos' ? '几何体混沌' : values.mode === 'water' ? '水体' : '几何体', shape: values.shape, parameters: values }

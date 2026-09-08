@@ -231,6 +231,40 @@ bool Voxel_raytracing(Ray ray, NanoVDBLink nanoVDBLink)
 				if(alpha_toSensor < 0.001) {
                     return true;
                 }
+
+				if(isParticipatingMedium(canopy))
+				{
+					float removedFraction = 1.0 - alpha_voxel;
+					float scatteringFraction = removedFraction
+						* clamp(canopy.scatteringAlbedo, 0.0, 1.0);
+					float absorptionFraction = removedFraction - scatteringFraction;
+					float mediumTemperature = canopy.fixedTemperature > 0.0
+						? canopy.fixedTemperature : max(ubom.meteo.Ta + 273.15, 150.0);
+					float scatteringPhase = mediumPhaseHG(
+						canopy, dot(solarDirection, viewDirection));
+					for(int kwave = 0; kwave < setting.n_wave; ++kwave)
+					{
+						float wavelength = wave[kwave];
+						if(isOpticalBand(wavelength))
+						{
+							float directSource = directSpectralIrradiance(wavelength)
+								* alpha_toSolar * scatteringPhase;
+							float diffuseSource = diffuseSpectralIrradiance(wavelength)
+								* 0.0795774715;
+							Radiance[kwave] += alpha_toSensor * scatteringFraction
+								* (directSource + diffuseSource);
+						}
+						else
+						{
+							Radiance[kwave] += alpha_toSensor * absorptionFraction
+								* canopy.emissionScale * Planck(wavelength, mediumTemperature);
+							Radiance[kwave] += alpha_toSensor * scatteringFraction
+								* Planck(wavelength, envTemp);
+						}
+					}
+				}
+				else
+				{
 				// this is used for the hotspot effect
                 float solarDensity = max(density * ResolveClumpingIndex(bufferId, solarDirection), 0.000001);
                 float viewDensity = max(density * ResolveClumpingIndex(bufferId, viewDirection), 0.000001);
@@ -308,12 +342,12 @@ bool Voxel_raytracing(Ray ray, NanoVDBLink nanoVDBLink)
                             * (1.0 - alpha_voxel) * s * alpha_toSensor;
                     }
                 }
+                vegTemperatureSum += shadedTemperature;
+                vegNum ++;
+				}
 
 
 				alpha_toSensor = alpha_toSensor * alpha_voxel;
-
-                vegTemperatureSum += shadedTemperature;
-                vegNum ++;
 			}
 
 		}
