@@ -202,9 +202,38 @@ export function sensorViewAngles(sensor = {}, sunAzimuth = 0) {
   return angles
 }
 
+// Retain bound or edited legacy spectra so existing simulations do not change.
+export function simplifySolarSpectra(spectra, configuration = {}) {
+  const references = new Set([configuration.scene?.background?.spectralName])
+  for (const item of configuration.objects?.items || []) {
+    references.add(item.spectralName)
+    for (const mesh of item.meshes || []) references.add(mesh.spectralName)
+  }
+  const retired = {
+    pv_monocrystalline: ['单晶硅太阳能板光谱', 'pv_monocrystalline_silicon.txt', 0.06, 0.10],
+    pv_polycrystalline: ['多晶硅太阳能板光谱', 'pv_polycrystalline_silicon.txt', 0.09, 0.11],
+    pv_bifacial: ['双面光伏组件光谱', 'pv_bifacial_glass.txt', 0.07, 0.09]
+  }
+  return spectra.filter((item) => {
+    const old = retired[item.name]
+    if (!old || references.has(item.name)) return true
+    const unchanged = item.label === old[0] && item.model === 'file'
+      && item.fileName === `assets/spectral-library/${old[1]}`
+      && Number(item.reflectance) === old[2] && Number(item.transmittance) === 0
+      && Number(item.refTir) === old[3] && Number(item.tauTir) === 0
+      && !Object.keys(item.params || {}).length
+      && !item.physicalTexture?.enabled && !item.physicalTexture?.fileName
+      && item.previewTexture?.enabled === true && item.previewTexture?.preset === 'solar-panel'
+      && Number(item.previewTexture?.repeatSize) === 0.18
+    return !unchanged
+  }).map((item) => item.name === 'pv_opaque' && ['光伏板不透明光谱', '光伏板通用不透明光谱'].includes(item.label)
+    ? { ...item, label: '太阳能板光谱' } : item)
+}
+
 export function createMaterialPresets() {
   return {
     spectra: [
+      { name: 'pv_opaque', label: '太阳能板光谱', model: 'custom', reflectance: '0.08', transmittance: '0', refTir: 0.1, tauTir: 0, previewTexture: { enabled: true, preset: 'solar-panel', repeatSize: 0.18 } },
       { name: 'soil', label: '典型土壤', model: 'BSM', reflectance: '0.20', transmittance: '0.0', refTir: 0.05, tauTir: 0, params: { SMC: 25, BSMBrightness: 0.5, BSMlat: 25, BSMlon: 45 } },
       { name: 'green_leaf', label: '健康绿叶', model: 'Prospect', reflectance: '0.08', transmittance: '0.04', refTir: 0.03, tauTir: 0, params: { Cab: 40, Cw: 0.01, Cdm: 0.01, Cs: 0, N: 1.5 } },
       { name: 'dry_leaf', label: '干燥叶片', model: 'Prospect', reflectance: '0.16', transmittance: '0.08', refTir: 0.05, tauTir: 0, params: { Cab: 15, Cw: 0.003, Cdm: 0.02, Cs: 0, N: 1.8 } },
@@ -244,11 +273,18 @@ export function createMaterialPresets() {
       { name: 'human_temperature', label: '人员表面温度', sunlitTemperature: 310, shadedTemperature: 307 },
       { name: 'vehicle_temperature', label: '载具表面温度', sunlitTemperature: 315, shadedTemperature: 305 },
       { name: 'ship_temperature', label: '船舶表面温度', sunlitTemperature: 313, shadedTemperature: 303 },
+      { name: 'pv_temperature', label: '太阳能板初始温度', sunlitTemperature: 318, shadedTemperature: 303 },
       { name: 'water_temperature', label: '水体初始温度', sunlitTemperature: 295, shadedTemperature: 295 }
       ,{ name: 'fire_temperature', label: '火焰固定温度', sunlitTemperature: 1100, shadedTemperature: 1100 }
       ,{ name: 'fog_temperature', label: '雾介质温度', sunlitTemperature: 288, shadedTemperature: 288 }
     ],
     materials: [
+      // Representative dry concrete surface; users can edit these thermal properties.
+      { name: 'building_surface', label: '建筑表面', type: 'Building', params: { method: 2, rss: 1000000000, cs: 880, rhos: 2300, lambdas: 1.4, Tsoil: 25, SMC: 0, Satwater: 0 } },
+      { name: 'pv_panel', label: '通用太阳能板（FacetEB）', type: 'Building', energyModel: 'photovoltaic', params: { eta25: 0.21, gamma: -0.0035, bifaciality: 0, heatCapacityPerArea: 12000, convectiveScale: 1 } },
+      { name: 'pv_panel_mono', label: '单晶硅太阳能板（FacetEB）', type: 'Building', energyModel: 'photovoltaic', params: { eta25: 0.22, gamma: -0.0034, bifaciality: 0, heatCapacityPerArea: 12000, convectiveScale: 1 } },
+      { name: 'pv_panel_poly', label: '多晶硅太阳能板（FacetEB）', type: 'Building', energyModel: 'photovoltaic', params: { eta25: 0.19, gamma: -0.0038, bifaciality: 0, heatCapacityPerArea: 12500, convectiveScale: 1 } },
+      { name: 'pv_panel_bifacial', label: '双面太阳能板（FacetEB）', type: 'Building', energyModel: 'photovoltaic', params: { eta25: 0.215, gamma: -0.0034, bifaciality: 0.75, heatCapacityPerArea: 12500, convectiveScale: 1.1 } },
       {
         name: 'leaf_c3', label: 'C3 植被', type: 'Vegetation',
         params: { Vcmax: 80, m: 9, BallBerry: 0.01, Type: 3, kV: 0.6396, Rdparam: 0.015, Tparam: '0.2,0.3,288,313,328', Tyear: 25, beta: 0.507, kNPQs: 0, qLs: 1, stressfactor: 1, Tcor: 0 }
@@ -405,9 +441,9 @@ export function normalizeProject(value = {}) {
   const meteoEnd = Math.max(meteoStart + 1, Math.round(number(sourceMeteo.end, defaults.configuration.meteo.end)))
   const energyMode = value.mode === 'eFacetEB' || value.mode === 'eVoxelEB'
   const legacyProcess = Boolean(sourceSensor.process)
-  const sourceSpectra = canonicalPresetItems(Array.isArray(configuration.spectra) && configuration.spectra.length
+  const sourceSpectra = simplifySolarSpectra(canonicalPresetItems(Array.isArray(configuration.spectra) && configuration.spectra.length
     ? configuration.spectra : defaults.configuration.spectra
-  )
+  ), configuration)
   const spectra = sourceSpectra.map((item) => {
     const normalizedItem = withoutSmokeLabel(item)
     const builtInPreviewTexture = {
@@ -717,6 +753,15 @@ export function validateProject(value) {
   if (!sensorBandValues(c.sensor).length) errors.push('至少需要一个有效波段')
   if (!sensorViewAngles(c.sensor, c.light.azimuth).length) errors.push('至少需要一个有效观测角')
   if (!Array.isArray(c.objects.items)) errors.push('objects.items 必须是数组')
+  const pv = c.materials.filter(m => m.energyModel === 'photovoltaic')
+  for (const m of pv) {
+    const p = m.params || {}
+    if (![p.eta25,p.gamma,p.bifaciality,p.heatCapacityPerArea,p.convectiveScale].every(Number.isFinite) || !(p.eta25>=0 && p.eta25<=0.5 && p.gamma>=-0.02 && p.gamma<=0 && p.bifaciality>=0 && p.bifaciality<=1 && p.heatCapacityPerArea>=0 && p.convectiveScale>0)) errors.push('光伏参数无效：'+m.name)
+  }
+  const names = new Set(pv.map(m=>m.name))
+  if (names.has(c.scene.background.materialName)) errors.push('光伏板请作为场景对象添加，背景地面不支持光伏材质')
+  const used = c.objects.items.some(o => (o.meshes?.length ? o.meshes : [o]).some(m=>names.has(m.materialName || o.materialName)))
+  if (used && project.mode === 'eVoxelEB') errors.push('光伏热电耦合请选择 eFacetEB 模式')
   return { valid: errors.length === 0, errors, project }
 }
 
@@ -786,6 +831,7 @@ function thermalXml(item, index) {
 function materialXml(item) {
   const params = item.params || {}
   const name = xmlEscape(item.name)
+  if (item.energyModel === 'photovoltaic') return '<property><surfaceEnergy name="'+name+'"><photovoltaic>1</photovoltaic><vegetation>0</vegetation>'+Object.entries(params).map(([k,v])=>'<'+k+'>'+xmlEscape(v)+'</'+k+'>').join('')+'</surfaceEnergy></property>'
   if (item.type === 'Vegetation') return `<property><leafBio name="${name}"><Vcmax>${number(params.Vcmax, 80)}</Vcmax><m>${number(params.m, 9)}</m><BallBerry>${number(params.BallBerry, 0.01)}</BallBerry><Type>${number(params.Type, 3)}</Type><kV>${number(params.kV, 0.6396)}</kV><Rdparam>${number(params.Rdparam, 0.015)}</Rdparam><Tparam>${xmlEscape(params.Tparam || '0.2,0.3,288,313,328')}</Tparam><Tyear>${number(params.Tyear, 25)}</Tyear><beta>${number(params.beta, 0.507)}</beta><kNPQs>${number(params.kNPQs, 0)}</kNPQs><qLs>${number(params.qLs, 1)}</qLs><stressfactor>${number(params.stressfactor, 1)}</stressfactor><Tcor>${number(params.Tcor, 0)}</Tcor></leafBio></property>`
   if (item.type === 'Water') return `<property><waterSet name="${name}"><rss>${number(params.rss, 0)}</rss><heatCapacity>${number(params.heatCapacity, 4186000)}</heatCapacity><mixingDepth>${number(params.mixingDepth, 0.5)}</mixingDepth><evaporationCoefficient>${number(params.evaporationCoefficient, 1)}</evaporationCoefficient><brdfModel>${number(params.brdfModel, 1) ? 'CoxMunk' : 'Lambert'}</brdfModel><refractiveIndex>${number(params.refractiveIndex, 1.333)}</refractiveIndex><slopeVariance>${Math.max(0, number(params.slopeVariance, 0))}</slopeVariance><diffuseFraction>${Math.max(0, Math.min(1, number(params.diffuseFraction, 0.02)))}</diffuseFraction></waterSet></property>`
   return `<property><soilSet name="${name}"><method>${number(params.method, 1)}</method><rss>${number(params.rss, 2000)}</rss><cs>${number(params.cs, 1180)}</cs><rhos>${number(params.rhos, 1800)}</rhos><lambdas>${number(params.lambdas, 1.55)}</lambdas><Tsoil>${number(params.Tsoil, 0.25)}</Tsoil><SMC>${number(params.SMC, 25)}</SMC><Satwater>${number(params.Satwater, 0.45)}</Satwater></soilSet></property>`

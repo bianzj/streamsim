@@ -1,6 +1,8 @@
 import { createServer } from 'node:http'
 import { execFile, spawn } from 'node:child_process'
-import { appendFileSync, closeSync, copyFileSync, cpSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads'
+import { createInterface } from 'node:readline'
+import { appendFileSync, closeSync, copyFileSync, cpSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs'
 import { inflateSync } from 'node:zlib'
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -55,6 +57,7 @@ async function resetSimulationProcesses() {
   const running = child
   const runningPid = running?.pid || 0
   if (running) running.streamsimReset = true
+  if (running?.facetWorker) await running.facetWorker.terminate()
   const results = []
   try {
     if (process.platform === 'win32') {
@@ -502,7 +505,7 @@ function writeRadiosityEnvi(jsonPath) {
   return { headerPath, imagePath, width, height, bands: sources.length, faceValueCount }
 }
 
-function readRadiosityResult(jsonPath) {
+function readRadiosityResult(jsonPath, geometryOnly = false) {
   if (!existsSync(jsonPath)) throw new Error(`找不到面元结果：${jsonPath}`)
   // 大场景/多波段面元结果 JSON 会超过 512 MB。若用 readFileSync(..., 'utf8') + JSON.parse，
   // 会触发 V8 单字符串长度上限（0x1fffffe8 字符）：
@@ -580,9 +583,10 @@ function readRadiosityResult(jsonPath) {
   const arrays = {}
   arrays.vertexPositions = readFixed('vertexPositions', facetCount * 9)
   if (!arrays.vertexPositions) throw new Error('面元结果缺少完整的三角形坐标')
+  if (geometryOnly) return { facetCount, vertexPositions: arrays.vertexPositions, backend, metrics: [], bandRadiosity: new Float32Array(0) }
   arrays.wavelengths = readDynamic('wavelengths')
   // 文件内的写入顺序：sunlit, radiosity, lightEnhancement, temperature, ...
-  const metricKeys = ['sunlit', 'radiosity', 'lightEnhancement', 'temperature', 'netRadiation', 'sensibleHeat', 'latentHeat', 'storageHeat']
+  const metricKeys = ['sunlit', 'radiosity', 'lightEnhancement', 'temperature', 'netRadiation', 'sensibleHeat', 'latentHeat', 'storageHeat', 'photovoltaicPower']
   for (const key of metricKeys) arrays[key] = readFixed(key, surfaceCount)
   arrays.bandRadiosity = readFixed('bandRadiosity', surfaceCount * Math.max(1, (arrays.wavelengths || []).length))
 
@@ -601,7 +605,8 @@ function readRadiosityResult(jsonPath) {
     ['netRadiation', '净辐射 [W m⁻²]', false],
     ['sensibleHeat', '显热 [W m⁻²]', false],
     ['latentHeat', '潜热 [W m⁻²]', false],
-    ['storageHeat', '储热 [W m⁻²]', false]
+    ['storageHeat', '储热 [W m⁻²]', false],
+    ['photovoltaicPower', '光伏功率 [W m⁻²]', false]
   ]
   const metrics = []
   for (const [id, name, required] of metricDefinitions) {
@@ -625,7 +630,7 @@ function readRadiosityResult(jsonPath) {
 
 const THREE_DIMENSIONAL_FACET_SAMPLE_LIMIT = 1000000
 
-function sampleRadiosityResult(jsonPath, maximumFacets = THREE_DIMENSIONAL_FACET_SAMPLE_LIMIT) {
+function sampleRadiosityResult(jsonPath, maximumFacets = THREE_DIMENSIONAL_FACET_SAMPLE_LIMIT, geometryOnly = false) {
   if (!existsSync(jsonPath)) throw new Error('找不到面元结果：' + jsonPath)
   const source = readFileSync(jsonPath)
   const header = source.subarray(0, Math.min(source.length, 65536)).toString('utf8')
@@ -700,8 +705,8 @@ function sampleRadiosityResult(jsonPath, maximumFacets = THREE_DIMENSIONAL_FACET
   ]
   const metrics = metricDefinitions.filter(([key, , required]) => {
     const exists = source.indexOf('"' + key + '"') >= 0
-    if (required && !exists) throw new Error('面元结果缺少 ' + key + ' 数组')
-    return exists
+    if (required && !exists && !geometryOnly) throw new Error('面元结果缺少 ' + key + ' 数组')
+    return exists && !geometryOnly
   }).map(([id, label]) => ({ id, label, values: sampleArray(id, 2) }))
 
   return {
@@ -764,7 +769,7 @@ function readProcessResult(metadataPath, maximumElements = THREE_DIMENSIONAL_FAC
 
   if (metadata.geometry === 'facet') {
     const geometryPath = resolve(dirname(metadataPath), String(metadata.geometryFile || '../faceteb.json'))
-    const geometry = sampleRadiosityResult(geometryPath, maximumElements)
+    const geometry = sampleRadiosityResult(geometryPath, maximumElements, true)
     if (data.length < sourceCount * 2 * recordBytes) throw new Error('面元过程二进制数据不完整')
     const sampledMetrics = fields.map((field) => ({
       id: String(field.id || 'field_' + field.offset),
@@ -859,8 +864,8 @@ function readProcessResult(metadataPath, maximumElements = THREE_DIMENSIONAL_FAC
   }
 }
 
-function writeRadiosityTiffForAngle(jsonPath, inputPath, mode, viewAngleOverride = null, includeProcess = true, removeStepFiles = false) {
-  const { facetCount, metrics, vertexPositions, backend, bandRadiosity } = readRadiosityResult(jsonPath)
+function writeRadiosityTiffForAngle(jsonPath, inputPath, mode, viewAngleOverride = null, includeProcess = true, removeStepFiles = false, step = null, sharedResult = null) {
+  const { facetCount, metrics, vertexPositions, backend, bandRadiosity } = sharedResult || readRadiosityResult(jsonPath, Boolean(step))
   if (!vertexPositions || vertexPositions.length < facetCount * 9) throw new Error('面元结果缺少完整的三角形坐标')
   if (!inputPath || !existsSync(inputPath)) throw new Error('找不到生成影像所需的 project.json')
   const project = projectFromSource(readFileSync(inputPath, 'utf8'))
@@ -1153,8 +1158,8 @@ function writeRadiosityTiffForAngle(jsonPath, inputPath, mode, viewAngleOverride
     }
   }
 
-  const startNode = Math.max(0, Math.round(Number(meteo.start) || 0))
-  const endNode = Math.max(startNode + 1, Math.round(Number(meteo.end) || startNode + 1))
+  const startNode = step ? step.node : Math.max(0, Math.round(Number(meteo.start) || 0))
+  const endNode = step ? step.node + 1 : Math.max(startNode + 1, Math.round(Number(meteo.end) || startNode + 1))
   const dTime = Math.max(1, Number(meteo.dTime) || 1800)
   const clockToken = (seconds, dayOfYear = null) => {
     let totalMinutes = Math.round(seconds / 60)
@@ -1175,6 +1180,7 @@ function writeRadiosityTiffForAngle(jsonPath, inputPath, mode, viewAngleOverride
     ? readFileSync(meteoFile, 'utf8').split(/\r?\n/).slice(1).filter((line) => line.trim())
     : []
   const timeForNode = (node) => {
+    if (step && node === step.node) return { token: step.token, julianTime: step.julianTime }
     const julianTime = Number(String(meteoRows[node] || '').trim().split(/\s+/)[0])
     if (Number.isFinite(julianTime)) {
       const day = Math.floor(julianTime)
@@ -1343,15 +1349,22 @@ function writeRadiosityTiffForAngle(jsonPath, inputPath, mode, viewAngleOverride
   return { tifPath: tifPaths[0] || '', tifPaths, processPaths, width, height, bands: imageBandCount, bandNames, visiblePixels: orthVisiblePixels }
 }
 
-function writeRadiosityTiff(jsonPath, inputPath, mode) {
+function writeRadiosityTiff(jsonPath, inputPath, mode, step = null) {
   if (!inputPath || !existsSync(inputPath)) throw new Error('找不到生成影像所需的 project.json')
   const project = projectFromSource(readFileSync(inputPath, 'utf8'))
   const { sensor, light } = project.configuration
   const perspective = ['perspective', 'central', 'center'].includes(String(sensor.projection || 'parallel').trim().toLowerCase())
   const configuredAngles = sensorViewAngles(sensor, light.azimuth)
   const angles = perspective ? [null] : (configuredAngles.length ? configuredAngles : [[0, 0]])
+  const sharedResult = step ? readRadiosityResult(jsonPath, true) : null
   const results = angles.map((angle, index) => writeRadiosityTiffForAngle(
-    jsonPath, inputPath, mode, angle, index === 0, index === angles.length - 1))
+    jsonPath, inputPath, mode, angle, index === 0, !step && index === angles.length - 1, step, sharedResult))
+  // Delete only this completed node, after every direction succeeds. On export
+  // failure retain its binary so results can be recovered/retried externally.
+  if (step) {
+    const stepPath = join(dirname(jsonPath), '.facet_steps', 'energy_T=' + step.token + '.bin')
+    if (existsSync(stepPath)) unlinkSync(stepPath)
+  }
   const first = results[0]
   return {
     ...first,
@@ -1361,6 +1374,26 @@ function writeRadiosityTiff(jsonPath, inputPath, mode) {
     visiblePixels: results.reduce((sum, result) => sum + result.visiblePixels, 0),
     angleCount: results.length
   }
+}
+
+function exportFacetStep(running, jsonPath, inputPath, step) {
+  return new Promise((resolveStep, rejectStep) => {
+    const worker = new Worker(new URL(import.meta.url), {
+      workerData: { kind: 'facet-step', jsonPath, inputPath, step },
+      execArgv: process.execArgv.filter(arg => !arg.startsWith('--input-type'))
+    })
+    running.facetWorker = worker
+    let result, failure
+    worker.on('message', (message) => { result = message })
+    worker.on('error', (error) => { failure = error })
+    // Wait for teardown, not just a message: the old node's JS heap and array
+    // buffers must be gone before the engine is allowed to compute again.
+    worker.on('exit', (code) => {
+      if (running.facetWorker === worker) running.facetWorker = null
+      if (failure || code !== 0 || !result) rejectStep(failure || new Error('节点出图线程异常结束'))
+      else resolveStep(result)
+    })
+  })
 }
 
 function projectJsonPath(inputPath) {
@@ -1636,11 +1669,8 @@ function writeFloatTiff(path, width, height, bands, values, bandNames = []) {
   const imagePadding = (4 - dataOffset % 4) % 4
   if (imagePadding) { extraData.push({ offset: dataOffset, buffer: Buffer.alloc(imagePadding) }); dataOffset += imagePadding }
   const imageOffset = dataOffset
-  const image = Buffer.alloc(pixelCount * bands * 4)
-  for (let band = 0; band < bands; band += 1) for (let pixel = 0; pixel < pixelCount; pixel += 1) {
-    const value = Number(values[band * pixelCount + pixel])
-    image.writeFloatLE(Number.isFinite(value) ? value : Number.NaN, (pixel * bands + band) * 4)
-  }
+  const imageBytes = pixelCount * bands * 4
+  if (!Number.isSafeInteger(imageBytes) || imageOffset + imageBytes > 0xffffffff) throw new Error('TIFF 超过 4 GiB，请降低单幅影像分辨率或波段数')
 
   const header = Buffer.alloc(imageOffset)
   header.write('II', 0, 'ascii'); header.writeUInt16LE(42, 2); header.writeUInt32LE(ifdOffset, 4)
@@ -1654,12 +1684,38 @@ function writeFloatTiff(path, width, height, bands, values, bandNames = []) {
   writeEntry(258, 3, bands, bitsValue); writeEntry(259, 3, 1, 1); writeEntry(262, 3, 1, 1)
   writeEntry(270, 2, description.length, descriptionOffset)
   writeEntry(273, 4, 1, imageOffset); writeEntry(277, 3, 1, bands); writeEntry(278, 4, 1, height)
-  writeEntry(279, 4, 1, image.length); writeEntry(284, 3, 1, 1)
+  writeEntry(279, 4, 1, imageBytes); writeEntry(284, 3, 1, 1)
   if (bands > 1) writeEntry(338, 3, extraSamples.length, extraSamplesValue)
   writeEntry(339, 3, bands, sampleFormatsValue)
   header.writeUInt32LE(0, entry)
   for (const part of extraData) part.buffer.copy(header, part.offset)
-  writeFileSync(path, Buffer.concat([header, image]))
+  // No full-image interleaved Buffer or Buffer.concat copy. Publish only a
+  // complete TIFF; bounded chunks keep memory independent of file size.
+  const temporaryPath = path + '.partial'
+  const fd = openSync(temporaryPath, 'w')
+  try {
+    const writeAll = buffer => {
+      let offset = 0
+      while (offset < buffer.length) {
+        const written = writeSync(fd, buffer, offset, buffer.length - offset)
+        if (!written) throw new Error('TIFF 写入未完成')
+        offset += written
+      }
+    }
+    writeAll(header)
+    const chunk = Buffer.allocUnsafe(Math.min(imageBytes, 64 * 1024))
+    for (let first = 0; first < pixelCount * bands;) {
+      const count = Math.min(chunk.length / 4, pixelCount * bands - first)
+      for (let index = 0; index < count; index++) {
+        const outputIndex = first + index
+        const value = Number(values[(outputIndex % bands) * pixelCount + Math.floor(outputIndex / bands)])
+        chunk.writeFloatLE(Number.isFinite(value) ? value : Number.NaN, index * 4)
+      }
+      writeAll(chunk.subarray(0, count * 4))
+      first += count
+    }
+  } finally { closeSync(fd) }
+  renameSync(temporaryPath, path)
   appendRasterStatistics(path, width, height, bands, values, bandNames)
   return path
 }
@@ -1838,7 +1894,7 @@ function listResults(value) {
         : kind === 'facet'
         ? facetModelLabel + ' · ' + (facetModelLabel.includes('能量平衡') ? '最终时刻' : '静态')
         : kind === 'process'
-          ? (processModelLabels[processModel] || processModel) + ' · ' + String(process.time || '静态')
+          ? (process.processType === 'photovoltaic' ? '光伏热电耦合' : (processModelLabels[processModel] || processModel)) + ' · ' + String(process.time || '静态')
           : entry.name
       return { name: displayName, path, size: info.size, modifiedAt: info.mtime.toISOString(), kind, resultType, ...observation, processTime: process.time, processType: process.processType, processModel, node: process.node }
     }))
@@ -2684,7 +2740,7 @@ async function api(request, response, url) {
   if (request.method === 'POST' && url.pathname === '/api/project/read') {
     try {
       const data = await body(request)
-      const path = resolveAsset(data.path)
+      const path = projectAssetPath(data.path, projectDir)
       if (!existsSync(path) || !statSync(path).isFile()) throw new Error(`找不到场景资源：${path}`)
       if (statSync(path).size > 80 * 1024 * 1024) throw new Error('预览资源超过 80MB，请使用简化模型')
       return json(response, 200, { path: windowsPath(path), content: readFileSync(path, 'utf8') })
@@ -2741,7 +2797,16 @@ async function api(request, response, url) {
         emit({ type: 'stdout', text: `面元规模预检：约 ${estimate.total.toLocaleString('zh-CN')} 个三角面` })
       }
       const projectSource = readFileSync(input, "utf8")
+      const referencedMaterials = new Set([
+        project.configuration.scene?.background?.materialName,
+        ...(project.configuration.objects?.items || []).flatMap(object =>
+          [object.materialName, ...(object.meshes || []).map(mesh => mesh.materialName)])
+      ])
+      // PV process files are unconditional and also need persistent geometry,
+      // even when the optional radiation/energy process switches are off.
       const keepThreeDimensionalResults = processOutputEnabled(projectSource, data.mode)
+        || (data.mode === 'eFacetEB' && project.configuration.materials.some(material =>
+          material.energyModel === 'photovoltaic' && referencedMaterials.has(material.name)))
       let engine, args, radiosityJsonPath = ''
       engine = normalizeHostPath(data.executable || executable())
       if (!existsSync(engine)) throw new Error(`找不到 HiStream：${windowsPath(engine)}`)
@@ -2757,25 +2822,57 @@ async function api(request, response, url) {
       }
       const startedAt = Date.now()
       const workingDirectory = facetMode ? dirname(engine) : projectDir
-      child = spawn(engine, args, { cwd: workingDirectory, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+      const streamFacetSteps = data.mode === 'eFacetEB'
+      child = spawn(engine, args, { cwd: workingDirectory, windowsHide: true,
+        env: { ...process.env, STREAMSIM_FACET_STEP_SYNC: streamFacetSteps ? '1' : '0' },
+        stdio: [streamFacetSteps ? 'pipe' : 'ignore', 'pipe', 'pipe'] })
       childExecutable = engine
       const running = child
       emit({ type: 'started', pid: running.pid, command: `"${windowsPath(engine)}" ${args.map((item) => `"${windowsPath(item)}"`).join(' ')}` })
       running.stdout.on('data', (chunk) => emit({ type: 'stdout', text: chunk.toString() }))
       running.stderr.on('data', (chunk) => emit({ type: 'stderr', text: chunk.toString() }))
+      let streamedSteps = 0, stepOutputError = null, stepPending = false
+      if (streamFacetSteps) {
+        // readline handles split/coalesced stdout chunks and CRLF safely.
+        const lines = createInterface({ input: running.stdout, crlfDelay: Infinity })
+        running.stdin.on('error', () => { /* Engine may be stopped during output. */ })
+        lines.on('line', async (line) => {
+          if (!line.startsWith('FACET_STEP\t') || running.streamsimReset || running.streamsimStopped) return
+          try {
+            const match = /^FACET_STEP\t(\d+)\t(DOY\d+_\d{2}-\d{2})\t([\d.eE+-]+)$/.exec(line)
+            if (!match || stepPending) throw new Error('面元节点输出协议异常')
+            const step = { node: Number(match[1]), token: match[2], julianTime: Number(match[3]) }
+            if (!Number.isFinite(step.julianTime)) throw new Error('面元节点时间无效')
+            stepPending = true
+            emit({ type: 'stdout', text: `节点 ${step.node + 1} 已计算，正在逐方向保存图像：${step.token}` })
+            const result = await exportFacetStep(running, radiosityJsonPath, input, step)
+            if (running.streamsimReset || running.streamsimStopped || running.exitCode !== null) return
+            streamedSteps += 1
+            stepPending = false
+            emit({ type: 'stdout', text: `节点 ${step.node + 1} 已保存 ${result.tifPaths.length} 个 TIFF，输出缓存已释放：${step.token}` })
+            running.stdin.write(`FACET_ACK\t${step.node}\n`)
+          } catch (error) {
+            if (running.streamsimReset || running.streamsimStopped) return
+            stepOutputError = error
+            emit({ type: 'error', text: `节点影像生成失败（已保留节点文件）：${error.message}` })
+            running.stdin.end('FACET_ERROR\n')
+          }
+        })
+      }
       running.on('error', (error) => {
         runtimeScene?.cleanup()
         if (!running.streamsimReset) emit({ type: 'error', text: error.message })
       })
       running.on('close', (code, signal) => {
+        if (running.facetWorker) void running.facetWorker.terminate()
         if (running.streamsimReset) {
           runtimeScene?.cleanup()
           if (child === running) child = null
           if (!child) childExecutable = ''
           return
         }
-        let finalCode = code
-        if (code === 0 && radiosityJsonPath) {
+        let finalCode = stepOutputError ? 1 : code
+        if (code === 0 && radiosityJsonPath && !streamedSteps && !stepOutputError) {
           try {
             const tif = writeRadiosityTiff(radiosityJsonPath, input, data.mode)
             if (tif.tifPaths.length) {
@@ -2790,6 +2887,7 @@ async function api(request, response, url) {
             if (!keepThreeDimensionalResults && existsSync(radiosityJsonPath)) unlinkSync(radiosityJsonPath)
           }
         }
+        if (streamedSteps && code === 0 && !keepThreeDimensionalResults && existsSync(radiosityJsonPath)) unlinkSync(radiosityJsonPath)
         emit({ type: 'closed', code: finalCode, signal, elapsed: Date.now() - startedAt })
         runtimeScene?.cleanup()
         if (child === running) { child = null; childExecutable = '' }
@@ -2802,6 +2900,8 @@ async function api(request, response, url) {
   }
   if (request.method === 'POST' && url.pathname === '/api/stop') {
     if (!child) return json(response, 200, { stopped: false })
+    child.streamsimStopped = true
+    if (child.facetWorker) void child.facetWorker.terminate()
     if (process.platform === 'win32') spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true })
     else child.kill('SIGTERM')
     return json(response, 200, { stopped: true })
@@ -2908,11 +3008,16 @@ const server = createServer(async (request, response) => {
 })
 
 const port = Number(process.env.STREAMSIM_PORT || 4173)
-server.listen(port, '127.0.0.1', () => console.log(`STREAMSIM: http://127.0.0.1:${apiOnly ? 5173 : port}`))
+if (isMainThread) server.listen(port, '127.0.0.1', () => console.log(`STREAMSIM: http://127.0.0.1:${apiOnly ? 5173 : port}`))
+else if (workerData?.kind === 'facet-step') {
+  parentPort.postMessage(writeRadiosityTiff(workerData.jsonPath, workerData.inputPath, 'eFacetEB', workerData.step))
+  parentPort.close()
+}
 
 export { server }
 
 function shutdown() {
+  if (child?.facetWorker) void child.facetWorker.terminate()
   if (child) child.kill('SIGTERM')
   server.close(() => process.exit(0))
 }

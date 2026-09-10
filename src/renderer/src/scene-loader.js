@@ -68,7 +68,17 @@ function createPreviewTexture(preset) {
   const ctx = canvas.getContext('2d')
   const random = seededTextureRandom([...preset].reduce((sum, char) => sum * 31 + char.charCodeAt(0), 2166136261))
 
-  if (preset === 'red-brick') {
+  if (preset === 'solar-panel') {
+    const gradient = ctx.createLinearGradient(0, 0, 512, 512)
+    gradient.addColorStop(0, '#071a32'); gradient.addColorStop(.5, '#0d3159'); gradient.addColorStop(1, '#061528')
+    ctx.fillStyle = gradient; ctx.fillRect(0, 0, 512, 512)
+    ctx.strokeStyle = 'rgba(188,220,242,.72)'; ctx.lineWidth = 4
+    for (let x = 0; x <= 512; x += 64) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, 512); ctx.stroke() }
+    for (let y = 0; y <= 512; y += 128) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(512, y); ctx.stroke() }
+    ctx.strokeStyle = 'rgba(235,247,255,.28)'; ctx.lineWidth = 2
+    for (let x = 8; x < 512; x += 16) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, 512); ctx.stroke() }
+    drawNoise(ctx, random, 500, ['rgba(95,166,215,.10)', 'rgba(255,255,255,.08)'], 1.2)
+  } else if (preset === 'red-brick') {
     ctx.fillStyle = '#d7c8b8'; ctx.fillRect(0, 0, 512, 512)
     const rowHeight = 64, mortar = 6, brickWidth = 128
     for (let row = -1; row < 9; row += 1) {

@@ -9,6 +9,7 @@ directories:
 files:
   - desktop/**/*
   - server.mjs
+  - tools/runtime-scene.mjs
   - src/renderer/src/project-schema.js
   - package.json
 extraResources:

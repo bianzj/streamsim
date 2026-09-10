@@ -296,6 +296,10 @@ struct VoxelHeatflux
     float LEshaded; // latent heat flux of shaded component
     float Gsunlit;  // change in heat storage of sunlit component
     float Gshaded;  // change in heat storage of shaded component
+    float GPPsunlit;  // gross leaf photosynthesis, umol CO2 m-2 leaf s-1
+    float GPPshaded;
+    float NPPsunlit;  // net leaf assimilation (GPP - dark respiration)
+    float NPPshaded;
 };
 
 // temperature at LAST time nodes

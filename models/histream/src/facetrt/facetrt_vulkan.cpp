@@ -900,7 +900,6 @@ GraphDiagnostics FacetrtVulkan::buildVisibilityGraph(
     endCommands(commandBuffer);
 
     const VkDeviceSize vertexOffset = 0;
-    vkCmdBindVertexBuffers(commandBuffer, 0, 1, &m_vertices.buffer, &vertexOffset);
     const VkViewport viewport{0.0f, 0.0f, static_cast<float>(m_config.rasterWidth),
                               static_cast<float>(m_config.rasterHeight), 0.0f, 1.0f};
     const VkRect2D scissor{{0, 0}, {m_config.rasterWidth, m_config.rasterHeight}};
@@ -914,6 +913,8 @@ GraphDiagnostics FacetrtVulkan::buildVisibilityGraph(
 
     for (const Direction& inputDirection : directions) {
         commandBuffer = beginCommands();
+        // Vulkan bindings do not survive command-buffer boundaries.
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, &m_vertices.buffer, &vertexOffset);
         const std::array<float, 3> direction =
             normalize3({inputDirection.x, inputDirection.y, inputDirection.z});
         const std::array<float, 16> projection = makeProjection(inputDirection);
@@ -1035,6 +1036,8 @@ GraphDiagnostics FacetrtVulkan::buildVisibilityGraph(
         m_edgesCpu[cursor[sideB]++] = {sideA, count};
     }
     diagnostics.directedEdgeCount = static_cast<uint32_t>(m_edgesCpu.size());
+    if (std::none_of(m_denominatorCpu.begin(), m_denominatorCpu.end(), [](uint32_t n){return n>0;}))
+        throw std::runtime_error("Visibility raster has no surface samples; radiation results are invalid");
 
     float maxClosureError = 0.0f;
     for (uint32_t side = 0; side < surfaceCount(); ++side) {

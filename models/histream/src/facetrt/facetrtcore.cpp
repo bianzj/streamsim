@@ -12,6 +12,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -94,6 +95,11 @@ struct SurfaceParameters {
     std::shared_ptr<const ReflectanceVarianceTexture> reflectanceTexture;
     float reflectanceTextureStrength{};
     float reflectanceTextureRepeatSize{1.0f};
+    bool photovoltaic{false};
+    bool vegetation{true};
+    float pvEta25{0.22f}, pvGamma{-0.0035f}, pvBifaciality{0.0f};
+    float convectiveScale{1.0f};
+
 };
 
 struct FacetRTParameters {
@@ -1817,6 +1823,9 @@ std::string facetInputView(const std::string& path)
     const auto& meteo = project.meteorology();
     const auto background = scene.contains("background")
         ? scene["background"] : ProjectJson::Json::object();
+    for(const auto& m:project.materials())
+        if(ProjectJson::string(m,"energyModel")=="photovoltaic" && ProjectJson::string(m,"name")==ProjectJson::string(background,"materialName"))
+            throw std::runtime_error("Photovoltaic panels must be scene objects, not background ground");
     const std::filesystem::path defined = project.runtimeDefinedDirectory();
     std::ostringstream xml;
     xml << "<HiStreamProject><Control>"
@@ -1928,6 +1937,18 @@ std::string facetInputView(const std::string& path)
             << "</cs><rhos>" << ProjectJson::number(params, "rhos", 1800) << "</rhos><lambdas>"
             << ProjectJson::number(params, "lambdas", 1.55f) << "</lambdas><SMC>" << ProjectJson::number(params, "SMC", 25)
             << "</SMC></soilSet></property>";
+    }
+    for (const auto& item : project.materials()) {
+        const auto p=item.contains("params")?item["params"]:ProjectJson::Json::object();
+        const bool pv=ProjectJson::string(item,"energyModel")=="photovoltaic";
+        xml << "<surfaceEnergy name=\"" << xmlEscaped(ProjectJson::string(item,"name")) << "\">"
+            << "<photovoltaic>" << (pv?1:0) << "</photovoltaic>"
+            << "<vegetation>" << (ProjectJson::string(item,"type")=="Vegetation" && ProjectJson::string(item,"energyModel")!="wood"?1:0) << "</vegetation>"
+            << "<eta25>" << ProjectJson::number(p,"eta25",.22f) << "</eta25>"
+            << "<gamma>" << ProjectJson::number(p,"gamma",-.0035f) << "</gamma>"
+            << "<bifaciality>" << ProjectJson::number(p,"bifaciality",0) << "</bifaciality>"
+            << "<heatCapacityPerArea>" << ProjectJson::number(p,"heatCapacityPerArea",pv?12000:60000) << "</heatCapacityPerArea>"
+            << "<convectiveScale>" << ProjectJson::number(p,"convectiveScale",1) << "</convectiveScale></surfaceEnergy>";
     }
     xml << "</Biochemistry></Attribute><Meteorology>"
         << "<filePath>" << xmlEscaped(project.meteorologyPath().string()) << "</filePath>"
@@ -2835,6 +2856,7 @@ Scene loadProjectScene(const std::string& inputFile)
             nameList(firstXmlTag(objectXml, "spectralNames"));
         const std::vector<std::string> thermalNames =
             nameList(firstXmlTag(objectXml, "thermalNames"));
+        const auto physicalNames=nameList(firstXmlTag(objectXml,"bioNames"));
         const size_t bindingCount = std::max<size_t>(
             1U, std::max(meshNames.size(),
                          std::max(spectralNames.size(), thermalNames.size())));
@@ -2851,6 +2873,24 @@ Scene loadProjectScene(const std::string& inputFile)
             loadSurfaceParameters(xml, spectralName, thermalName,
                                   radiativeParameters.wavelengths,
                                   opticalCoefficients, inputPath, material);
+            const auto physicalName=physicalNames.empty()?std::string{}:physicalNames[std::min(index,physicalNames.size()-1U)];
+            const auto physical=namedXmlBlock(xml,"surfaceEnergy",physicalName);
+            if(!physical.empty()) {
+                material.photovoltaic=xmlFloat(physical,"photovoltaic",0)>0.5f;
+                material.vegetation=xmlFloat(physical,"vegetation",1)>0.5f && !material.photovoltaic;
+                material.pvEta25=xmlFloat(physical,"eta25",.22f);
+                material.pvGamma=xmlFloat(physical,"gamma",-.0035f);
+                material.pvBifaciality=xmlFloat(physical,"bifaciality",0);
+                material.heatCapacityPerArea=xmlFloat(physical,"heatCapacityPerArea",60000);
+                material.convectiveScale=xmlFloat(physical,"convectiveScale",1);
+                if(material.photovoltaic && (!(material.pvEta25>=0 && material.pvEta25<=.5f) ||
+                    !(material.pvGamma>=-.02f && material.pvGamma<=0) || !(material.pvBifaciality>=0 && material.pvBifaciality<=1) ||
+                    !(material.heatCapacityPerArea>=0) || !(material.convectiveScale>0)))
+                    throw std::runtime_error("Invalid photovoltaic material parameters: "+physicalName);
+                if(material.photovoltaic && (material.tirTransmittance>1e-6f ||
+                    std::any_of(material.energyTransmittance.begin(),material.energyTransmittance.end(),[](float t){return t>1e-6f;})))
+                    throw std::runtime_error("Photovoltaic surface must be opaque: "+physicalName);
+            }
             const uint32_t materialIndex =
                 static_cast<uint32_t>(scene.materials.size());
             scene.materials.push_back(std::move(material));
@@ -3202,10 +3242,13 @@ try {
     RunResult latest;
     latest.backend = "Vulkan GPU Facet RT-EB coupled";
     latest.graph = graph;
-    std::vector<float> latestNetRadiation(surfaceCount);
-    std::vector<float> latestSensibleHeat(surfaceCount);
-    std::vector<float> latestLatentHeat(surfaceCount);
-    std::vector<float> latestStorageHeat(surfaceCount);
+    // Only the final state needs these summary arrays; do not retain a second
+    // copy of the preceding node throughout the next solve.
+    std::vector<float> latestNetRadiation;
+    std::vector<float> latestSensibleHeat;
+    std::vector<float> latestLatentHeat;
+    std::vector<float> latestPhotovoltaicPower;
+    std::vector<float> latestStorageHeat;
     uint32_t latestCouplingIterations = 0;
     float latestTemperatureDelta = 0.0f;
     std::string latestTime;
@@ -3216,11 +3259,38 @@ try {
         std::filesystem::create_directories(outputDirectory / "process");
     }
 
+    std::ofstream pvSummary(outputDirectory/"photovoltaic_summary.csv");
+    pvSummary << "node,time,area_m2,temperature_C,incident_W,absorbed_W,electric_W,net_longwave_W,sensible_W,storage_W,max_residual_W_m2,energy_kWh\n";
+    double pvEnergyKwh=0;
+    const char* stepSyncEnvironment = std::getenv("STREAMSIM_FACET_STEP_SYNC");
+    const bool synchronizeStepOutput = stepSyncEnvironment &&
+        std::string(stepSyncEnvironment) == "1";
+    if (synchronizeStepOutput) {
+        // Geometry is shared by all nodes and is available before the first
+        // image/process preview. The final summary replaces this file later.
+        std::ofstream geometry(resultFile, std::ios::binary | std::ios::trunc);
+        geometry << std::setprecision(9)
+                 << "{\n  \"backend\": \"Vulkan GPU Facet RT-EB coupled\",\n"
+                 << "  \"facetCount\": " << scene.facetCount() << ",\n"
+                 << "  \"leafFacetCount\": " << scene.leafFacetCount << ",\n"
+                 << "  \"vertexPositions\": [";
+        for (size_t index = 0; index < scene.vertices.size(); ++index) {
+            if (index) geometry << ',';
+            const auto& vertex = scene.vertices[index];
+            geometry << vertex.position[0] << ',' << vertex.position[1]
+                     << ',' << vertex.position[2];
+        }
+        geometry << "]\n}\n";
+        geometry.close();
+        if (!geometry) throw std::runtime_error("FacetEB cannot write shared geometry");
+    }
     const auto totalBegin = Clock::now();
     for (int node = startNode; node < endNode; ++node) {
         const MeteoStep& meteo = meteorology[static_cast<size_t>(node)];
         updateSolarPosition(meteo);
         const std::string token = timeToken(meteo.julianTime);
+        {
+        // All per-node output/solver scratch arrays die before image export.
         const std::vector<float> sunlit =
             model.computeSunlitFraction(sunDirection(scene));
 
@@ -3239,6 +3309,7 @@ try {
         const float cosineSolarZenith =
             std::max(0.0f, sunDirection(scene).y);
         std::vector<float> absorbedShortwave(surfaceCount, 0.0f);
+        std::vector<float> incidentShortwave(surfaceCount,0), photovoltaicPower(surfaceCount,0), photovoltaicSlope(surfaceCount,0);
         facetvk::SolveResult shortwaveSolution;
         shortwaveSolution.radiosity.assign(surfaceCount, 0.0f);
         facetvk::SolveResult diffuseSolution;
@@ -3297,6 +3368,7 @@ try {
                         1.0f - windowOptics[side].reflectance -
                             windowOptics[side].transmittance,
                         0.0f, 1.0f);
+                    incidentShortwave[side] += windowIncident[side];
                     absorbedShortwave[side] +=
                         absorptance * windowIncident[side];
                     shortwaveSolution.radiosity[side] +=
@@ -3366,7 +3438,7 @@ try {
                             radiativeNet[side0] +
                             radiativeNet[side0 + 1U];
                         const float facetSensibleHeat =
-                            2.0f * aerodynamicConductance *
+                            2.0f * aerodynamicConductance * surface.convectiveScale *
                             (temperature[side0] - airTemperature);
                         // Both vegetation methods remain dynamically coupled to
                         // energy balance. Ball-Berry uses the configured baseline
@@ -3388,13 +3460,13 @@ try {
                                     std::max(0.08f, lightOpening * temperatureResponse),
                                 40.0f, 100000.0f);
                         }
-                        const float facetLatentHeat = 2.0f *
+                        const float facetLatentHeat = (surface.vegetation ? 2.0f : 0.0f) *
                             latentHeatFlux(
                                 temperature[side0], airDensity,
                                 airPressure, meteo.vaporPressure,
                                 aerodynamicResistance,
                                 leafResistance);
-                        const float facetLatentHeatSlope = 2.0f *
+                        const float facetLatentHeatSlope = (surface.vegetation ? 2.0f : 0.0f) *
                             latentHeatFluxDerivative(
                                 temperature[side0], airDensity,
                                 airPressure, meteo.vaporPressure,
@@ -3407,9 +3479,17 @@ try {
                             facetStorageSlope *
                             (temperature[side0] -
                              previousTemperature[side0]);
+                        const float effectiveIncident=incidentShortwave[side0]+surface.pvBifaciality*incidentShortwave[side0+1U];
+                        const float eta=surface.pvEta25*(1.0f+surface.pvGamma*(temperature[side0]-298.15f));
+                        const float available=absorbedShortwave[side0]+absorbedShortwave[side0+1U];
+                        const float rawPower=eta*effectiveIncident;
+                        const float pvPower=surface.photovoltaic?std::clamp(rawPower,0.0f,available):0.0f;
+                        const float pvSlope=surface.photovoltaic && rawPower>0 && rawPower<available ?
+                            surface.pvEta25*surface.pvGamma*effectiveIncident:0.0f;
                         for (uint32_t localSide = 0;
                              localSide < 2U; ++localSide) {
                             const size_t side = side0 + localSide;
+                            photovoltaicPower[side]=pvPower; photovoltaicSlope[side]=pvSlope;
                             netRadiation[side] =
                                 facetNetRadiation;
                             sensibleHeat[side] =
@@ -3490,13 +3570,13 @@ try {
                         netRadiation[side0] -
                         sensibleHeat[side0] -
                         latentHeat[side0] -
-                        storageHeat[side0];
+                        storageHeat[side0] - photovoltaicPower[side0];
                     const float derivative =
                         8.0f * emissivity * kStefanBoltzmann *
                         std::pow(temperature[side0], 3.0f) +
-                        2.0f * aerodynamicConductance +
+                        2.0f * aerodynamicConductance * surfaceForFacet(scene,facet).convectiveScale +
                         latentHeatSlope[side0] +
-                        storageHeatSlope[side0];
+                        storageHeatSlope[side0] + photovoltaicSlope[side0];
                     const float candidate = std::clamp(
                         temperature[side0] +
                             residual / std::max(1.0f, derivative),
@@ -3563,6 +3643,19 @@ try {
         evaluateEnergyFluxes(
             finalLongwaveOptics, finalLongwaveIncident);
 
+        std::ofstream pvCsv(outputDirectory/("photovoltaic_node_"+std::to_string(node)+".csv"));
+        pvCsv << "area_m2,temperature_C,incident_W_m2,absorbed_W_m2,electric_W_m2,residual_W_m2,latent_W_m2,effective_W_m2,net_longwave_W_m2,sensible_W_m2,storage_W_m2,facet_index\n";
+        double pa=0,pt=0,pg=0,pabs=0,pp=0,plw=0,ph=0,ps=0,pres=0;
+        for(uint32_t f=0;f<scene.leafFacetCount;++f){
+            const auto& mat=surfaceForFacet(scene,f);if(!mat.photovoltaic)continue;
+            const size_t k=2U*f;const float a=facetArea(scene,f),ab=absorbedShortwave[k]+absorbedShortwave[k+1];
+            const float inc=incidentShortwave[k]+incidentShortwave[k+1],power=photovoltaicPower[k];
+            const float lw=netRadiation[k]-ab,res=netRadiation[k]-sensibleHeat[k]-latentHeat[k]-storageHeat[k]-power;
+            pvCsv << a << ',' << temperature[k]-273.15f << ',' << inc << ',' << ab << ',' << power << ',' << res << ',' << latentHeat[k] << ','
+                  << incidentShortwave[k]+mat.pvBifaciality*incidentShortwave[k+1] << ',' << lw << ',' << sensibleHeat[k] << ',' << storageHeat[k] << ',' << f << '\n';
+            pa+=a;pt+=a*(temperature[k]-273.15f);pg+=a*inc;pabs+=a*ab;pp+=a*power;plw+=a*lw;ph+=a*sensibleHeat[k];ps+=a*storageHeat[k];pres=std::max(pres,double(std::abs(res)));
+        }
+        if(pa>0){pvEnergyKwh+=pp*dTime/3600000.;pvSummary << node << ',' << token << ',' << pa << ',' << pt/pa << ',' << pg << ',' << pabs << ',' << pp << ',' << plw << ',' << ph << ',' << ps << ',' << pres << ',' << pvEnergyKwh << '\n';}
         const facetvk::SolveResult radiativeSolution =
             combineRadiativeSolutions(
                 shortwaveSolution, finalLongwaveSolution);
@@ -3644,8 +3737,11 @@ try {
             // energy fluxes retain the FacetEB model name.
             const std::string processModel =
                 type == "radiation" ? "facetrt" : "faceteb";
-            const std::string processStem = processModel + "_T=" + token;
+            const std::string processStem = processModel + (type == "photovoltaic" ? "_pv_T=" : "_T=") + token;
             const std::filesystem::path processDirectory = outputDirectory / "process";
+            // PV results are also written when the optional RT/EB process flags
+            // are off. Ensure their destination exists at the point of use.
+            std::filesystem::create_directories(processDirectory);
             const std::filesystem::path processBinaryPath =
                 processDirectory / (processStem + ".bin");
             const std::filesystem::path metadataPath =
@@ -3659,17 +3755,18 @@ try {
             }
             for (size_t side = 0; side < surfaceCount; ++side) {
                 const float values[3] = {
-                    type == "radiation" ? shortwaveSolution.radiosity[side]
+                    type == "photovoltaic" ? photovoltaicPower[side] : type == "radiation" ? shortwaveSolution.radiosity[side]
                                         : latentHeat[side],
-                    type == "radiation" ? finalLongwaveSolution.radiosity[side]
+                    type == "photovoltaic" ? temperature[side] : type == "radiation" ? finalLongwaveSolution.radiosity[side]
                                         : sensibleHeat[side],
-                    type == "radiation" ? netRadiation[side]
+                    type == "photovoltaic" ? absorbedShortwave[side] : type == "radiation" ? netRadiation[side]
                                         : storageHeat[side]
                 };
                 processBinary.write(
                     reinterpret_cast<const char*>(values), sizeof(values));
             }
             processBinary.close();
+            if (!processBinary) throw std::runtime_error("FacetEB cannot finish process binary");
             std::ofstream metadata(metadataPath, std::ios::trunc);
             metadata << std::setprecision(9)
                      << "{\n  \"kind\": \"facet-" << type << "-process\",\n"
@@ -3692,7 +3789,11 @@ try {
                      << "  \"couplingIterations\": " << couplingIterations << ",\n"
                      << "  \"temperatureDelta\": "
                      << maximumTemperatureDelta << ",\n  \"fields\": ";
-            if (type == "radiation") {
+            if (type == "photovoltaic") {
+                metadata << "[{\"id\":\"photovoltaicPower\",\"label\":\"光伏功率 [W m⁻²]\",\"offset\":0},"
+                            "{\"id\":\"temperature\",\"label\":\"温度 [K]\",\"offset\":1},"
+                            "{\"id\":\"absorbedShortwave\",\"label\":\"单面吸收短波 [W m⁻²]\",\"offset\":2}]\n}\n";
+            } else if (type == "radiation") {
                 metadata << "[{\"id\":\"shortwaveRadiation\",\"label\":\"短波辐射 [W m⁻²]\",\"offset\":0},"
                             "{\"id\":\"longwaveRadiation\",\"label\":\"长波辐射 [W m⁻²]\",\"offset\":1},"
                             "{\"id\":\"netRadiation\",\"label\":\"净辐射 [W m⁻²]\",\"offset\":2}]\n}\n";
@@ -3704,18 +3805,29 @@ try {
         };
         if (saveRadiationProcess) writeProcessMetadata("radiation");
         if (saveEnergyProcess) writeProcessMetadata("energy");
+        if (pa > 0) writeProcessMetadata("photovoltaic");
 
-        latest.sunlit = sunlit;
-        latest.solution = radiativeSolution;
-        latest.lightEnhancement = lightEnhancement(
-            shortwaveSolution.radiosity, diffuseSolution.radiosity);
-        latestNetRadiation = netRadiation;
-        latestSensibleHeat = sensibleHeat;
-        latestLatentHeat = latentHeat;
-        latestStorageHeat = storageHeat;
-        latestCouplingIterations = couplingIterations;
-        latestTemperatureDelta = maximumTemperatureDelta;
-        latestTime = token;
+        binary.close();
+        pvCsv.close();
+        pvSummary.flush();
+        if (!binary || !pvCsv || !pvSummary) {
+            throw std::runtime_error("FacetEB cannot finish time-step output");
+        }
+
+        if (node == endNode - 1) {
+            latest.sunlit = sunlit;
+            latest.solution = radiativeSolution;
+            latest.lightEnhancement = lightEnhancement(
+                shortwaveSolution.radiosity, diffuseSolution.radiosity);
+            latestNetRadiation = std::move(netRadiation);
+            latestSensibleHeat = std::move(sensibleHeat);
+            latestLatentHeat = std::move(latentHeat);
+            latestPhotovoltaicPower = std::move(photovoltaicPower);
+            latestStorageHeat = std::move(storageHeat);
+            latestCouplingIterations = couplingIterations;
+            latestTemperatureDelta = maximumTemperatureDelta;
+            latestTime = token;
+        }
 
         const int progress = 10 + static_cast<int>(
             86.0 * (node - startNode + 1) / (endNode - startNode));
@@ -3725,6 +3837,18 @@ try {
                   << "，迭代=" << couplingIterations
                   << "，最大温差=" << maximumTemperatureDelta << " K"
                   << std::endl;
+        }
+        if (synchronizeStepOutput) {
+            // Backpressure: never overlap the next GPU solve with the current
+            // node's CPU image buffers. EOF/error aborts instead of hanging.
+            std::cout << "FACET_STEP\t" << node << '\t' << token << '\t'
+                      << std::setprecision(9) << meteo.julianTime << std::endl;
+            std::string acknowledgment;
+            if (!std::getline(std::cin, acknowledgment) ||
+                acknowledgment != "FACET_ACK\t" + std::to_string(node)) {
+                throw std::runtime_error("FacetEB time-step output was interrupted or failed");
+            }
+        }
     }
 
     latest.totalMs = milliseconds(totalBegin, Clock::now());
@@ -3773,7 +3897,8 @@ try {
     writeArray("netRadiation", latestNetRadiation, true);
     writeArray("sensibleHeat", latestSensibleHeat, true);
     writeArray("latentHeat", latestLatentHeat, true);
-    writeArray("storageHeat", latestStorageHeat, false);
+    writeArray("storageHeat", latestStorageHeat, true);
+    writeArray("photovoltaicPower", latestPhotovoltaicPower, false);
     output << "}\n";
 
     std::cout << "PROGRESS\t100\t面元辐射传输与能量平衡耦合完成" << std::endl;

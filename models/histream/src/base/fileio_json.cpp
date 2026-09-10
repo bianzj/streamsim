@@ -393,6 +393,19 @@ bool FileIO::readJson(const std::string& path, Mode mode) {
     else if (mode == Mode::eVoxelRT) m_pVoxelrtXml = std::make_shared<VoxelRTXml>();
     else if (mode == Mode::eVoxelEB) m_pVoxelebXml = std::make_shared<VoxelEBXml>();
     else return false;
+    if(mode == Mode::eVoxelEB) {
+        for(const Json& material:project.materials()) {
+            if(ProjectJson::string(material,"energyModel")!="photovoltaic") continue;
+            const auto name=ProjectJson::string(material,"name");
+            if(project.scene().contains("background") && ProjectJson::string(project.scene()["background"],"materialName")==name)
+                throw std::runtime_error("Photovoltaic panels must be scene objects in eFacetEB");
+            for(const Json& object:project.objects()) {
+                const auto bindings=bindingNames(object,"materialName",ProjectJson::string(object,"materialName"));
+                if(std::find(bindings.begin(),bindings.end(),name)!=bindings.end())
+                    throw std::runtime_error("Photovoltaic energy balance requires eFacetEB");
+            }
+        }
+    }
     configureCommon(*this, project, mode);
 
     std::vector<SpectralXml> spectra;

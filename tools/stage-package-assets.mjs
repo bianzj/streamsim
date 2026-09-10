@@ -5,9 +5,18 @@ import { fileURLToPath } from 'node:url'
 const MAX_OBJ_BYTES = 15 * 1024 * 1024
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const sourceRoot = join(projectRoot, 'assets')
+const examplesRoot = join(sourceRoot, 'examples')
 const targetRoot = join(projectRoot, '.packaging', 'assets')
+const cropModelRoot = join(sourceRoot, 'obj-library', 'crop')
+const packagedCropModels = new Set([
+  join(cropModelRoot, 'maize-growth', 'maize_stage_04.obj'),
+  join(cropModelRoot, 'wheat.obj'),
+  join(cropModelRoot, 'rice.obj'),
+  join(cropModelRoot, 'sunflower.obj')
+])
 
 const sourceDirectories = new Set()
+const generatedOutputDirectories = new Set()
 const oversizedObjects = new Map()
 const excludedSceneDirectories = new Set()
 let copiedFiles = 0
@@ -22,6 +31,10 @@ async function scan(path) {
   for (const entry of await readdir(path, { withFileTypes: true })) {
     const fullPath = join(path, entry.name)
     if (entry.isDirectory()) {
+      if (entry.name.toLowerCase() === 'output' && isInside(fullPath, examplesRoot)) {
+        generatedOutputDirectories.add(fullPath)
+        continue
+      }
       if (/^_.*_source$/i.test(entry.name)) {
         sourceDirectories.add(fullPath)
         continue
@@ -49,6 +62,9 @@ async function findIncompleteRamiScenes() {
 
 function excluded(path) {
   if (oversizedObjects.has(path)) return true
+  if (extname(path).toLowerCase() === '.obj' && isInside(path, cropModelRoot) && !packagedCropModels.has(path)) return true
+  if (path.toLowerCase().endsWith(`${sep}log_nvprosample.txt`)) return true
+  for (const directory of generatedOutputDirectories) if (isInside(path, directory)) return true
   for (const directory of sourceDirectories) if (isInside(path, directory)) return true
   for (const directory of excludedSceneDirectories) if (isInside(path, directory)) return true
   return false
@@ -77,7 +93,7 @@ async function rewriteObjCatalog() {
   const targetCatalog = join(targetRoot, 'obj-library', 'catalog.json')
   const catalog = JSON.parse(await readFile(sourceCatalog, 'utf8'))
   catalog.models = (catalog.models || []).filter((model) =>
-    !oversizedObjects.has(resolve(dirname(sourceCatalog), model.file)))
+    !excluded(resolve(dirname(sourceCatalog), model.file)))
   const includedIds = new Set(catalog.models.map((model) => model.id))
   for (const defaults of Object.values(catalog.defaultSets || {})) {
     if (Array.isArray(defaults.typical)) {
@@ -107,6 +123,8 @@ await rewriteRamiCatalog()
 const excludedModels = [...oversizedObjects.entries()]
   .map(([path, size]) => `${relative(sourceRoot, path)} (${(size / 1024 / 1024).toFixed(2)} MiB)`)
 console.log(`Packaged assets: ${copiedFiles} files, ${(copiedBytes / 1024 / 1024).toFixed(2)} MiB`)
+console.log(`Packaged crop OBJ models: ${packagedCropModels.size}`)
+console.log(`Excluded generated example output directories: ${generatedOutputDirectories.size}`)
 console.log(`Excluded source directories: ${sourceDirectories.size}`)
 console.log(`Excluded OBJ files over 15 MiB: ${excludedModels.length}`)
 for (const model of excludedModels) console.log(`  - ${model}`)

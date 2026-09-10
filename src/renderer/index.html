@@ -245,7 +245,7 @@
             <h3>对象</h3>
             <div class="material-grid two">
               <label class="dialog-field"><span>对象名称</span><input class="input" id="materialObjectName" name="objectName" required></label>
-              <label class="dialog-field"><span>对象类型</span><select class="select" id="materialObjectType" name="objectType"><option value="Vegetation">植被</option><option value="Building">建筑</option><option value="Human">人</option><option value="Vehicle">车辆</option><option value="Ship">船舶</option><option value="Soil">土壤</option><option value="Water">水体</option><option value="Other">其他</option></select></label>
+              <label class="dialog-field"><span>对象类型</span><select class="select" id="materialObjectType" name="objectType"><option value="Vegetation">植被</option><option value="Building">建筑</option><option value="SolarPanel">太阳能板</option><option value="Human">人</option><option value="Vehicle">车辆</option><option value="Ship">船舶</option><option value="Soil">土壤</option><option value="Water">水体</option><option value="Other">其他</option></select></label>
             </div>
           </section>
           <section class="material-section">
@@ -274,7 +274,7 @@
               <div class="physical-parameters" id="physicalParameterFields"></div>
             </div>
           </section>
-          <section class="material-section"><h3>Mesh 属性映射</h3><div class="mesh-table-wrap"><table class="mesh-material-table"><thead><tr><th>Mesh</th><th>光谱</th><th>温度</th><th>物化属性</th><th>结构属性</th></tr></thead><tbody id="meshMaterialRows"></tbody></table></div><div class="notice">同一 OBJ 的树干、树枝和树叶可分别绑定完整属性。</div></section>
+          <section class="material-section"><h3>Mesh 属性映射</h3><div class="mesh-table-wrap"><table class="mesh-material-table"><thead><tr><th>Mesh</th><th>光谱</th><th>温度</th><th>物化属性</th><th>结构属性</th></tr></thead><tbody id="meshMaterialRows"></tbody></table></div><div class="notice">OBJ 定义三维形状，各 Mesh 的物化属性决定能量过程。树形 OBJ 可绑定光伏属性；板形 OBJ 可设为植被并绑定植被属性。光伏热电耦合使用 FacetEB，并需绑定不透明光谱。</div></section>
         </div>
         <footer><span>OBJ 方向统一为 +X 北、−X 南、+Y 上、+Z 东、−Z 西；Three.js 与计算引擎保持一致。MTL 不参与计算。</span><button class="button primary" type="submit"><svg><use href="#i-save"/></svg>保存并加入场景</button></footer>
       </form>
@@ -285,7 +285,7 @@
         <div class="object-form">
           <div class="material-grid three">
             <label class="dialog-field"><span>对象名称</span><input class="input" name="objectName" readonly></label>
-              <label class="dialog-field"><span>对象类型</span><select class="select" id="objectAttributeType" name="objectType"><option value="Vegetation">植被</option><option value="Building">建筑</option><option value="Human">人</option><option value="Vehicle">车辆</option><option value="Ship">船舶</option><option value="Soil">土壤</option><option value="Water">水体</option><option value="Fire">火焰</option><option value="Fog">雾</option><option value="Other">其他</option></select></label>
+              <label class="dialog-field"><span>对象类型</span><select class="select" id="objectAttributeType" name="objectType"><option value="Vegetation">植被</option><option value="Building">建筑</option><option value="SolarPanel">太阳能板</option><option value="Human">人</option><option value="Vehicle">车辆</option><option value="Ship">船舶</option><option value="Soil">土壤</option><option value="Water">水体</option><option value="Fire">火焰</option><option value="Fog">雾</option><option value="Other">其他</option></select></label>
             <label class="dialog-field"><span>OBJ 路径</span><input class="input" name="objectPath" readonly></label>
           </div>
           <section class="material-section">
@@ -296,7 +296,7 @@
             </div>
             <div class="notice" id="objectAttributeSummary"></div>
           </section>
-          <section class="material-section"><h3>Mesh 完整属性映射</h3><div class="mesh-table-wrap"><table class="mesh-material-table"><thead><tr><th>Mesh</th><th>光谱属性</th><th>温度属性</th><th>物化属性</th><th>结构属性</th></tr></thead><tbody id="objectAttributeMeshRows"></tbody></table></div><div class="notice">每个 Mesh 独立参与计算；对象属性仅作为旧工程或缺省 Mesh 的回退值。</div></section>
+          <section class="material-section"><h3>Mesh 完整属性映射</h3><div class="mesh-table-wrap"><table class="mesh-material-table"><thead><tr><th>Mesh</th><th>光谱属性</th><th>温度属性</th><th>物化属性</th><th>结构属性</th></tr></thead><tbody id="objectAttributeMeshRows"></tbody></table></div><div class="notice">修改对象物化属性会同步到全部 Mesh，也可逐行独立设置。OBJ 形状不限制光伏或植被用途；光伏热电耦合使用 FacetEB 和不透明光谱。</div></section>
         </div>
         <footer><span>选项来自“材质属性”预设库；保存后更新 project.json。</span><button class="button primary" type="submit"><svg><use href="#i-save"/></svg>保存 OBJ 属性</button></footer>
       </form>

@@ -48,6 +48,13 @@ void main()
     int faceId = voxelLinks[bufferId0].faceId;
     //if(primId0 - faceid0*10 == 0) return; 
 
+    // Carbon-process output shares the existing per-voxel flux buffer.  Set
+    // non-vegetation voxels to zero before the vegetation branch below.
+    voxelHeatFlux[bufferId0].GPPsunlit = 0.0;
+    voxelHeatFlux[bufferId0].GPPshaded = 0.0;
+    voxelHeatFlux[bufferId0].NPPsunlit = 0.0;
+    voxelHeatFlux[bufferId0].NPPshaded = 0.0;
+
 
     // a lot of parameters
     float scale = setting.scale;
@@ -299,6 +306,13 @@ void main()
             float V = sel_root(atheta, -(Vc+Ve), Vc*Ve, sign(-Vc));
             float Ag = sel_root(0.98,-(V+Vs),V*Vs, -1);
             float A = Ag - Rd;
+            if(issunlit == 0) {
+                voxelHeatFlux[bufferId0].GPPshaded = max(0.0, Ag);
+                voxelHeatFlux[bufferId0].NPPshaded = A;
+            } else {
+                voxelHeatFlux[bufferId0].GPPsunlit = max(0.0, Ag);
+                voxelHeatFlux[bufferId0].NPPsunlit = A;
+            }
             // stomatal conductance (gs)
             float gs = float(1.6 * A * ppm2bar /(Cs-Ci));
             // tomatal resistance (rcw)

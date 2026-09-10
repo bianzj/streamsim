@@ -1,7 +1,7 @@
 import { webApi } from './web-api.js'
 import { getLocale, startLocalization, t } from './i18n.js'
 import { loadXmlScene, updateSceneDynamics } from './scene-loader.js'
-import { createDefaultProject, createMaterialPresets, MAX_SENSOR_BANDS, normalizeProject, parseProjectJson, sensorBandValues, sensorCruisePositions, sensorViewAngles, stringifyProject } from './project-schema.js'
+import { createDefaultProject, createMaterialPresets, MAX_SENSOR_BANDS, normalizeProject, parseProjectJson, sensorBandValues, sensorCruisePositions, sensorViewAngles, simplifySolarSpectra, stringifyProject } from './project-schema.js'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js'
@@ -19,6 +19,7 @@ const PHYSICAL_TEXTURE_PRESETS = [
 ]
 
 const PREVIEW_TEXTURE_PRESETS = [
+  ['solar-panel', '太阳能电池板'],
   ['red-brick', '红砖墙'],
   ['gravel', '石子路 / 粗粒路面'],
   ['concrete', '混凝土墙'],
@@ -88,7 +89,7 @@ function structureLabel(value) {
 
 function ensureMaterialPresets(config) {
   const presets = createMaterialPresets()
-  config.spectra = mergeNamedPresets(presets.spectra, config.spectra)
+  config.spectra = simplifySolarSpectra(mergeNamedPresets(presets.spectra, config.spectra), config)
     .map((item) => {
     item = { ...item, label: String(item.label || '').replaceAll('火焰/烟羽', '火焰') }
     if (item.name === 'water_surface') item.label = '水体光谱'
@@ -1460,6 +1461,7 @@ function libraryCard(title, subtitle, values, kind, index) {
 
 function physicalValues(item) {
   const p = item.params || {}
+  if (item.energyModel === 'photovoltaic') return [['模型','光伏热电耦合'],['参考效率',p.eta25],['温度系数',p.gamma],['背面系数',p.bifaciality],['面热容',p.heatCapacityPerArea],['对流倍率',p.convectiveScale]]
   if (item.energyModel === 'wood') return [['模型', '木质固体'], ['比热容', p.cs], ['密度', p.rhos], ['导热率', p.lambdas], ['对流倍率', p.convectiveScale], ['初温', `${p.Tsoil} ℃`], ['蒸腾', '关闭']]
   if (item.type === 'Vegetation') return [['Vcmax', p.Vcmax], ['BallBerry', p.BallBerry], ['kV', p.kV], ['Rd', p.Rdparam], ['Tyear', p.Tyear], ['胁迫', p.stressfactor]]
   if (item.type === 'Water') return [['辐射模型', Number(p.brdfModel) === 1 ? 'Cox–Munk' : 'Lambert'], ['折射率', p.refractiveIndex], ['坡度方差', Number(p.slopeVariance) > 0 ? p.slopeVariance : '随风速'], ['漫反射比例', p.diffuseFraction], ['rss', p.rss], ['热容', p.heatCapacity], ['混合深度', p.mixingDepth], ['蒸发系数', p.evaporationCoefficient]]
@@ -1622,7 +1624,9 @@ function renderInspector() {
     const energyBalanceOutput = state.mode === 'eFacetEB' || state.mode === 'eVoxelEB'
     const imageOutputLabel = energyBalanceOutput ? '逐时间输出图像' : '输出图像'
     const processOutputNotice = energyBalanceOutput
-      ? '<div class="notice">辐射过程：短波、长波和净辐射；能量过程：潜热、显热和表面热通量。两类结果可独立输出并用于三维分析。</div>'
+      ? state.mode === 'eVoxelEB'
+        ? '<div class="notice">辐射过程：短波、长波和净辐射；能量过程：潜热、显热、表面热通量、GPP 和 NPP。GPP 为叶片总光合，NPP 为叶片净同化近似值，暂未扣除根和茎呼吸。</div>'
+        : '<div class="notice">辐射过程：短波、长波和净辐射；能量过程：潜热、显热和表面热通量。两类结果可独立输出并用于三维分析。</div>'
       : '<div class="notice">辐射过程保存面元或体元辐射度，用于三维分析。</div>'
     const processOutputSwitches = switchRow('输出辐射过程', 'radiationProcessSwitch', c.sensor.radiationProcess) +
       (energyBalanceOutput ? switchRow('输出能量过程', 'energyProcessSwitch', c.sensor.energyProcess) : '')
@@ -2378,9 +2382,29 @@ function setFormField(name, value) {
 }
 
 function physicalTypeForObject(type) {
+  if (type === 'SolarPanel') return 'Photovoltaic'
   if (type === 'Vegetation' || type === 'Fire' || type === 'Fog') return 'Vegetation'
-  if (type === 'Water' || type === 'Ship') return type
+  if (type === 'Water' || type === 'Ship' || type === 'Building') return type
   return 'Soil'
+}
+
+function objectClassification(item) {
+  return item.classification === 'SolarPanel' ? 'SolarPanel' : (item.type || 'Other')
+}
+
+function objectTypeFields(classification) {
+  // Keep the engine's supported solid type; the UI classification is persistent metadata.
+  return { type: classification === 'SolarPanel' ? 'Building' : classification,
+    classification: classification === 'SolarPanel' ? 'SolarPanel' : undefined }
+}
+
+function materialMatchesObjectType(material, objectType) {
+  if (!material) return false
+  // A surface's geometry and semantic label do not restrict photovoltaic EB.
+  if (material.energyModel === 'photovoltaic') return objectType !== 'Fire' && objectType !== 'Fog'
+  // Keep legacy soil bindings available for existing buildings.
+  return material.type === physicalTypeForObject(objectType)
+    || (objectType === 'Building' && material.type === 'Soil')
 }
 
 function physicalInput(label, name, value, step = 'any') {
@@ -2500,7 +2524,7 @@ function applySpectrumPreset() {
 
 function renderSpectrumPresetOptions() {
   const type = document.querySelector("#materialObjectType").value
-  const preferred = { Vegetation: "green_leaf", Fire: "fire_medium", Fog: "fog_medium", Soil: "soil", Building: "concrete", Human: "human_surface", Vehicle: "vehicle_surface", Ship: "ship_surface", Other: "concrete", Water: "water_surface" }[type]
+  const preferred = { SolarPanel: "pv_opaque", Vegetation: "green_leaf", Fire: "fire_medium", Fog: "fog_medium", Soil: "soil", Building: "concrete", Human: "human_surface", Vehicle: "vehicle_surface", Ship: "ship_surface", Other: "concrete", Water: "water_surface" }[type]
   const current = document.querySelector("#spectralPreset").value
   const selected = state.config.spectra.some((item) => item.name === current) ? current : preferred
   document.querySelector("#spectralPreset").innerHTML = optionList(state.config.spectra, document.querySelector("#spectralMaterialName").value, selected)
@@ -2520,7 +2544,7 @@ function applyThermalPreset() {
 
 function renderThermalPresetOptions() {
   const type = document.querySelector("#materialObjectType").value
-  const preferred = { Vegetation: "vegetation_temperature", Fire: "fire_temperature", Fog: "fog_temperature", Soil: "soil_temperature", Building: "building_temperature", Human: "human_temperature", Vehicle: "vehicle_temperature", Ship: "ship_temperature", Other: "building_temperature", Water: "water_temperature" }[type]
+  const preferred = { SolarPanel: "pv_temperature", Vegetation: "vegetation_temperature", Fire: "fire_temperature", Fog: "fog_temperature", Soil: "soil_temperature", Building: "building_temperature", Human: "human_temperature", Vehicle: "vehicle_temperature", Ship: "ship_temperature", Other: "building_temperature", Water: "water_temperature" }[type]
   const current = document.querySelector("#thermalPreset").value
   const selected = state.config.thermals.some((item) => item.name === current) ? current : preferred
   document.querySelector("#thermalPreset").innerHTML = optionList(state.config.thermals, document.querySelector("#thermalMaterialName").value, selected)
@@ -2539,8 +2563,10 @@ function renderPhysicalParameters() {
   }
   nameInput.readOnly = false
   if (nameInput.dataset.newName) nameInput.value = nameInput.dataset.newName
-  const defaults = createMaterialPresets().materials.find((item) => item.type === type)?.params || {}
-  if (type === 'Vegetation') {
+  const defaults = createMaterialPresets().materials.find((item) => type === 'Photovoltaic' ? item.energyModel === 'photovoltaic' : item.type === type && !item.energyModel)?.params || {}
+  if (type === 'Photovoltaic') {
+    $('#physicalParameterFields').innerHTML = [['参考效率（25℃）','eta25',0.001],['温度系数（K⁻¹）','gamma',0.0001],['背面发电系数','bifaciality',0.01],['面热容（J·m⁻²·K⁻¹）','heatCapacityPerArea',100],['对流换热倍率','convectiveScale',0.1]].map(([label, key, step]) => physicalInput(label, 'pv_' + key, defaults[key], step)).join('')
+  } else if (type === 'Vegetation') {
     $('#physicalParameterFields').innerHTML = [
       physicalInput('Vcmax', 'bioVcmax', defaults.Vcmax, 0.1), physicalInput('气孔斜率 m', 'bioM', defaults.m, 0.1),
       physicalInput('Ball-Berry 截距', 'bioBallBerry', defaults.BallBerry, 0.001), physicalInput('光合类型', 'bioType', defaults.Type, 1),
@@ -2570,8 +2596,8 @@ function renderPhysicalParameters() {
 function renderPhysicalPresetOptions() {
   const objectType = $('#materialObjectType').value
   const type = physicalTypeForObject(objectType)
-  const materials = state.config.materials.filter((item) => item.type === type)
-  const preferred = { Vegetation: 'leaf_c3', Fire: 'leaf_c3', Fog: 'leaf_c3', Soil: 'soilset', Building: 'soil_dry', Human: 'soil_dry', Vehicle: 'soil_dry', Ship: 'ship_material', Other: 'soilset', Water: 'water_set' }[objectType]
+  const materials = state.config.materials.filter((item) => materialMatchesObjectType(item, objectType))
+  const preferred = { SolarPanel: 'pv_panel', Vegetation: 'leaf_c3', Fire: 'leaf_c3', Fog: 'leaf_c3', Soil: 'soilset', Building: 'building_surface', Human: 'soil_dry', Vehicle: 'soil_dry', Ship: 'ship_material', Other: 'soilset', Water: 'water_set' }[objectType]
   $('#physicalMaterialPreset').innerHTML = optionList(materials, $('#physicalMaterialName').value, materials.some((item) => item.name === preferred) ? preferred : materials[0]?.name || '__new__')
   renderPhysicalParameters()
 }
@@ -2590,19 +2616,19 @@ function recommendedVegetationMeshBinding(meshName, fallback) {
   return fallback
 }
 
-function renderMeshMaterialRows() {
+function renderMeshMaterialRows({ recommendVegetation = false } = {}) {
   const pending = state.pendingObject
   if (!pending) return
   const type = $('#materialObjectType').value
-  const preferredSpectrum = { Vegetation: 'green_leaf', Fire: 'fire_medium', Fog: 'fog_medium', Soil: 'soil', Building: 'concrete', Human: 'human_surface', Vehicle: 'vehicle_surface', Ship: 'ship_surface', Other: 'concrete', Water: 'water_surface' }[type]
-  const preferredThermal = { Vegetation: 'vegetation_temperature', Fire: 'fire_temperature', Fog: 'fog_temperature', Soil: 'soil_temperature', Building: 'building_temperature', Human: 'human_temperature', Vehicle: 'vehicle_temperature', Ship: 'ship_temperature', Other: 'building_temperature', Water: 'water_temperature' }[type]
+  const preferredSpectrum = { SolarPanel: 'pv_opaque', Vegetation: 'green_leaf', Fire: 'fire_medium', Fog: 'fog_medium', Soil: 'soil', Building: 'concrete', Human: 'human_surface', Vehicle: 'vehicle_surface', Ship: 'ship_surface', Other: 'concrete', Water: 'water_surface' }[type]
+  const preferredThermal = { SolarPanel: 'pv_temperature', Vegetation: 'vegetation_temperature', Fire: 'fire_temperature', Fog: 'fog_temperature', Soil: 'soil_temperature', Building: 'building_temperature', Human: 'human_temperature', Vehicle: 'vehicle_temperature', Ship: 'ship_temperature', Other: 'building_temperature', Water: 'water_temperature' }[type]
   const selectedSpectrum = document.querySelector("#spectralPreset").value || preferredSpectrum
   const selectedThermal = document.querySelector("#thermalPreset").value || preferredThermal
-  const physicalType = physicalTypeForObject(type)
-  const physicalItems = state.config.materials.filter((item) => item.type === physicalType)
-  const preferredPhysical = { Vegetation: 'leaf_c3', Fire: 'leaf_c3', Fog: 'leaf_c3', Soil: 'soilset', Building: 'soil_dry', Human: 'soil_dry', Vehicle: 'soil_dry', Ship: 'ship_material', Other: 'soilset', Water: 'water_set' }[type]
+  const physicalItems = state.config.materials.filter((item) => materialMatchesObjectType(item, type))
+  const preferredPhysical = { SolarPanel: 'pv_panel', Vegetation: 'leaf_c3', Fire: 'leaf_c3', Fog: 'leaf_c3', Soil: 'soilset', Building: 'building_surface', Human: 'soil_dry', Vehicle: 'soil_dry', Ship: 'ship_material', Other: 'soilset', Water: 'water_set' }[type]
   const selectedPhysical = $('#physicalMaterialPreset').value || preferredPhysical
-  const preferredCanopy = type === 'Fire' ? 'fire_medium' : type === 'Fog' ? 'fog_medium' : type === 'Vegetation' ? 'tree_leaf_canopy' : 'rigid_body'
+  const photovoltaic = physicalItems.find((item) => item.name === selectedPhysical)?.energyModel === 'photovoltaic'
+  const preferredCanopy = photovoltaic ? 'rigid_body' : type === 'Fire' ? 'fire_medium' : type === 'Fog' ? 'fog_medium' : type === 'Vegetation' ? 'tree_leaf_canopy' : 'rigid_body'
   $('#meshMaterialRows').innerHTML = pending.meshNames.map((name, index) => {
     const defaults = {
       spectralName: selectedSpectrum,
@@ -2610,7 +2636,7 @@ function renderMeshMaterialRows() {
       materialName: selectedPhysical,
       canopyName: preferredCanopy
     }
-    const binding = type === 'Vegetation'
+    const binding = recommendVegetation && type === 'Vegetation' && !photovoltaic
       ? recommendedVegetationMeshBinding(name, defaults) : defaults
     const spectrumOptions = optionList(state.config.spectra || [], $('#spectralMaterialName').value, binding.spectralName)
     const thermalOptions = optionList(state.config.thermals || [], $('#thermalMaterialName').value, binding.thermalName)
@@ -2636,7 +2662,8 @@ function showMaterialDialog() {
   $('#thermalPreset').value = '__new__'
   $('#physicalMaterialPreset').value = '__new__'
   $('#spectralModel').value = suggestedType === 'Vegetation' ? 'Prospect' : suggestedType === 'Soil' ? 'BSM' : 'custom'
-  renderModelParameters(); renderSpectrumPresetOptions(); renderThermalPresetOptions(); renderPhysicalPresetOptions(); renderMeshMaterialRows()
+  renderModelParameters(); renderSpectrumPresetOptions(); renderThermalPresetOptions(); renderPhysicalPresetOptions()
+  renderMeshMaterialRows({ recommendVegetation: true })
   $('#materialDialog').hidden = false
 }
 
@@ -3053,7 +3080,9 @@ function upsertByName(list, value) {
 
 function physicalFromForm(values, type) {
   let params
-  if (type === 'Wood') {
+  if (type === 'Photovoltaic') {
+    params = Object.fromEntries(['eta25','gamma','bifaciality','heatCapacityPerArea','convectiveScale'].map(k=>[k,Number(values['pv_'+k])]))
+  } else if (type === 'Wood') {
     params = {
       method: 1, rss: 1000000000, cs: Math.max(1, Number(values.soilCs)), rhos: Math.max(1, Number(values.soilRhos)),
       lambdas: Math.max(0.001, Number(values.soilLambdas)), Tsoil: Number(values.soilTsoil), SMC: 0, Satwater: 0,
@@ -3079,6 +3108,7 @@ function physicalFromForm(values, type) {
       lambdas: Number(values.soilLambdas), Tsoil: Number(values.soilTsoil), SMC: Number(values.soilSMC), Satwater: Number(values.soilSatwater)
     }
   }
+  if (type === 'Photovoltaic') return {name:values.materialName,type:'Building',energyModel:'photovoltaic',params}
   return type === 'Wood'
     ? { name: values.materialName, type: 'Vegetation', energyModel: 'wood', params }
     : { name: values.materialName, type, params }
@@ -3172,11 +3202,13 @@ function renderPresetParameterFields(spectralModel = 'custom', item = null) {
     target.innerHTML = `${presetSelect('结构类型', 'presetStructureType', 'structureType', structureOptions)}${physicalInput('叶面积指数 LAI', 'lai', defaults.lai, 0.01)}${physicalInput('叶面积密度 LAD', 'density', defaults.density, 0.01)}${physicalInput('介质高度 hc（m）', 'hc', defaults.hc, 0.01)}${physicalInput('投影系数 G', 'G', defaults.G, 0.01)}${physicalInput('叶倾角参数 LIDFa', 'LIDFa', defaults.LIDFa, 0.01)}${physicalInput('叶倾角参数 LIDFb', 'LIDFb', defaults.LIDFb, 0.01)}${physicalInput('热点参数 hspot', 'hspot', defaults.hspot, 0.01)}${physicalInput('叶宽 leafwidth（m）', 'leafwidth', defaults.leafwidth, 0.01)}${physicalInput('消光系数（m⁻¹）', 'extinction', defaults.extinction ?? 0, 0.01)}${physicalInput('单次散射反照率', 'scatteringAlbedo', defaults.scatteringAlbedo ?? 0, 0.01)}${physicalInput('散射非对称因子', 'asymmetry', defaults.asymmetry ?? 0, 0.01)}${physicalInput('发射倍率', 'emissionScale', defaults.emissionScale ?? 0, 0.01)}${physicalInput('固定温度（K）', 'fixedTemperature', defaults.fixedTemperature ?? 0, 1)}`
     return
   }
-  const typeOptions = [['Vegetation', '植被生理生化'], ['Wood', '木质固体热平衡'], ['Soil', '土壤表面物化'], ['Water', '水体物性'], ['Ship', '船舶表面物化']].map(([value, label]) => `<option value="${value}" ${value === state.presetPhysicalType ? 'selected' : ''}>${label}</option>`).join('')
-  const baseDefaults = createMaterialPresets().materials.find((entry) => state.presetPhysicalType === 'Wood' ? entry.energyModel === 'wood' : entry.type === state.presetPhysicalType)?.params || {}
+  const typeOptions = [['Building', '建筑表面'], ['Photovoltaic', '光伏板热电耦合'], ['Vegetation', '植被生理生化'], ['Wood', '木质固体热平衡'], ['Soil', '土壤表面物化'], ['Water', '水体物性'], ['Ship', '船舶表面物化']].map(([value, label]) => `<option value="${value}" ${value === state.presetPhysicalType ? 'selected' : ''}>${label}</option>`).join('')
+  const baseDefaults = createMaterialPresets().materials.find((entry) => state.presetPhysicalType === 'Photovoltaic' ? entry.energyModel === 'photovoltaic' : state.presetPhysicalType === 'Wood' ? entry.energyModel === 'wood' : entry.type === state.presetPhysicalType && !entry.energyModel)?.params || {}
   const defaults = { ...baseDefaults, ...(item?.params || {}) }
   let parameters
-  if (state.presetPhysicalType === 'Vegetation') {
+  if (state.presetPhysicalType === 'Photovoltaic') {
+    parameters = [['参考效率（25℃）','eta25',0.001],['温度系数（K⁻¹）','gamma',0.0001],['背面发电系数','bifaciality',0.01],['面热容（J·m⁻²·K⁻¹）','heatCapacityPerArea',100],['对流换热倍率','convectiveScale',0.1]].map(([label,k,step])=>physicalInput(label,'pv_'+k,defaults[k],step)).join('')+'<div class="notice">使用 FacetEB 与不透明光谱。温度由辐射、对流、储热与发电共同求解；OBJ 正面为电池正面。</div>'
+  } else if (state.presetPhysicalType === 'Vegetation') {
     parameters = [
       physicalInput('Vcmax', 'bioVcmax', defaults.Vcmax, 0.1), physicalInput('气孔斜率 m', 'bioM', defaults.m, 0.1),
       physicalInput('Ball-Berry 截距', 'bioBallBerry', defaults.BallBerry, 0.001), physicalInput('光合类型', 'bioType', defaults.Type, 1),
@@ -3211,7 +3243,7 @@ function showPresetDialog(kind = 'spectrum', index = -1) {
   $('#presetName').readOnly = Boolean(item)
   $('#presetName').value = item?.name || ''
   $('#presetLabel').value = item?.label || ''
-  state.presetPhysicalType = item?.energyModel === 'wood' ? 'Wood' : (item?.type || 'Vegetation')
+  state.presetPhysicalType = item?.energyModel === 'photovoltaic' ? 'Photovoltaic' : item?.energyModel === 'wood' ? 'Wood' : (item?.type || 'Vegetation')
   $('#presetDialogTitle').textContent = item ? `修改材质属性 · ${item.label || item.name}` : '新增材质属性'
   $('#presetSubmitBtn').innerHTML = item ? '<svg><use href="#i-save"/></svg>保存修改' : '<svg><use href="#i-plus"/></svg>加入预设库'
   renderPresetParameterFields(item?.model || 'custom', item)
@@ -3344,10 +3376,10 @@ async function saveImportedObject(event) {
       if (!state.config.spectra.some((entry) => entry.name === mesh.spectralName)) throw new Error('光谱属性不存在：' + mesh.spectralName)
       if (!state.config.thermals.some((entry) => entry.name === mesh.thermalName)) throw new Error('温度属性不存在：' + mesh.thermalName)
       const meshPhysical = state.config.materials.find((entry) => entry.name === mesh.materialName)
-      if (!meshPhysical || meshPhysical.type !== physicalType) throw new Error('Mesh 物化属性无效：' + mesh.materialName)
+      if (!materialMatchesObjectType(meshPhysical, values.objectType)) throw new Error('Mesh 物化属性无效：' + mesh.materialName)
       if (!state.config.canopies.some((entry) => entry.name === mesh.canopyName)) throw new Error('Mesh 结构属性不存在：' + mesh.canopyName)
     }
-    const item = { name: values.objectName, type: values.objectType, materialName: meshes[0]?.materialName || physical.name, canopyName: meshes[0]?.canopyName || defaultCanopy, fileName: imported.path, positionFile: savedDistribution.path, shape: pending.shape || 'cube', dimensions: pending.dimensions, meshes, distribution, instanceCount: instances.length, ...(isMobileAgentType(values.objectType) ? { movement: defaultMovement(values.objectType) } : {}), ...(pending.generation ? { generation: pending.generation } : {}) }
+    const item = { name: values.objectName, ...objectTypeFields(values.objectType), materialName: meshes[0]?.materialName || physical.name, canopyName: meshes[0]?.canopyName || defaultCanopy, fileName: imported.path, positionFile: savedDistribution.path, shape: pending.shape || 'cube', dimensions: pending.dimensions, meshes, distribution, instanceCount: instances.length, ...(isMobileAgentType(values.objectType) ? { movement: defaultMovement(values.objectType) } : {}), ...(pending.generation ? { generation: pending.generation } : {}) }
     const existing = state.config.objects.items.findIndex((entry) => entry.name === item.name)
     objectIndex = existing >= 0 ? existing : state.config.objects.items.length
     if (existing >= 0) {
@@ -3406,16 +3438,15 @@ function renderObjectAttributeOptions(useCurrent = false, resetBindings = false)
   if (!item) return
   const form = $('#objectAttributeForm')
   const type = form.elements.objectType.value
-  const physicalType = physicalTypeForObject(type)
-  const materials = state.config.materials.filter((entry) => entry.type === physicalType)
-  const preferredMaterial = { Vegetation: 'leaf_c3', Fire: 'leaf_c3', Fog: 'leaf_c3', Soil: 'soilset', Building: 'soil_dry', Human: 'soil_dry', Vehicle: 'soil_dry', Ship: 'ship_material', Other: 'soilset', Water: 'water_set' }[type]
+  const materials = state.config.materials.filter((entry) => materialMatchesObjectType(entry, type))
+  const preferredMaterial = { SolarPanel: 'pv_panel', Vegetation: 'leaf_c3', Fire: 'leaf_c3', Fog: 'leaf_c3', Soil: 'soilset', Building: 'building_surface', Human: 'soil_dry', Vehicle: 'soil_dry', Ship: 'ship_material', Other: 'soilset', Water: 'water_set' }[type]
   const currentMaterial = resetBindings ? preferredMaterial : useCurrent ? form.elements.materialName.value : item.materialName
   form.elements.materialName.innerHTML = bindingOptionList(materials, currentMaterial, preferredMaterial)
   const preferredCanopy = type === 'Fire' ? 'fire_medium' : type === 'Fog' ? 'fog_medium' : type === 'Vegetation' ? 'canopy_default' : 'rigid_body'
   const currentCanopy = resetBindings ? preferredCanopy : item.canopyName
   form.elements.canopyName.innerHTML = bindingOptionList(state.config.canopies || [], currentCanopy, preferredCanopy)
-  const preferredSpectrum = { Vegetation: 'green_leaf', Fire: 'fire_medium', Fog: 'fog_medium', Soil: 'soil', Building: 'concrete', Human: 'human_surface', Vehicle: 'vehicle_surface', Ship: 'ship_surface', Other: 'concrete', Water: 'water_surface' }[type]
-  const preferredThermal = { Vegetation: 'vegetation_temperature', Fire: 'fire_temperature', Fog: 'fog_temperature', Soil: 'soil_temperature', Building: 'building_temperature', Human: 'human_temperature', Vehicle: 'vehicle_temperature', Ship: 'ship_temperature', Other: 'building_temperature', Water: 'water_temperature' }[type]
+  const preferredSpectrum = { SolarPanel: 'pv_opaque', Vegetation: 'green_leaf', Fire: 'fire_medium', Fog: 'fog_medium', Soil: 'soil', Building: 'concrete', Human: 'human_surface', Vehicle: 'vehicle_surface', Ship: 'ship_surface', Other: 'concrete', Water: 'water_surface' }[type]
+  const preferredThermal = { SolarPanel: 'pv_temperature', Vegetation: 'vegetation_temperature', Fire: 'fire_temperature', Fog: 'fog_temperature', Soil: 'soil_temperature', Building: 'building_temperature', Human: 'human_temperature', Vehicle: 'vehicle_temperature', Ship: 'ship_temperature', Other: 'building_temperature', Water: 'water_temperature' }[type]
 
   const currentMeshes = useCurrent
     ? $$('#objectAttributeMeshRows tr').map((row) => ({
@@ -3438,7 +3469,7 @@ function showObjectAttributeDialog(index) {
   const form = $('#objectAttributeForm')
   form.reset()
   form.elements.objectName.value = item.name
-  form.elements.objectType.value = item.type || 'Other'
+  form.elements.objectType.value = objectClassification(item)
   form.elements.objectPath.value = item.fileName || ''
   renderObjectAttributeOptions(false)
   $$('.object-card').forEach((card) => card.classList.toggle('active', Number(card.dataset.index) === index))
@@ -3472,7 +3503,7 @@ async function saveObjectAttributes(event) {
   try {
     submit.disabled = true
     if ((type === 'Fire' || type === 'Fog') && state.mode !== 'eVoxelRT' && state.mode !== 'eVoxelEB') throw new Error('参与介质当前只支持 VoxelRT 或 VoxelEB')
-    if (!material || material.type !== physicalTypeForObject(type)) throw new Error('所选物化属性与对象类型不匹配')
+    if (!materialMatchesObjectType(material, type)) throw new Error('所选物化属性与对象类型不匹配')
     if (!canopy) throw new Error('所选结构参数不存在')
     if (type === 'Fire' && canopy.structureType !== 'fire') throw new Error('火焰对象必须绑定火焰结构参数')
     if (type === 'Fog' && canopy.structureType !== 'fog') throw new Error('雾对象必须绑定雾结构参数')
@@ -3481,14 +3512,14 @@ async function saveObjectAttributes(event) {
       if (!state.config.spectra.some((entry) => entry.name === mesh.spectralName)) throw new Error('光谱属性不存在：' + mesh.spectralName)
       if (!state.config.thermals.some((entry) => entry.name === mesh.thermalName)) throw new Error('温度属性不存在：' + mesh.thermalName)
       const meshMaterial = state.config.materials.find((entry) => entry.name === mesh.materialName)
-      if (!meshMaterial || meshMaterial.type !== physicalTypeForObject(type)) throw new Error(`Mesh“${mesh.name}”物化属性无效`)
+      if (!materialMatchesObjectType(meshMaterial, type)) throw new Error(`Mesh“${mesh.name}”物化属性无效`)
       const meshCanopy = state.config.canopies.find((entry) => entry.name === mesh.canopyName)
       if (!meshCanopy) throw new Error(`Mesh“${mesh.name}”结构属性不存在`)
       if (type === 'Fire' && meshCanopy.structureType !== 'fire') throw new Error(`Mesh“${mesh.name}”必须绑定火焰结构属性`)
       if (type === 'Fog' && meshCanopy.structureType !== 'fog') throw new Error(`Mesh“${mesh.name}”必须绑定雾结构属性`)
     }
-    const previous = { type: item.type, materialName: item.materialName, canopyName: item.canopyName, meshes: item.meshes, medium: item.medium, movement: item.movement }
-    Object.assign(item, { type, materialName, canopyName, meshes })
+    const previous = { type: item.type, classification: item.classification, materialName: item.materialName, canopyName: item.canopyName, meshes: item.meshes, medium: item.medium, movement: item.movement }
+    Object.assign(item, objectTypeFields(type), { materialName, canopyName, meshes })
     if (type === 'Fire' || type === 'Fog') item.medium = { kind: type === 'Fog' ? 'fog' : 'fire', radiationOnly: true, coordinateOrder: 'XYZ' }
     else delete item.medium
     if (isMobileAgentType(type)) item.movement = { ...defaultMovement(type), ...(item.movement || {}), enabled: Boolean(item.movement?.enabled), mode: 'random' }
@@ -3557,7 +3588,7 @@ async function showObjectDialog(index) {
   const form = $('#objectForm')
   form.reset()
   form.elements.objectName.value = item.name
-  form.elements.objectType.value = item.type
+  form.elements.objectType.value = objectClassification(item)
   form.elements.objectPath.value = item.fileName || ''
   let distribution = item.distribution
   if (!distribution && item.positionFile) {
@@ -5465,7 +5496,16 @@ $('#closeObjectAttributeBtn').addEventListener('click', hideObjectAttributeDialo
 $('#objectAttributeDialog').addEventListener('click', (event) => { if (event.target === $('#objectAttributeDialog')) hideObjectAttributeDialog() })
 $('#objectAttributeForm').addEventListener('submit', saveObjectAttributes)
 $('#objectAttributeType').addEventListener('change', () => renderObjectAttributeOptions(true, true))
-$('#objectAttributeMaterial').addEventListener('change', renderObjectAttributeSummary)
+$('#objectAttributeMaterial').addEventListener('change', () => {
+  const materialName = $('#objectAttributeMaterial').value
+  // Apply the object-wide choice to all meshes; individual rows remain editable.
+  $$('#objectAttributeMeshRows .attribute-physical').forEach((select) => { select.value = materialName })
+  if (state.config.materials.find((item) => item.name === materialName)?.energyModel === 'photovoltaic') {
+    $('#objectAttributeForm').elements.canopyName.value = 'rigid_body'
+    $$('#objectAttributeMeshRows .attribute-canopy').forEach((select) => { select.value = 'rigid_body' })
+  }
+  renderObjectAttributeSummary()
+})
 $('#closeObjectBtn').addEventListener('click', hideObjectDialog)
 $('#objectDialog').addEventListener('click', (event) => { if (event.target === $('#objectDialog')) hideObjectDialog() })
 $('#objectForm').addEventListener('submit', saveSceneObject)
@@ -5491,14 +5531,31 @@ $('#spectralModel').addEventListener('change', () => {
   renderModelParameters(fileName)
   renderMaterialSpectrumValueFields(reflectance, transmittance)
 })
-document.querySelector("#spectralPreset").addEventListener("change", () => { applySpectrumPreset(); renderMeshMaterialRows() })
-document.querySelector("#thermalPreset").addEventListener("change", () => { applyThermalPreset(); renderMeshMaterialRows() })
+document.querySelector("#spectralPreset").addEventListener("change", () => {
+  applySpectrumPreset()
+  $$('.mesh-spectrum').forEach((select) => { select.value = $('#spectralPreset').value })
+})
+document.querySelector("#thermalPreset").addEventListener("change", () => {
+  applyThermalPreset()
+  $$('.mesh-thermal').forEach((select) => { select.value = $('#thermalPreset').value })
+})
 $('#materialObjectType').addEventListener('change', () => {
   const type = $('#materialObjectType').value
+  if (type === 'SolarPanel') {
+    $('#spectralPreset').value = '__new__'
+    $('#thermalPreset').value = '__new__'
+  }
   $('#spectralModel').value = type === 'Vegetation' ? 'Prospect' : type === 'Soil' ? 'BSM' : 'custom'
   renderModelParameters(); renderSpectrumPresetOptions(); renderThermalPresetOptions(); renderPhysicalPresetOptions(); renderMeshMaterialRows()
 })
-$('#physicalMaterialPreset').addEventListener('change', () => { renderPhysicalParameters(); renderMeshMaterialRows() })
+$('#physicalMaterialPreset').addEventListener('change', () => {
+  renderPhysicalParameters()
+  const materialName = $('#physicalMaterialPreset').value
+  $$('.mesh-physical').forEach((select) => { select.value = materialName })
+  if (state.config.materials.find((item) => item.name === materialName)?.energyModel === 'photovoltaic') {
+    $$('.mesh-canopy').forEach((select) => { select.value = 'rigid_body' })
+  }
+})
 $('#closePresetBtn').addEventListener('click', hidePresetDialog)
 $('#presetDialog').addEventListener('click', (event) => { if (event.target === $('#presetDialog')) hidePresetDialog() })
 $('#presetKind').addEventListener('change', () => { state.presetPhysicalType = 'Vegetation'; renderPresetParameterFields() })

@@ -1,14 +1,15 @@
 {
-  "version": 4,
+  "version": 5,
   "coordinateSystem": "Y-up",
   "unit": "metre",
-  "categoryOrder": ["建筑", "植被", "作物", "车辆", "船舶", "飞机", "特种车辆", "地表构件", "大型场景"],
+  "categoryOrder": ["建筑", "太阳能设施", "植被", "作物", "车辆", "船舶", "飞机", "特种车辆", "地表构件", "大型场景"],
   "qualityTiers": {
     "typical": "结构与尺度接近真实对象，默认推荐用于场景构建与仿真",
     "simple": "低面数快速占位模型，每类只推荐一个",
     "reference": "卡通、历史或特殊展示资产，不作为默认真实场景资产"
   },
   "defaultSets": {
+    "太阳能设施": { "typical": ["solar_panel_single_tilted", "solar_panel_ground_array", "solar_panel_rooftop_array", "solar_panel_vertical_bifacial"] },
     "植被": { "typical": ["realistic_jacaranda_tree", "typical_mature_fir", "typical_mature_pine", "typical_street_tree"], "simple": "tree_pine" },
     "车辆": { "typical": ["typical_modern_sedan", "typical_modern_suv", "typical_modern_city_bus", "realistic_milk_truck"], "simple": "city_sedan" },
     "船舶": { "typical": ["typical_modern_container_ship", "typical_modern_bulk_carrier", "typical_modern_cruise_liner"], "simple": "patrol_boat" }
@@ -17,6 +18,10 @@
     { "id": "house_a", "label": "坡屋顶住宅 A", "category": "建筑", "objectType": "Building", "file": "building/house_a.obj", "dimensions": [10.917, 7, 8.634], "triangles": 2348, "sourcePack": "City Kit (Suburban)", "license": "CC0-1.0" },
     { "id": "house_b", "label": "坡屋顶住宅 B", "category": "建筑", "objectType": "Building", "file": "building/house_b.obj", "dimensions": [14.102, 8, 9.936], "triangles": 1540, "sourcePack": "City Kit (Suburban)", "license": "CC0-1.0" },
     { "id": "house_c", "label": "独栋住宅 C", "category": "建筑", "objectType": "Building", "file": "building/house_c.obj", "dimensions": [8.78, 6.5, 6.271], "triangles": 2280, "sourcePack": "City Kit (Suburban)", "license": "CC0-1.0" },
+    { "id": "solar_panel_single_tilted", "label": "单块倾斜单晶硅太阳能板", "category": "太阳能设施", "objectType": "Building", "file": "solar/solar_panel_single_tilted.obj", "dimensions": [1.1, 1.295, 2.3], "triangles": 36, "sourcePack": "StreamSim procedural", "license": "Project", "qualityTier": "typical", "recommended": true, "usage": "both", "spectralPreset": "pv_opaque", "thermalPreset": "pv_temperature", "materialPreset": "pv_panel_mono" },
+    { "id": "solar_panel_ground_array", "label": "地面固定式太阳能板阵列", "category": "太阳能设施", "objectType": "Building", "file": "solar/solar_panel_ground_array.obj", "dimensions": [2.2, 2.06, 9.2], "triangles": 60, "sourcePack": "StreamSim procedural", "license": "Project", "qualityTier": "typical", "recommended": true, "usage": "both", "spectralPreset": "pv_opaque", "thermalPreset": "pv_temperature", "materialPreset": "pv_panel_poly" },
+    { "id": "solar_panel_rooftop_array", "label": "屋顶低倾角太阳能板阵列", "category": "太阳能设施", "objectType": "Building", "file": "solar/solar_panel_rooftop_array.obj", "dimensions": [3.6, 0.22, 6.9], "triangles": 36, "sourcePack": "StreamSim procedural", "license": "Project", "qualityTier": "typical", "recommended": true, "usage": "both", "spectralPreset": "pv_opaque", "thermalPreset": "pv_temperature", "materialPreset": "pv_panel_mono" },
+    { "id": "solar_panel_vertical_bifacial", "label": "垂直双面太阳能板阵列", "category": "太阳能设施", "objectType": "Building", "file": "solar/solar_panel_vertical_bifacial.obj", "dimensions": [1.2, 2.65, 7.2], "triangles": 48, "sourcePack": "StreamSim procedural", "license": "Project", "qualityTier": "typical", "recommended": true, "usage": "both", "spectralPreset": "pv_opaque", "thermalPreset": "pv_temperature", "materialPreset": "pv_panel_bifacial" },
     { "id": "tree_broadleaf", "label": "常绿阔叶树", "category": "植被", "objectType": "Vegetation", "file": "vegetation/tree_broadleaf.obj", "dimensions": [3.537, 8, 3.063], "triangles": 114, "sourcePack": "Nature Kit", "license": "CC0-1.0" },
     { "id": "tree_oak", "label": "橡树", "category": "植被", "objectType": "Vegetation", "file": "vegetation/tree_oak.obj", "dimensions": [4.701, 9, 5.429], "triangles": 196, "sourcePack": "Nature Kit", "license": "CC0-1.0" },
     { "id": "tree_pine", "label": "简易松树", "category": "植被", "objectType": "Vegetation", "file": "vegetation/tree_pine.obj", "dimensions": [3.03, 12, 3.075], "triangles": 78, "sourcePack": "Nature Kit", "license": "CC0-1.0", "qualityTier": "simple", "recommended": true, "usage": "simulation" },

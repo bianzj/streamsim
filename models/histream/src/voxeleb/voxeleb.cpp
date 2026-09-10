@@ -704,7 +704,8 @@ void Voxeleb::outputVoxel(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<F
                 (static_cast<float>(link.voxelId.z) + 0.5f) * scale
             };
             binary.write(reinterpret_cast<const char*>(position), sizeof(position));
-            float values[3];
+            float values[5]{};
+            size_t valueCount = 3;
             if (type == "radiation") {
                 values[0] = netRadiation[voxel].diffuseVrad +
                             sunlit * netRadiation[voxel].directVrad;
@@ -713,11 +714,14 @@ void Voxeleb::outputVoxel(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<F
                 values[2] = sunlit * (heatFlux[voxel].Hsunlit + heatFlux[voxel].LEsunlit + heatFlux[voxel].Gsunlit) +
                             shaded * (heatFlux[voxel].Hshaded + heatFlux[voxel].LEshaded + heatFlux[voxel].Gshaded);
             } else {
+                valueCount = 5;
                 values[0] = sunlit * heatFlux[voxel].LEsunlit + shaded * heatFlux[voxel].LEshaded;
                 values[1] = sunlit * heatFlux[voxel].Hsunlit + shaded * heatFlux[voxel].Hshaded;
                 values[2] = sunlit * heatFlux[voxel].Gsunlit + shaded * heatFlux[voxel].Gshaded;
+                values[3] = sunlit * heatFlux[voxel].GPPsunlit + shaded * heatFlux[voxel].GPPshaded;
+                values[4] = sunlit * heatFlux[voxel].NPPsunlit + shaded * heatFlux[voxel].NPPshaded;
             }
-            binary.write(reinterpret_cast<const char*>(values), sizeof(values));
+            binary.write(reinterpret_cast<const char*>(values), valueCount * sizeof(float));
             if (writeSoilProfile) {
                 float layerTemperatures[TLASTNUM];
                 if (isProfileSoilVoxel(voxel)) {
@@ -753,7 +757,8 @@ void Voxeleb::outputVoxel(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<F
                  << "  \"dataFile\": \"" << binaryPath.filename().string() << "\",\n"
                  << "  \"dataType\": \"float32-little-endian\",\n"
                  << "  \"layout\": \"voxel-interleaved\",\n"
-                 << "  \"recordFloats\": " << (writeSoilProfile ? 6 + TLASTNUM : 6) << ",\n"
+                 << "  \"recordFloats\": "
+                 << ((type == "energy" ? 8 : 6) + (writeSoilProfile ? TLASTNUM : 0)) << ",\n"
                  << "  \"positionOffsets\": [0,1,2],\n"
                  << "  \"fields\": ";
         if (type == "radiation") {
@@ -763,18 +768,26 @@ void Voxeleb::outputVoxel(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<F
         } else {
             metadata << "[{\"id\":\"latentHeat\",\"label\":\"潜热 [W m⁻²]\",\"offset\":3},"
                         "{\"id\":\"sensibleHeat\",\"label\":\"显热 [W m⁻²]\",\"offset\":4},"
-                        "{\"id\":\"surfaceHeatFlux\",\"label\":\"表面热通量 [W m⁻²]\",\"offset\":5}]";
+                        "{\"id\":\"surfaceHeatFlux\",\"label\":\"表面热通量 [W m⁻²]\",\"offset\":5},"
+                        "{\"id\":\"gpp\",\"label\":\"GPP [μmol CO₂ m⁻²叶面积 s⁻¹]\",\"offset\":6},"
+                        "{\"id\":\"npp\",\"label\":\"NPP [μmol CO₂ m⁻²叶面积 s⁻¹]\",\"offset\":7}]";
             if (writeSoilProfile) {
                 metadata << ",\n  \"soilProfile\": {\n"
                          << "    \"layerCount\": " << TLASTNUM << ",\n"
                          << "    \"temperatureUnit\": \"degC\",\n"
                          << "    \"depthUnit\": \"m\",\n"
                          << "    \"depths\": [0,0.02,0.04,0.10,0.20,0.40,0.60,1.00],\n"
-                         << "    \"offsets\": [6,7,8,9,10,11,12,13],\n"
+                         << "    \"offsets\": [8,9,10,11,12,13,14,15],\n"
                          << "    \"aggregation\": \"actual-soil-column\",\n"
                          << "    \"lowerBoundary\": \"material-Tsoil-at-1m\"\n"
                          << "  }";
             }
+            metadata << ",\n  \"carbonConvention\": {\n"
+                     << "    \"spatialBasis\": \"leaf-area\",\n"
+                     << "    \"unit\": \"umol CO2 m-2 leaf s-1\",\n"
+                     << "    \"gpp\": \"gross leaf photosynthesis Ag\",\n"
+                     << "    \"npp\": \"net leaf assimilation Ag-Rd; excludes stem and root respiration\"\n"
+                     << "  }";
             metadata << "\n}\n";
         }
         std::cout << "PROCESS\t" << metadataPath.string() << std::endl;
