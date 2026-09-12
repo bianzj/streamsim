@@ -368,6 +368,33 @@ html, body, #app { background: var(--bg); color: var(--text); }
 .engine-state > span.ready { box-shadow: 0 0 8px rgba(36, 111, 211, .30); }
 .viewport-panel { background: radial-gradient(circle at 50% 42%, #ffffff 0, #e7eef6 72%); }
 .viewport-toolbar { background: rgba(255, 255, 255, .88); border-color: var(--border); box-shadow: 0 8px 20px rgba(47, 72, 108, .10); }
+.viewport-draw-button { height: 28px; display: inline-flex; align-items: center; gap: 5px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: #536a82; font-size: 10px; font-weight: 700; cursor: pointer; white-space: nowrap; }
+.viewport-draw-button svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.7; }
+.viewport-draw-button:hover { color: var(--text); background: var(--panel-3); }
+.viewport-draw-button.active { color: #1768c4; background: rgba(36, 111, 211, .12); box-shadow: inset 0 0 0 1px rgba(36, 111, 211, .26); }
+.viewport-draw-button:disabled { opacity: .45; cursor: not-allowed; }
+.scene-object-tools { position: relative; display: flex; align-items: center; gap: 3px; }
+.scene-object-tools-trigger::after { content: ''; width: 0; height: 0; margin-left: 2px; border: 3px solid transparent; border-top-color: currentColor; transform: translateY(2px); }
+.scene-object-tools-menu { position: static; display: flex; align-items: center; gap: 3px; }
+.scene-object-tools-menu[hidden] { display: none; }
+.scene-object-tools-menu .viewport-draw-button { width: 100%; justify-content: flex-start; }
+.scene-object-submenu-group { position: relative; }
+.scene-object-submenu-trigger { height: 28px; display: flex; align-items: center; gap: 7px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: #536a82; font-size: 10px; font-weight: 750; cursor: pointer; }
+.scene-object-submenu-trigger:hover, .scene-object-submenu-trigger.open { color: #1768c4; background: rgba(36,111,211,.09); }
+.scene-object-submenu-trigger i { width: 0; height: 0; border: 3px solid transparent; border-top-color: currentColor; transform: translateY(2px); }
+.scene-object-submenu { position: absolute; z-index: 12; top: calc(100% + 8px); left: 0; display: grid; min-width: 150px; gap: 2px; padding: 5px; border: 1px solid var(--border); border-radius: 8px; background: rgba(255,255,255,.97); box-shadow: 0 12px 30px rgba(35,55,84,.18); backdrop-filter: blur(12px); }
+.scene-object-submenu[hidden] { display: none; }
+.transform-mode-buttons { display: flex; gap: 2px; padding-left: 2px; }
+.transform-mode-buttons[hidden] { display: none; }
+.transform-mode-buttons button { height: 26px; padding: 0 7px; border: 0; border-radius: 5px; background: transparent; color: #62788e; font-size: 9px; font-weight: 700; cursor: pointer; }
+.transform-mode-buttons button:hover { color: var(--text); background: var(--panel-3); }
+.transform-mode-buttons button.active { color: #1768c4; background: rgba(36,111,211,.12); }
+.scene-object-submenu .transform-mode-buttons { display: grid; grid-template-columns: 1fr; padding: 0; }
+.scene-object-submenu .transform-mode-buttons button { width: 100%; padding-left: 28px; text-align: left; }
+.viewport-panel.editing-object #viewport canvas { cursor: pointer; }
+.viewport-draw-hint { position: absolute; top: 62px; left: 50%; z-index: 4; transform: translateX(-50%); max-width: min(620px, calc(100% - 40px)); padding: 8px 12px; border: 1px solid rgba(36, 111, 211, .26); border-radius: 8px; background: rgba(255, 255, 255, .94); box-shadow: 0 8px 24px rgba(35, 55, 84, .16); color: #254766; font-size: 11px; font-weight: 650; pointer-events: none; text-align: center; white-space: nowrap; }
+.viewport-draw-hint[hidden] { display: none; }
+.viewport-panel.drawing-geometry #viewport canvas { cursor: crosshair; }
 .segmented button { color: var(--muted); }
 .segmented button.active { background: var(--panel-3); color: var(--green); }
 .viewport-info { color: rgba(79, 101, 128, .72); }

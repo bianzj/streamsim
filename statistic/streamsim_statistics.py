@@ -63,6 +63,27 @@ class StructureData:
     fields: list[FieldData]
     element_count: int
     metadata: dict
+    components: np.ndarray | None = None
+    source_indices: np.ndarray | None = None
+
+
+COMPONENTS = {"soil": (1, "土壤/背景"), "vegetation": (2, "植被"), "building": (3, "建筑")}
+COMPONENT_LABELS = {0: "未分类", 1: "土壤/背景", 2: "植被", 3: "建筑", 4: "光伏", 5: "水体"}
+ENERGY_FIELDS = {"temperature", "shortwaveRadiation", "longwaveRadiation", "netRadiation",
+                 "sensibleHeat", "latentHeat", "surfaceHeatFlux", "storageHeat"}
+
+
+def read_components(path: Path, metadata: dict, count: int) -> np.ndarray | None:
+    name = metadata.get("componentFile")
+    if not name:
+        return None
+    source = (path.parent / str(name)).resolve()
+    if source.stat().st_size != count:
+        raise ValueError(f"组分标识数量与几何不一致：{source}")
+    values = np.fromfile(source, dtype=np.uint8)
+    if not np.isin(values, list(COMPONENT_LABELS)).all():
+        raise ValueError("组分文件包含未知编码")
+    return values
 
 
 def safe_name(value: str) -> str:
@@ -590,7 +611,16 @@ def voxel_structure(metadata_path: Path, metadata: dict) -> StructureData:
             identifier = f"soil_temperature_{str(depth).replace('.', 'p')}m"
             fields.append(FieldData(identifier, f"土壤温度 {depth} m [degC]",
                                     np.asarray(records[:, int(offset)], dtype=np.float64)))
-    return StructureData(metadata_path, "voxel", positions, fields, count, metadata)
+    components = None
+    if "componentOffset" in metadata:
+        offset = int(metadata["componentOffset"])
+        if not 0 <= offset < records.shape[1]:
+            raise ValueError("componentOffset 超出记录范围")
+        raw = records[:, offset]
+        if not np.isin(raw, list(COMPONENT_LABELS)).all():
+            raise ValueError("体元组分字段包含无效编码")
+        components = np.asarray(raw, dtype=np.uint8)
+    return StructureData(metadata_path, "voxel", positions, fields, count, metadata, components)
 
 
 def facet_process_structure(metadata_path: Path, metadata: dict,
@@ -618,7 +648,10 @@ def facet_process_structure(metadata_path: Path, metadata: dict,
             selected = np.nanmean(values, axis=1)
         identifier = str(field.get("id", f"field_{field['offset']}"))
         fields.append(FieldData(identifier, f"{field.get('label', identifier)} ({side})", selected))
-    return StructureData(metadata_path, "facet", centers, fields, facet_count, metadata)
+    components = read_components(metadata_path, metadata, facet_count)
+    if components is None:
+        components = read_components(geometry_path, geometry, facet_count)
+    return StructureData(metadata_path, "facet", centers, fields, facet_count, metadata, components)
 
 
 def facet_result_structure(path: Path, payload: dict, side: str) -> StructureData:
@@ -642,7 +675,8 @@ def facet_result_structure(path: Path, payload: dict, side: str) -> StructureDat
             selected = surfaces[:, 0] if side == "front" else surfaces[:, 1] if side == "back" \
                 else np.nanmean(surfaces, axis=1)
             fields.append(FieldData(key, f"{key} ({side})", selected))
-    return StructureData(path, "facet", centers, fields, facet_count, payload)
+    return StructureData(path, "facet", centers, fields, facet_count, payload,
+                         read_components(path, payload, facet_count))
 
 
 def read_structure(path: Path, facet_side: str) -> StructureData:
@@ -665,22 +699,76 @@ def write_point_csv(destination: Path, structure: StructureData,
     path = destination / "sample_points.csv"
     with path.open("w", encoding="utf-8-sig", newline="") as stream:
         writer = csv.writer(stream)
-        writer.writerow(("source_index", "x", "y", "z", *(field.identifier for field in fields)))
+        writer.writerow(("source_index", "x", "y", "z", "component", *(field.identifier for field in fields)))
         for index in indices:
             writer.writerow(
                 (
-                    int(index),
+                    int(structure.source_indices[index]) if structure.source_indices is not None else int(index),
                     compact_number(structure.positions[index, 0]),
                     compact_number(structure.positions[index, 1]),
                     compact_number(structure.positions[index, 2]),
+                    COMPONENT_LABELS[int(structure.components[index])] if structure.components is not None else "未分类",
                     *(compact_number(field.values[index]) for field in fields),
                 )
             )
     return path
 
 
+def analyze_components(structure: StructureData, destination: Path,
+                       components: Sequence[str], maximum_points: int) -> list[Path]:
+    """All-element, unweighted distributions; never infer identity from geometry or temperature."""
+    output = destination / "components"
+    output.mkdir(parents=True, exist_ok=True)
+    combined = output / "component_statistics.csv"
+    files = [combined]
+    fields = [field for field in structure.fields if field.identifier in ENERGY_FIELDS]
+    # Native surface temperatures are K. Export a convenient Celsius field,
+    # while leaving the generic statistics in their original units.
+    fields = [FieldData("temperatureC", "温度 [℃]", field.values - 273.15)
+              if field.identifier == "temperature" and ("[K]" in field.label or structure.kind == "facet")
+              else field for field in fields]
+    with combined.open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(("component", "component_label", "field_id", "field_label", *STAT_COLUMNS))
+        for name in components:
+            code, label = COMPONENTS[name]
+            indices = np.flatnonzero(structure.components == code)
+            folder = output / name
+            folder.mkdir(parents=True, exist_ok=True)
+            selected = [FieldData(field.identifier, field.label, field.values[indices]) for field in fields]
+            rows = [(field.identifier, field.label, calculate_statistics(field.values)) for field in selected]
+            for identifier, field_label, stats in rows:
+                writer.writerow((name, label, identifier, field_label, *(compact_number(stats[k]) for k in STAT_COLUMNS)))
+            files.extend(write_statistics(folder, structure.source, label, rows, structure.metadata))
+            subset = StructureData(structure.source, structure.kind, structure.positions[indices], selected,
+                                   len(indices), structure.metadata, structure.components[indices], indices)
+            files.append(write_point_csv(folder, subset, selected, maximum_points))
+            for field in selected:
+                if not np.isfinite(field.values).any():
+                    continue
+                histogram = folder / f"{safe_name(field.identifier)}_histogram.png"
+                plot = folder / f"{safe_name(field.identifier)}_3d.png"
+                title = f"{label} - {field.label} - {structure.metadata.get('time', '')}"
+                render_histogram(field.values, histogram, title)
+                files.append(histogram)
+                if (np.isfinite(subset.positions).all(axis=1) & np.isfinite(field.values)).any():
+                    render_structure(subset.positions, field.values, plot, title, maximum_points)
+                    files.append(plot)
+    summary = output / "summary.txt"
+    counts = {label: int(np.count_nonzero(structure.components == code)) for code, label in COMPONENT_LABELS.items()}
+    summary.write_text("按全部有效元素统计；均值不做面积加权，能量字段为通量而非总功率。\n"
+                       "点表与三维图最多按每组抽样；直方图和统计表不抽样。\n"
+                       "光伏、水体和未分类元素不混入土壤/植被/建筑。\n"
+                       + "\n".join(f"{name}: {count}" for name, count in counts.items())
+                       + ("\n当前文件没有温度/能量字段，请选择能量或辐射过程结果。" if not fields else "")
+                       + "\n", encoding="utf-8")
+    files.append(summary)
+    return files
+
+
 def analyze_structure(path: Path, destination: Path, fields_option: str | None,
-                      facet_side: str, maximum_points: int) -> list[Path]:
+                      facet_side: str, maximum_points: int,
+                      components: Sequence[str] = tuple(COMPONENTS)) -> list[Path]:
     structure = read_structure(path, facet_side)
     identifiers = [field.identifier for field in structure.fields]
     selected_indices = parse_selection(fields_option, identifiers)
@@ -688,6 +776,12 @@ def analyze_structure(path: Path, destination: Path, fields_option: str | None,
     rows = [(field.identifier, field.label, calculate_statistics(field.values))
             for field in structure.fields]
     csv_path, txt_path = write_statistics(destination, path, structure.kind, rows, structure.metadata)
+    if components and structure.components is not None and fields_option is None:
+        return [csv_path, txt_path, *analyze_components(structure, destination, components, maximum_points)]
+    if components and structure.components is None:
+        message = "旧结果缺少组分标识，无法按土壤/背景、植被和建筑分类；请用新版引擎重跑并开启过程输出。"
+        (destination / "component_notice.txt").write_text(message + "\n", encoding="utf-8")
+        print(message, file=sys.stderr)
     files = [csv_path, txt_path, write_point_csv(destination, structure, selected, maximum_points)]
     for field in selected:
         name = safe_name(field.identifier)
@@ -730,7 +824,12 @@ def main() -> int:
                         help="面元正反面处理方式，默认 mean")
     parser.add_argument("--max-points", type=int, default=50000,
                         help="CSV 与三维图最大抽样点数，默认 50000")
+    parser.add_argument("--components", default="soil,vegetation,building",
+                        help="分组统计土壤/背景、植被、建筑的温度与能量；none 保留原通用字段/绘图模式")
     args = parser.parse_args()
+    components = [] if args.components == "none" else list(dict.fromkeys(args.components.split(",")))
+    if any(name not in COMPONENTS for name in components):
+        parser.error("--components 只支持 soil,vegetation,building 或 none")
 
     source = args.input.resolve()
     if not source.exists():
@@ -752,7 +851,7 @@ def main() -> int:
                 outputs = analyze_image(path, destination, args.bands)
             else:
                 outputs = analyze_structure(path, destination, args.fields,
-                                            args.facet_side, args.max_points)
+                                            args.facet_side, args.max_points, components)
             succeeded += 1
             print(f"OK  {path}")
             print(f"    {destination} ({len(outputs)} files)")

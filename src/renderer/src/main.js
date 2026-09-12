@@ -4,6 +4,7 @@ import { loadXmlScene, updateSceneDynamics } from './scene-loader.js'
 import { createDefaultProject, createMaterialPresets, MAX_SENSOR_BANDS, normalizeProject, parseProjectJson, sensorBandValues, sensorCruisePositions, sensorViewAngles, simplifySolarSpectra, stringifyProject } from './project-schema.js'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
+import { TransformControls } from 'three/addons/controls/TransformControls.js'
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js'
 import './styles.css'
 
@@ -54,6 +55,7 @@ const state = {
   platform: 'win32',
   importedObject: null,
   pendingObject: null,
+  drawPlacement: null,
   editingObjectIndex: -1,
   selectedObjectIndex: -1,
   editingAttributeIndex: -1,
@@ -337,6 +339,8 @@ function parseXml(content, mode = state.mode) {
         xmlValue(doc, 'Control periodicNeighborCount', base.control.periodicTraversalCount)
       )))),
       skyboxEnabled: xmlValue(doc, 'Control skyboxEnabled', '0') === '1',
+      facetBackend: ['cpu', 'auto'].includes(xmlValue(doc, 'Control facetBackend', 'gpu').toLowerCase())
+        ? xmlValue(doc, 'Control facetBackend', 'gpu').toLowerCase() : 'gpu',
       radiationSolver: xmlValue(doc, 'Control radiationSolver', base.control.radiationSolver) === 'accelerated'
         ? 'accelerated' : 'traditional',
       gpu: Number(xmlValue(doc, 'Control GPU', base.control.gpu)),
@@ -478,6 +482,15 @@ function setRunning(running) {
   $('#runBtn').disabled = running
   $('#stopBtn').disabled = !running
   $$('#modeGrid button').forEach((button) => { button.disabled = running })
+  $('#drawRegionBtn').disabled = running
+  $('#drawBoxBtn').disabled = running
+  $('#editObjectBtn').disabled = running
+  $('#sceneObjectToolsBtn').disabled = running
+  $('#sceneObjectModifyBtn').disabled = running
+  $('#sceneObjectAddBtn').disabled = running
+  if (running) closeSceneObjectToolsMenu()
+  if (running && geometryDraw.mode) cancelGeometryDraw()
+  if (running && objectEdit.enabled) setObjectEditEnabled(false)
   if (running) {
     setEngineState('模拟运行中', `PID ${state.pid || '...'}`, 'running')
     renderRunProgress()
@@ -514,6 +527,10 @@ controls.dampingFactor = 0.075
 controls.maxPolarAngle = Math.PI * 0.48
 controls.minDistance = 4
 controls.maxDistance = 320
+const transformControls = new TransformControls(camera, renderer.domElement)
+transformControls.setSize(.82)
+transformControls.space = 'world'
+scene.add(transformControls.getHelper())
 scene.add(new THREE.HemisphereLight(0xe8f1fb, 0xb8c8d8, 1.65))
 const sun = new THREE.DirectionalLight(0xfff7e8, 3.2)
 sun.castShadow = true
@@ -533,6 +550,475 @@ let sunVisualization = null
 let currentStyle = 'solid'
 let resultViewer = null
 let typicalSkyboxTexture = null
+const geometryDraw = {
+  mode: null,
+  phase: 'idle',
+  start: null,
+  current: null,
+  height: 0,
+  initialHeight: 0,
+  heightAnchorY: 0,
+  pointerId: null,
+  preview: null
+}
+const geometryDrawRaycaster = new THREE.Raycaster()
+const geometryDrawPointer = new THREE.Vector2()
+const objectEditRaycaster = new THREE.Raycaster()
+const objectEditPointer = new THREE.Vector2()
+const objectEdit = {
+  enabled: false,
+  selected: null,
+  selectionBox: null,
+  pointerStart: null,
+  transformStartScale: new THREE.Vector3(),
+  saving: false,
+  savePending: false
+}
+
+function geometryDrawHint(text = '') {
+  const hint = $('#viewportDrawHint')
+  hint.hidden = !text
+  hint.textContent = text
+}
+
+function closeSceneObjectToolsMenu() {
+  const menu = $('#sceneObjectToolsMenu')
+  const button = $('#sceneObjectToolsBtn')
+  if (menu) menu.hidden = true
+  button?.setAttribute('aria-expanded', 'false')
+  for (const [triggerId, menuId] of [['sceneObjectModifyBtn', 'sceneObjectModifyMenu'], ['sceneObjectAddBtn', 'sceneObjectAddMenu']]) {
+    const trigger = $(`#${triggerId}`)
+    const submenu = $(`#${menuId}`)
+    if (submenu) submenu.hidden = true
+    trigger?.classList.remove('open')
+    trigger?.setAttribute('aria-expanded', 'false')
+  }
+}
+
+function toggleSceneObjectSubmenu(kind) {
+  const selectedTrigger = $(`#sceneObject${kind}Btn`)
+  const selectedMenu = $(`#sceneObject${kind}Menu`)
+  const opening = selectedMenu.hidden
+  for (const [triggerId, menuId] of [['sceneObjectModifyBtn', 'sceneObjectModifyMenu'], ['sceneObjectAddBtn', 'sceneObjectAddMenu']]) {
+    const trigger = $(`#${triggerId}`)
+    const submenu = $(`#${menuId}`)
+    const active = opening && trigger === selectedTrigger
+    submenu.hidden = !active
+    trigger.classList.toggle('open', active)
+    trigger.setAttribute('aria-expanded', String(active))
+  }
+}
+
+function updateSceneObjectToolsButton() {
+  $('#sceneObjectToolsBtn')?.classList.toggle('active', Boolean(objectEdit.enabled || geometryDraw.mode))
+}
+
+function clearGeometryDrawPreview() {
+  if (!geometryDraw.preview) return
+  scene.remove(geometryDraw.preview)
+  disposeObject(geometryDraw.preview)
+  geometryDraw.preview = null
+}
+
+function geometryDrawSize() {
+  if (!geometryDraw.start || !geometryDraw.current) return null
+  return {
+    sizeX: Math.abs(geometryDraw.current.north - geometryDraw.start.north),
+    sizeZ: Math.abs(geometryDraw.current.east - geometryDraw.start.east),
+    centerX: (geometryDraw.current.north + geometryDraw.start.north) / 2,
+    centerZ: (geometryDraw.current.east + geometryDraw.start.east) / 2,
+    worldX: (geometryDraw.current.worldX + geometryDraw.start.worldX) / 2,
+    worldZ: (geometryDraw.current.worldZ + geometryDraw.start.worldZ) / 2,
+    worldY: Math.max(geometryDraw.current.worldY, geometryDraw.start.worldY)
+  }
+}
+
+function renderGeometryDrawPreview() {
+  clearGeometryDrawPreview()
+  const size = geometryDrawSize()
+  if (!size || size.sizeX <= 0 || size.sizeZ <= 0) return
+  const displayScale = Number(world.userData.displayScale) || 1
+  const width = size.sizeX * displayScale
+  const depth = size.sizeZ * displayScale
+  const height = geometryDraw.mode === 'box' ? Math.max(.02, geometryDraw.height * displayScale) : Math.max(.018, displayScale * .04)
+  const geometry = new THREE.BoxGeometry(width, height, depth)
+  const group = new THREE.Group()
+  const fill = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
+    color: geometryDraw.mode === 'box' ? 0x2f81d4 : 0x2ba66d,
+    transparent: true, opacity: .24, depthTest: false, depthWrite: false
+  }))
+  const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geometry), new THREE.LineBasicMaterial({
+    color: geometryDraw.mode === 'box' ? 0x1768c4 : 0x16845a,
+    transparent: true, opacity: .96, depthTest: false, depthWrite: false
+  }))
+  fill.renderOrder = 80
+  edges.renderOrder = 81
+  group.add(fill, edges)
+  group.position.set(size.worldX, size.worldY + height / 2 + .025, size.worldZ)
+  geometryDraw.preview = group
+  scene.add(group)
+  const dimensions = geometryDraw.mode === 'box'
+    ? `${size.sizeX.toFixed(2)} × ${geometryDraw.height.toFixed(2)} × ${size.sizeZ.toFixed(2)} m`
+    : `${size.sizeX.toFixed(2)} × ${size.sizeZ.toFixed(2)} m`
+  geometryDrawHint(geometryDraw.phase === 'height'
+    ? `尺寸 ${dimensions}；移动鼠标调整高度，单击确认，Esc 或右键取消`
+    : `尺寸 ${dimensions}；拖动确定范围，Esc 或右键取消`)
+}
+
+function cancelGeometryDraw(message = '') {
+  clearGeometryDrawPreview()
+  geometryDraw.mode = null
+  geometryDraw.phase = 'idle'
+  geometryDraw.start = null
+  geometryDraw.current = null
+  geometryDraw.pointerId = null
+  controls.enabled = true
+  $('.viewport-panel')?.classList.remove('drawing-geometry')
+  $('#drawRegionBtn')?.classList.remove('active')
+  $('#drawBoxBtn')?.classList.remove('active')
+  updateSceneObjectToolsButton()
+  geometryDrawHint('')
+  if (message) toast('场景绘制', message)
+}
+
+function startGeometryDraw(mode) {
+  if (!state.inputPath) { toast('无法绘制对象', '请先新建或打开工程', 'error'); return }
+  if (state.running) { toast('无法绘制对象', '请先停止当前模拟', 'error'); return }
+  if (geometryDraw.mode === mode) { cancelGeometryDraw(); return }
+  if (objectEdit.enabled) setObjectEditEnabled(false)
+  cancelGeometryDraw()
+  closeSceneObjectToolsMenu()
+  geometryDraw.mode = mode
+  geometryDraw.phase = 'ready'
+  controls.enabled = false
+  $('.viewport-panel')?.classList.add('drawing-geometry')
+  $(`#${mode === 'box' ? 'drawBoxBtn' : 'drawRegionBtn'}`)?.classList.add('active')
+  updateSceneObjectToolsButton()
+  geometryDrawHint(mode === 'box'
+    ? '在地面拖出立方体底面；松开后移动鼠标设置高度，再单击确认'
+    : '在地面按住左键拖出矩形区域；松开后直接生成 OBJ')
+}
+
+function geometryPointFromPointer(event) {
+  const bounds = renderer.domElement.getBoundingClientRect()
+  if (!bounds.width || !bounds.height) return null
+  geometryDrawPointer.set(
+    (event.clientX - bounds.left) / bounds.width * 2 - 1,
+    -(event.clientY - bounds.top) / bounds.height * 2 + 1
+  )
+  geometryDrawRaycaster.setFromCamera(geometryDrawPointer, camera)
+  const ground = world.children.find((child) => child.userData.kind === 'ground')
+  const hit = ground ? geometryDrawRaycaster.intersectObject(ground, false)[0] : null
+  if (!hit) return null
+  const config = state.config
+  const scale = Number(world.userData.displayScale) || 1
+  const sceneX = Math.max(.1, Number(config.scene.x) || 60)
+  const sceneZ = Math.max(.1, Number(config.scene.y) || 60)
+  const offsetX = Number(config.scene.offsetX) || 0
+  const offsetZ = Number(config.scene.offsetZ) || 0
+  const snap = Math.max(.01, Number(config.scene.voxel) || 1)
+  const snapWithin = (value, maximum) => THREE.MathUtils.clamp(Math.round(value / snap) * snap, 0, maximum)
+  const localNorth = snapWithin(hit.point.x / scale + sceneX / 2, sceneX)
+  const localEast = snapWithin(hit.point.z / scale + sceneZ / 2, sceneZ)
+  return {
+    north: localNorth + offsetX,
+    east: localEast + offsetZ,
+    worldX: (localNorth - sceneX / 2) * scale,
+    worldZ: (localEast - sceneZ / 2) * scale,
+    worldY: hit.point.y
+  }
+}
+
+function finishGeometryDraw() {
+  const size = geometryDrawSize()
+  const mode = geometryDraw.mode
+  if (!size || size.sizeX <= 0 || size.sizeZ <= 0) {
+    clearGeometryDrawPreview()
+    geometryDraw.phase = 'ready'
+    geometryDrawHint('绘制范围太小，请重新拖动')
+    return
+  }
+  const form = $('#geometryForm')
+  const index = (state.config?.objects?.items?.length || 0) + 1
+  const verticalOffset = Number(state.config?.scene?.offsetY) || 0
+  form.reset()
+  form.elements.geometryName.value = `${mode === 'box' ? 'draw_box' : 'draw_region'}_${index}`
+  form.elements.geometryShape.value = 'cube'
+  form.elements.geometryMode.value = mode === 'box' ? 'surface' : 'water'
+  form.elements.geometrySizeX.value = size.sizeX
+  form.elements.geometrySizeY.value = mode === 'box' ? geometryDraw.height : Math.max(.01, Number(state.config?.scene?.voxel) || 1)
+  form.elements.geometrySizeZ.value = size.sizeZ
+  form.elements.geometryDetail.value = 1
+  if (mode === 'box') {
+    state.drawPlacement = { north: size.centerX, east: size.centerZ, height: verticalOffset }
+  } else {
+    form.elements.waterPositionX.value = size.centerX
+    form.elements.waterPositionY.value = size.centerZ
+    form.elements.waterPositionZ.value = verticalOffset
+    form.elements.waterOffsetX.value = 0
+    form.elements.waterOffsetY.value = 0
+    form.elements.waterOffsetZ.value = 0
+  }
+  cancelGeometryDraw()
+  updateGeometryDialog()
+  form.requestSubmit()
+}
+
+function onGeometryDrawPointerDown(event) {
+  if (!geometryDraw.mode || event.button !== 0) return
+  event.preventDefault()
+  event.stopPropagation()
+  if (geometryDraw.phase === 'height') { finishGeometryDraw(); return }
+  const point = geometryPointFromPointer(event)
+  if (!point) return
+  geometryDraw.phase = 'base'
+  geometryDraw.start = point
+  geometryDraw.current = point
+  geometryDraw.pointerId = event.pointerId
+  renderer.domElement.setPointerCapture?.(event.pointerId)
+  renderGeometryDrawPreview()
+}
+
+function onGeometryDrawPointerMove(event) {
+  if (!geometryDraw.mode) return
+  if (geometryDraw.phase === 'height') {
+    const sceneHeight = Math.max(.1, Number(state.config?.scene?.height) || 20)
+    const snap = Math.max(.01, Number(state.config?.scene?.voxel) || 1)
+    const raw = geometryDraw.initialHeight + (geometryDraw.heightAnchorY - event.clientY) * sceneHeight / Math.max(120, viewport.clientHeight)
+    geometryDraw.height = THREE.MathUtils.clamp(Math.max(snap, Math.round(raw / snap) * snap), snap, sceneHeight)
+    renderGeometryDrawPreview()
+    return
+  }
+  if (geometryDraw.phase !== 'base' || geometryDraw.pointerId !== event.pointerId) return
+  const point = geometryPointFromPointer(event)
+  if (!point) return
+  geometryDraw.current = point
+  renderGeometryDrawPreview()
+}
+
+function onGeometryDrawPointerUp(event) {
+  if (!geometryDraw.mode || geometryDraw.phase !== 'base' || geometryDraw.pointerId !== event.pointerId) return
+  event.preventDefault()
+  event.stopPropagation()
+  renderer.domElement.releasePointerCapture?.(event.pointerId)
+  geometryDraw.pointerId = null
+  const point = geometryPointFromPointer(event)
+  if (point) geometryDraw.current = point
+  const size = geometryDrawSize()
+  if (!size || size.sizeX <= 0 || size.sizeZ <= 0) {
+    clearGeometryDrawPreview()
+    geometryDraw.phase = 'ready'
+    geometryDrawHint('绘制范围太小，请重新拖动')
+    return
+  }
+  if (geometryDraw.mode === 'region') { finishGeometryDraw(); return }
+  const snap = Math.max(.01, Number(state.config?.scene?.voxel) || 1)
+  const sceneHeight = Math.max(snap, Number(state.config?.scene?.height) || 20)
+  geometryDraw.initialHeight = THREE.MathUtils.clamp(Math.max(snap, Math.max(size.sizeX, size.sizeZ) * .5), snap, sceneHeight)
+  geometryDraw.height = Math.max(snap, Math.round(geometryDraw.initialHeight / snap) * snap)
+  geometryDraw.heightAnchorY = event.clientY
+  geometryDraw.phase = 'height'
+  renderGeometryDrawPreview()
+}
+
+function updateObjectSelectionBox() {
+  if (!objectEdit.selectionBox || !objectEdit.selected) return
+  objectEdit.selectionBox.setFromObject(objectEdit.selected)
+}
+
+function clearObjectSelection(showHint = true) {
+  transformControls.detach()
+  if (objectEdit.selectionBox) {
+    scene.remove(objectEdit.selectionBox)
+    objectEdit.selectionBox.geometry?.dispose?.()
+    objectEdit.selectionBox.material?.dispose?.()
+  }
+  objectEdit.selected = null
+  objectEdit.selectionBox = null
+  if (objectEdit.enabled && showHint) geometryDrawHint('单击选择 OBJ；双击修改物化属性；W/E/R 切换移动、旋转、缩放')
+}
+
+function setObjectTransformMode(mode) {
+  if (!['translate', 'rotate', 'scale'].includes(mode)) return
+  transformControls.setMode(mode)
+  transformControls.showX = mode !== 'rotate'
+  transformControls.showY = true
+  transformControls.showZ = mode !== 'rotate'
+  $$('#transformModeButtons button').forEach((button) => button.classList.toggle('active', button.dataset.transformMode === mode))
+}
+
+function setObjectEditEnabled(enabled) {
+  if (enabled && !state.inputPath) { toast('无法编辑 OBJ', '请先新建或打开工程', 'error'); return }
+  if (enabled && state.running) { toast('无法编辑 OBJ', '请先停止当前模拟', 'error'); return }
+  objectEdit.enabled = Boolean(enabled)
+  if (objectEdit.enabled) {
+    if (geometryDraw.mode) cancelGeometryDraw()
+    setObjectTransformMode(transformControls.mode || 'translate')
+    geometryDrawHint('单击选择 OBJ；双击修改物化属性；W/E/R 切换移动、旋转、缩放')
+  } else {
+    clearObjectSelection(false)
+    geometryDrawHint('')
+  }
+  $('#editObjectBtn')?.classList.toggle('active', objectEdit.enabled)
+  $('.viewport-panel')?.classList.toggle('editing-object', objectEdit.enabled)
+  closeSceneObjectToolsMenu()
+  updateSceneObjectToolsButton()
+}
+
+function projectObjectFromIntersection(intersection) {
+  let object = intersection?.object || null
+  while (object && object !== world) {
+    if (object.userData.projectObject) return object
+    object = object.parent
+  }
+  return null
+}
+
+function objectAtPointer(event) {
+  const bounds = renderer.domElement.getBoundingClientRect()
+  if (!bounds.width || !bounds.height) return null
+  objectEditPointer.set(
+    (event.clientX - bounds.left) / bounds.width * 2 - 1,
+    -(event.clientY - bounds.top) / bounds.height * 2 + 1
+  )
+  objectEditRaycaster.setFromCamera(objectEditPointer, camera)
+  const roots = world.children.filter((child) => child.userData.projectObject)
+  for (const intersection of objectEditRaycaster.intersectObjects(roots, true)) {
+    const object = projectObjectFromIntersection(intersection)
+    if (object) return object
+  }
+  return null
+}
+
+function selectObjectForEditing(object) {
+  if (!object) { clearObjectSelection(); return }
+  const itemIndex = Number(object.userData.projectObjectIndex)
+  const item = state.config?.objects?.items?.[itemIndex]
+  if (!item) return
+  if (item.movement?.enabled) {
+    toast('暂时不能移动该 OBJ', '请先在对象设置中关闭随机移动', 'error')
+    return
+  }
+  clearObjectSelection(false)
+  objectEdit.selected = object
+  objectEdit.selectionBox = new THREE.BoxHelper(object, 0x1768c4)
+  objectEdit.selectionBox.material.depthTest = false
+  objectEdit.selectionBox.material.transparent = true
+  objectEdit.selectionBox.material.opacity = .9
+  objectEdit.selectionBox.renderOrder = 90
+  scene.add(objectEdit.selectionBox)
+  transformControls.attach(object)
+  state.selectedObjectIndex = itemIndex
+  const placementIndex = Number(object.userData.projectPlacementIndex) + 1
+  geometryDrawHint(`${item.name} · 第 ${placementIndex} 个实例；拖动手柄编辑，双击修改物化属性`)
+}
+
+function sceneTerrainHeight(config, north, east) {
+  if (!config?.scene?.terrain) return 0
+  const dem = config.scene.demInfo
+  const width = Math.max(2, Math.round(Number(dem?.terrainWidth) || 0))
+  const height = Math.max(2, Math.round(Number(dem?.terrainHeight) || 0))
+  const values = Array.isArray(dem?.terrainValues) ? dem.terrainValues : []
+  if (values.length !== width * height) return 0
+  const u = THREE.MathUtils.clamp(Number(east) / Math.max(1, Number(config.scene.y)), 0, 1) * (width - 1)
+  const v = (1 - THREE.MathUtils.clamp(Number(north) / Math.max(1, Number(config.scene.x)), 0, 1)) * (height - 1)
+  const x0 = Math.floor(u), y0 = Math.floor(v)
+  const x1 = Math.min(width - 1, x0 + 1), y1 = Math.min(height - 1, y0 + 1)
+  const fallback = Number.isFinite(Number(dem.minimum)) ? Number(dem.minimum) : 0
+  const sample = (column, row) => {
+    const value = Number(values[row * width + column])
+    return Number.isFinite(value) ? value : fallback
+  }
+  const top = THREE.MathUtils.lerp(sample(x0, y0), sample(x1, y0), u - x0)
+  const bottom = THREE.MathUtils.lerp(sample(x0, y1), sample(x1, y1), u - x0)
+  return Math.max(0, THREE.MathUtils.lerp(top, bottom, v - y0) - fallback)
+}
+
+function editedPlacement(object) {
+  const config = state.config
+  const displayScale = Number(world.userData.displayScale) || 1
+  const sceneX = Math.max(.1, Number(config.scene.x) || 60)
+  const sceneY = Math.max(.1, Number(config.scene.y) || 60)
+  const localNorth = object.position.x / displayScale + sceneX / 2
+  const localEast = object.position.z / displayScale + sceneY / 2
+  const initialScale = object.userData.projectInitialScale || object.scale
+  const scaleFactor = Math.max(.01, object.scale.x / Math.max(1e-9, initialScale.x))
+  const original = object.userData.projectPlacement || { scale: 1 }
+  const verticalAnchor = (Number(object.userData.projectVerticalAnchor) || 0) * scaleFactor
+  const round = (value) => Number(Number(value).toFixed(6))
+  let rotation = -THREE.MathUtils.radToDeg(object.rotation.y)
+  rotation = ((rotation % 360) + 360) % 360
+  return {
+    x: round(localNorth + (Number(config.scene.offsetX) || 0)),
+    y: round(localEast + (Number(config.scene.offsetZ) || 0)),
+    z: round((object.position.y - verticalAnchor) / displayScale - sceneTerrainHeight(config, localNorth, localEast) + (Number(config.scene.offsetY) || 0)),
+    scale: round(Math.max(.01, (Number(original.scale) || 1) * scaleFactor)),
+    rotation: round(rotation)
+  }
+}
+
+async function saveEditedObjectTransform(object) {
+  if (!object?.userData?.projectObject || objectEdit.saving) {
+    if (objectEdit.saving) objectEdit.savePending = true
+    return
+  }
+  const itemIndex = Number(object.userData.projectObjectIndex)
+  const placementIndex = Number(object.userData.projectPlacementIndex)
+  const item = state.config?.objects?.items?.[itemIndex]
+  if (!item || !Number.isInteger(placementIndex)) return
+  objectEdit.saving = true
+  try {
+    let points
+    if (item.positionFile) points = parseDistributionPointsText((await api.readText(item.positionFile)).content)
+    else points = generateDistribution(item.distribution || { ...defaultDistribution(item), mode: 'single' })
+    if (!points[placementIndex]) throw new Error(`找不到第 ${placementIndex + 1} 个实例的位置记录`)
+    const placement = editedPlacement(object)
+    points[placementIndex] = placement
+    const saved = await api.saveDistribution({ path: item.positionFile, name: item.name, instances: points })
+    item.positionFile = saved.path
+    item.distribution = {
+      ...defaultDistribution(item), mode: 'manual', basis: 'count', count: points.length,
+      points: distributionPointsText(points), offsetX: 0, offsetY: 0, offsetZ: 0
+    }
+    item.instanceCount = points.length
+    object.userData.projectPlacement = { ...placement }
+    object.userData.projectInitialScale = object.scale.clone()
+    object.userData.projectVerticalAnchor = (Number(object.userData.projectVerticalAnchor) || 0) * Math.max(.01, object.scale.x / Math.max(1e-9, objectEdit.transformStartScale.x || object.scale.x))
+    ensureProjectState().configuration = state.config
+    state.xmlDirty = true
+    if (!(await saveXml(true))) throw state.lastSaveError || new Error('工程配置保存失败')
+    addLog(`OBJ 实例位置已更新：${item.name} #${placementIndex + 1}`, 'success')
+  } catch (error) {
+    toast('OBJ 位置保存失败', error.message, 'error')
+    addLog(`OBJ 位置保存失败：${error.message}`, 'error')
+  } finally {
+    objectEdit.saving = false
+    if (objectEdit.savePending) {
+      objectEdit.savePending = false
+      saveEditedObjectTransform(objectEdit.selected)
+    }
+  }
+}
+
+function onObjectEditPointerDown(event) {
+  if (!objectEdit.enabled || geometryDraw.mode || event.button !== 0 || transformControls.axis || transformControls.dragging) return
+  objectEdit.pointerStart = { x: event.clientX, y: event.clientY }
+}
+
+function onObjectEditPointerUp(event) {
+  if (!objectEdit.enabled || geometryDraw.mode || !objectEdit.pointerStart || transformControls.dragging || transformControls.axis) return
+  const distance = Math.hypot(event.clientX - objectEdit.pointerStart.x, event.clientY - objectEdit.pointerStart.y)
+  objectEdit.pointerStart = null
+  if (distance <= 5) selectObjectForEditing(objectAtPointer(event))
+}
+
+function onObjectEditDoubleClick(event) {
+  if (!objectEdit.enabled || geometryDraw.mode) return
+  const object = objectAtPointer(event)
+  if (!object) return
+  selectObjectForEditing(object)
+  showObjectAttributeDialog(Number(object.userData.projectObjectIndex))
+}
 
 function createTypicalSkyboxTexture() {
   const canvas = document.createElement('canvas')
@@ -588,6 +1074,7 @@ function disposeObject(object) {
 }
 
 function clearWorld() {
+  clearObjectSelection(false)
   while (world.children.length) {
     const child = world.children.pop()
     disposeObject(child)
@@ -1438,7 +1925,7 @@ function animate(now) {
   requestAnimationFrame(animate)
   const deltaSeconds = Math.min(.1, Math.max(0, (now - lastAnimationTime) / 1000))
   lastAnimationTime = now
-  controls.update(); updateSceneDynamics(world, deltaSeconds, state.config); updateCruiseAnimation(now); renderer.render(scene, camera); renderResultViewer(); frameCount++
+  controls.update(); updateSceneDynamics(world, deltaSeconds, state.config); updateCruiseAnimation(now); updateObjectSelectionBox(); renderer.render(scene, camera); renderResultViewer(); frameCount++
   if (now - lastFps > 750) {
     $('#fps').textContent = `${Math.round(frameCount * 1000 / (now - lastFps))} FPS`
     frameCount = 0; lastFps = now
@@ -1643,6 +2130,9 @@ function renderInspector() {
     const radiationSolverControl = state.mode === 'eFacetRT' || state.mode === 'eVoxelRT'
       ? `${field('辐射求解方法', `<select class="select" id="radiationSolver"><option value="traditional" ${c.control.radiationSolver !== 'accelerated' ? 'selected' : ''}>传统稳健方法</option><option value="accelerated" ${c.control.radiationSolver === 'accelerated' ? 'selected' : ''}>${state.mode === 'eVoxelRT' ? '光谱批处理加速' : '光谱复用加速'}</option></select>`)}<div class="notice">${state.mode === 'eVoxelRT' ? '传统方法逐波段提交并等待 GPU；加速方法每次同时求解最多 4 个相邻波段，共享同一轮几何射线遍历，保留全部射线、光谱参数和物理公式，不进行波段插值。' : '传统方法每个波段从零开始固定迭代；加速方法复用相邻同类型波段的辐射度，并按残差提前收敛。两者使用相同几何、采样和输出定义。'}</div>`
       : ''
+    const facetBackendControl = state.mode === 'eFacetRT' || state.mode === 'eFacetEB'
+      ? `${field('面元计算后端', `<select class="select" id="facetBackend"><option value="gpu" ${c.control.facetBackend !== 'cpu' && c.control.facetBackend !== 'auto' ? 'selected' : ''}>GPU（默认）</option><option value="cpu" ${c.control.facetBackend === 'cpu' ? 'selected' : ''}>CPU（软件栅格）</option><option value="auto" ${c.control.facetBackend === 'auto' ? 'selected' : ''}>自动（GPU 失败回退 CPU）</option></select>`)}<div class="notice">CPU 版保留软件栅格可见性、CSR 邻接图和 Jacobi 辐射度迭代；FacetEB 在该辐射解上继续计算温度与能量通量。CPU 适合兼容和验证，通常比 GPU 慢。</div>`
+      : ''
     const couplingGeometry = state.mode === 'eFacetEB' ? '面元' : state.mode === 'eVoxelEB' ? '体元' : ''
     const spectralAcceleration = field('光谱加速宽度', inputUnit('spectralAccelerationWidth', c.control.spectralAccelerationWidth ?? 100, 'nm', 'type="number" min="1" max="1000" step="1"'))
     const couplingNotice = state.mode === 'eVoxelEB'
@@ -1650,7 +2140,7 @@ function renderInspector() {
       : '默认100 nm。短波净辐射按窗口分别积分直射和漫射，并使用窗口中心光学属性求解后累加；最终影像对传感器选定波段逐个独立求解，不进行输出波段插值。'
     const coupling = couplingGeometry ? `<div class="property-group"><h3>${couplingGeometry} RT–EB 耦合</h3>${spectralAcceleration}${field('最大耦合迭代', `<input class="input" id="couplingIterations" type="number" min="1" max="100" value="${c.control.couplingIterations}">`)}${field('温度收敛阈值', inputUnit('temperatureTolerance', c.control.temperatureTolerance, 'K', 'type="number" min="0.001" step="0.01"'))}${field('温度松弛系数', `<input class="input" id="temperatureRelaxation" type="number" min="0.05" max="1" step="0.05" value="${c.control.temperatureRelaxation}">`)}<div class="notice">${couplingNotice}场景几何和${couplingGeometry}辐射结构只初始化一次。</div></div>` : ''
     const temperatureMethods = energyBalanceOutput ? `<div class="property-group"><h3>温度模拟方法</h3>${field('土壤温度', `<select class="select" id="soilTemperatureMethod"><option value="0" ${c.control.soilTemperatureMethod === 0 ? 'selected' : ''}>0 · 瞬时能量平衡</option><option value="1" ${c.control.soilTemperatureMethod === 1 ? 'selected' : ''}>1 · 热惯性动态模型</option><option value="2" ${c.control.soilTemperatureMethod === 2 ? 'selected' : ''}>2 · 温度廓线传导模型（默认）</option></select>`)}${field('植被温度', `<select class="select" id="vegetationTemperatureMethod"><option value="0" ${c.control.vegetationTemperatureMethod === 0 ? 'selected' : ''}>经验法 · Ball–Berry</option><option value="1" ${c.control.vegetationTemperatureMethod === 1 ? 'selected' : ''}>机制法 · Farquhar</option></select>`)}<div class="notice">初始温度只作为求解初值；能量平衡各时刻均由所选方法动态更新。土壤方法会同步应用到全部土壤物化属性。</div></div>` : ''
-    html = `<div class="property-group"><h3>模拟产出</h3>${switchRow(imageOutputLabel, 'imageSwitch', c.sensor.image)}${processOutputSwitches}${processOutputNotice}${switchRow('输出温度', 'temperatureSwitch', c.sensor.temperature)}${switchRow('输出反照率', 'albedoSwitch', c.sensor.albedo)}</div><div class="property-group"><h3>计算控制</h3>${field('追踪深度', `<input class="input" id="rayDepth" type="number" min="1" max="64" value="${c.control.depth}">`)}${samplingControl}${periodicBoundaryControl}${heterogeneousVoxelControl}${radiationSolverControl}${field('GPU 序号', `<input class="input" id="gpuIndex" type="number" min="0" value="${c.control.gpu}">`)}</div>${temperatureMethods}${coupling}${builtinNotice()}`
+    html = `<div class="property-group"><h3>模拟产出</h3>${switchRow(imageOutputLabel, 'imageSwitch', c.sensor.image)}${processOutputSwitches}${processOutputNotice}${switchRow('输出温度', 'temperatureSwitch', c.sensor.temperature)}${switchRow('输出反照率', 'albedoSwitch', c.sensor.albedo)}</div><div class="property-group"><h3>计算控制</h3>${field('追踪深度', `<input class="input" id="rayDepth" type="number" min="1" max="64" value="${c.control.depth}">`)}${samplingControl}${periodicBoundaryControl}${heterogeneousVoxelControl}${radiationSolverControl}${facetBackendControl}${field('GPU 序号', `<input class="input" id="gpuIndex" type="number" min="0" value="${c.control.gpu}">`)}</div>${temperatureMethods}${coupling}${builtinNotice()}`
   }
   $('#inspectorContent').innerHTML = html
   bindInspector()
@@ -1732,6 +2222,7 @@ function bindInspector() {
   }, 'Control skyboxEnabled')
   bindSwitch('heterogeneousVoxelSwitch', () => Boolean(c.control.heterogeneousVoxel), (v) => c.control.heterogeneousVoxel = v, 'Control heterogeneousVoxel')
   bindValue('radiationSolver', (v) => c.control.radiationSolver = v, 'Control radiationSolver', (value) => value === 'accelerated' ? 'accelerated' : 'traditional')
+  bindValue('facetBackend', (v) => c.control.facetBackend = v, 'Control facetBackend', (value) => ['cpu', 'auto'].includes(value) ? value : 'gpu')
   bindValue('gpuIndex', (v) => c.control.gpu = v, 'Control GPU')
   bindValue('couplingIterations', (v) => c.control.couplingIterations = v, 'Control couplingIterations')
   bindValue('spectralAccelerationWidth', (v) => c.control.spectralAccelerationWidth = Math.max(1, Math.min(1000, v)), 'Control spectralAccelerationWidth', (value) => Math.max(1, Math.min(1000, Number(value) || 100)))
@@ -1954,6 +2445,7 @@ async function ensureDemInfo(config) {
 }
 
 async function loadActualScene(config) {
+  clearObjectSelection(false)
   try {
     if (await ensureDemInfo(config)) generateWorld(config)
   } catch (error) {
@@ -1961,6 +2453,7 @@ async function loadActualScene(config) {
   }
   await loadXmlScene({ api, world, config, log: addLog })
   updateSceneBoundsGuide(config); updateStats(); applyViewStyle(currentStyle); fitCamera()
+  if (objectEdit.enabled) geometryDrawHint('单击选择 OBJ；双击修改物化属性；W/E/R 切换移动、旋转、缩放')
 }
 
 function loadXml(result) {
@@ -2972,6 +3465,8 @@ function preparePendingObject(result, content, metadata = {}) {
 async function generateGeometryObject(event) {
   event.preventDefault()
   const submit = $('#geometryForm button[type="submit"]')
+  const drawPlacement = state.drawPlacement
+  state.drawPlacement = null
   try {
     submit.disabled = true
     ensureProjectState()
@@ -2994,6 +3489,11 @@ async function generateGeometryObject(event) {
       // Position files expose X north, Z east and Y height. Internal x/y/z keys
       // retain their legacy order: x = north, y = east, z = height.
       ...(medium ? { minX: values.positionX, maxX: values.positionX, minY: values.positionY, maxY: values.positionY, z: values.positionZ } : {}),
+      ...(drawPlacement && !medium && type !== 'Water' ? {
+        minX: drawPlacement.north, maxX: drawPlacement.north,
+        minY: drawPlacement.east, maxY: drawPlacement.east,
+        z: drawPlacement.height
+      } : {}),
       ...(type === 'Water' ? {
         minX: values.waterPositionX, maxX: values.waterPositionX,
         minY: values.waterPositionY, maxY: values.waterPositionY,
@@ -5472,13 +5972,91 @@ $$('.tree-item').forEach((button) => button.addEventListener('click', () => { st
 $$('#viewStyle button').forEach((button) => button.addEventListener('click', () => { $$('#viewStyle button').forEach((item) => item.classList.toggle('active', item === button)); applyViewStyle(button.dataset.style) }))
 $('#gridBtn').addEventListener('click', () => { if (!grid) return; grid.visible = !grid.visible; $('#gridBtn').classList.toggle('active', grid.visible) })
 $('#voxelBtn').addEventListener('click', () => { if (!voxelPreview) return; voxelPreview.visible = !voxelPreview.visible; $('#voxelBtn').classList.toggle('active', voxelPreview.visible) })
+$('#sceneObjectToolsBtn').addEventListener('click', (event) => {
+  event.stopPropagation()
+  const menu = $('#sceneObjectToolsMenu')
+  if (menu.hidden) {
+    menu.hidden = false
+    $('#sceneObjectToolsBtn').setAttribute('aria-expanded', 'true')
+  } else closeSceneObjectToolsMenu()
+})
+$('#sceneObjectToolsMenu').addEventListener('click', (event) => event.stopPropagation())
+$('#sceneObjectModifyBtn').addEventListener('click', () => toggleSceneObjectSubmenu('Modify'))
+$('#sceneObjectAddBtn').addEventListener('click', () => toggleSceneObjectSubmenu('Add'))
+$('#drawRegionBtn').addEventListener('click', () => startGeometryDraw('region'))
+$('#drawBoxBtn').addEventListener('click', () => startGeometryDraw('box'))
+$('#editObjectBtn').addEventListener('click', () => {
+  if (!objectEdit.enabled) setObjectEditEnabled(true)
+  else { clearObjectSelection(); closeSceneObjectToolsMenu() }
+})
+document.addEventListener('pointerdown', (event) => {
+  if (!event.target.closest?.('.scene-object-tools')) closeSceneObjectToolsMenu()
+})
+$$('#transformModeButtons button').forEach((button) => button.addEventListener('click', () => {
+  if (!objectEdit.enabled) setObjectEditEnabled(true)
+  setObjectTransformMode(button.dataset.transformMode)
+}))
+transformControls.addEventListener('dragging-changed', (event) => {
+  controls.enabled = !event.value
+  if (event.value) objectEdit.pointerStart = null
+})
+transformControls.addEventListener('mouseDown', () => {
+  if (objectEdit.selected) objectEdit.transformStartScale.copy(objectEdit.selected.scale)
+})
+transformControls.addEventListener('objectChange', () => {
+  const object = objectEdit.selected
+  if (!object) return
+  if (transformControls.mode === 'scale') {
+    const start = objectEdit.transformStartScale
+    const ratios = {
+      X: object.scale.x / Math.max(1e-9, start.x),
+      Y: object.scale.y / Math.max(1e-9, start.y),
+      Z: object.scale.z / Math.max(1e-9, start.z)
+    }
+    const axis = String(transformControls.axis || '')
+    const factor = Math.max(.01, Number.isFinite(ratios[axis]) ? ratios[axis] : Math.max(ratios.X, ratios.Y, ratios.Z))
+    object.scale.copy(start).multiplyScalar(factor)
+  }
+  updateObjectSelectionBox()
+})
+transformControls.addEventListener('mouseUp', () => saveEditedObjectTransform(objectEdit.selected))
+renderer.domElement.addEventListener('pointerdown', onGeometryDrawPointerDown, true)
+renderer.domElement.addEventListener('pointermove', onGeometryDrawPointerMove, true)
+renderer.domElement.addEventListener('pointerup', onGeometryDrawPointerUp, true)
+renderer.domElement.addEventListener('pointerdown', onObjectEditPointerDown)
+renderer.domElement.addEventListener('pointerup', onObjectEditPointerUp)
+renderer.domElement.addEventListener('dblclick', onObjectEditDoubleClick)
+renderer.domElement.addEventListener('pointercancel', () => { if (geometryDraw.mode) cancelGeometryDraw('绘制已取消') }, true)
+renderer.domElement.addEventListener('contextmenu', (event) => {
+  if (!geometryDraw.mode) return
+  event.preventDefault()
+  cancelGeometryDraw('绘制已取消')
+}, true)
+window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && geometryDraw.mode) cancelGeometryDraw('绘制已取消')
+})
+window.addEventListener('keydown', (event) => {
+  if (!objectEdit.enabled) return
+  const target = event.target
+  if (target instanceof HTMLElement && (target.matches('input, textarea, select') || target.isContentEditable)) return
+  const key = event.key.toLowerCase()
+  if (key === 'w') setObjectTransformMode('translate')
+  else if (key === 'e') setObjectTransformMode('rotate')
+  else if (key === 'r') setObjectTransformMode('scale')
+  else if (event.key === 'Escape' && $('#objectAttributeDialog').hidden && $('#objectDialog').hidden) {
+    event.preventDefault()
+    event.stopImmediatePropagation()
+    if (objectEdit.selected) clearObjectSelection()
+    else setObjectEditEnabled(false)
+  }
+})
 $('#fitBtn').addEventListener('click', fitCamera); $('#openXmlBtn').addEventListener('click', chooseXml); $('#drawerOpenBtn').addEventListener('click', chooseXml); $('#saveXmlBtn').addEventListener('click', saveXml); $('#saveAsBtn').addEventListener('click', showSaveAsDialog); $('#runBtn').addEventListener('click', runSimulation); $('#stopBtn').addEventListener('click', () => api.stop()); $('#resetBtn').addEventListener('click', resetSimulation)
 $('#newProjectBtn').addEventListener('click', showProjectDialog)
 $('#closeProjectBtn').addEventListener('click', hideProjectDialog)
 $('#projectDialog').addEventListener('click', (event) => { if (event.target === $('#projectDialog')) hideProjectDialog() })
 $('#projectForm').addEventListener('submit', createProject)
 $('#closeSaveAsBtn').addEventListener('click', hideSaveAsDialog)
-$('#saveAsDialog').addEventListener('click', (event) => { if (event.target === $('#saveAsDialog')) hideSaveAsDialog() })
+// 保留编辑内容：点击窗外不关闭，只能取消或保存成功后关闭。
 $('#saveAsForm').addEventListener('submit', saveProjectAs)
 $('#closeGeometryBtn').addEventListener('click', hideGeometryDialog)
 $('#geometryDialog').addEventListener('click', (event) => { if (event.target === $('#geometryDialog')) hideGeometryDialog() })

@@ -1,8 +1,8 @@
 import { app, BrowserWindow, dialog, screen, shell } from 'electron'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { startDesktopServer } from './local-server.mjs'
 
-const APP_PORT = 4173
 const sourceRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 const smokeTest = process.argv.includes('--smoke-test')
 let mainWindow = null
@@ -53,12 +53,12 @@ async function createWindow() {
     : app.getPath('userData')
   process.env.STREAMSIM_RESOURCE_ROOT = root
   process.env.STREAMSIM_DATA_ROOT = dataRoot
-  process.env.STREAMSIM_PORT = String(APP_PORT)
+  process.env.STREAMSIM_SERVER_AUTOSTART = '0'
   process.env.HISTREAM_ROOT = join(root, 'engine')
   process.env.PATH = `${join(root, 'engine')};${process.env.PATH || ''}`
 
-  await import('../server.mjs')
-  const url = `http://127.0.0.1:${APP_PORT}`
+  const { server } = await import('../server.mjs')
+  const url = await startDesktopServer(server)
   await waitForServer(url)
 
   const workArea = screen.getPrimaryDisplay().workArea

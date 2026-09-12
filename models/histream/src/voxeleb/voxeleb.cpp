@@ -612,6 +612,7 @@ void Voxeleb::outputVoxel(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<F
     if (!modelio || modelio->n_voxel <= 0 || !modelio->m_voxelio ||
         !modelio->m_voxelio->m_pDirBuffer || !modelio->m_voxelio->m_pNetRadBuffer ||
         !modelio->m_voxelio->m_pFluxBuffer ||
+        !modelio->m_voxelio->m_pTempeBuffer ||
         (!modelio->isRadiationProcess && !modelio->isEnergyProcess)) {
         return;
     }
@@ -620,6 +621,7 @@ void Voxeleb::outputVoxel(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<F
     std::vector<VoxelDir> directions(voxelCount);
     std::vector<VoxelNetRad> netRadiation(voxelCount);
     std::vector<VoxelHeatflux> heatFlux(voxelCount);
+    std::vector<VoxelTempe> temperatures(voxelCount);
     const auto download = [&](const nvvk::Buffer& source, void* destination, VkDeviceSize size) {
         nvvk::Buffer staging = modelio->m_pAlloc->createBuffer(
             size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
@@ -633,6 +635,18 @@ void Voxeleb::outputVoxel(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<F
     download(*modelio->m_voxelio->m_pDirBuffer, directions.data(), voxelCount * sizeof(VoxelDir));
     download(*modelio->m_voxelio->m_pNetRadBuffer, netRadiation.data(), voxelCount * sizeof(VoxelNetRad));
     download(*modelio->m_voxelio->m_pFluxBuffer, heatFlux.data(), voxelCount * sizeof(VoxelHeatflux));
+    download(*modelio->m_voxelio->m_pTempeBuffer, temperatures.data(), voxelCount * sizeof(VoxelTempe));
+
+    const auto componentForVoxel = [&](size_t voxel) -> float {
+        if (!modelio->m_instanceio || !modelio->m_meshio || voxel >= modelio->m_voxelio->voxellinks.size()) return 0;
+        const int instance = modelio->m_voxelio->voxellinks[voxel].instanceId;
+        if (instance < 0 || instance >= static_cast<int>(modelio->m_instanceio->instanceLinks.size())) return 0;
+        const int mesh = modelio->m_instanceio->instanceLinks[instance].meshId;
+        if (mesh < 0 || mesh >= static_cast<int>(modelio->m_meshio->meshLinks.size())) return 0;
+        const int type = modelio->m_meshio->meshLinks[mesh].type;
+        return type == static_cast<int>(Type::SOIL) ? 1 : type == static_cast<int>(Type::VEGETATION) ? 2
+            : type == static_cast<int>(Type::BUILDING) ? 3 : type == static_cast<int>(Type::WATER) ? 5 : 0;
+    };
 
     const auto isProfileSoilVoxel = [&](size_t voxel) {
         if (!modelio->m_instanceio || !modelio->m_meshio ||
@@ -690,6 +704,7 @@ void Voxeleb::outputVoxel(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<F
         const std::filesystem::path binaryPath = directory / (stem + ".bin");
         const std::filesystem::path metadataPath = directory / (stem + ".json");
         const bool writeSoilProfile = type == "energy" && hasSoilProfile;
+        const int componentOffset = (type == "energy" ? 8 : 6) + (writeSoilProfile ? TLASTNUM : 0);
         std::ofstream binary(binaryPath, std::ios::binary | std::ios::trunc);
         if (!binary) {
             throw std::runtime_error("Cannot write voxel process file: " + binaryPath.string());
@@ -737,6 +752,9 @@ void Voxeleb::outputVoxel(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<F
                 binary.write(reinterpret_cast<const char*>(layerTemperatures),
                              sizeof(layerTemperatures));
             }
+            const float state[2] = { componentForVoxel(voxel),
+                sunlit * temperatures[voxel].sunlit + shaded * temperatures[voxel].shaded };
+            binary.write(reinterpret_cast<const char*>(state), sizeof(state));
         }
         binary.close();
 
@@ -758,19 +776,22 @@ void Voxeleb::outputVoxel(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<F
                  << "  \"dataType\": \"float32-little-endian\",\n"
                  << "  \"layout\": \"voxel-interleaved\",\n"
                  << "  \"recordFloats\": "
-                 << ((type == "energy" ? 8 : 6) + (writeSoilProfile ? TLASTNUM : 0)) << ",\n"
+                 << componentOffset + 2 << ",\n"
+                 << "  \"componentOffset\": " << componentOffset << ",\n"
                  << "  \"positionOffsets\": [0,1,2],\n"
                  << "  \"fields\": ";
         if (type == "radiation") {
             metadata << "[{\"id\":\"shortwaveRadiation\",\"label\":\"短波辐射 [W m⁻²]\",\"offset\":3},"
                         "{\"id\":\"longwaveRadiation\",\"label\":\"长波辐射 [W m⁻²]\",\"offset\":4},"
-                        "{\"id\":\"netRadiation\",\"label\":\"净辐射 [W m⁻²]\",\"offset\":5}]\n}\n";
+                        "{\"id\":\"netRadiation\",\"label\":\"净辐射 [W m⁻²]\",\"offset\":5},"
+                        "{\"id\":\"temperature\",\"label\":\"温度 [K]\",\"offset\":" << componentOffset + 1 << "}]\n}\n";
         } else {
             metadata << "[{\"id\":\"latentHeat\",\"label\":\"潜热 [W m⁻²]\",\"offset\":3},"
                         "{\"id\":\"sensibleHeat\",\"label\":\"显热 [W m⁻²]\",\"offset\":4},"
                         "{\"id\":\"surfaceHeatFlux\",\"label\":\"表面热通量 [W m⁻²]\",\"offset\":5},"
                         "{\"id\":\"gpp\",\"label\":\"GPP [μmol CO₂ m⁻²叶面积 s⁻¹]\",\"offset\":6},"
-                        "{\"id\":\"npp\",\"label\":\"NPP [μmol CO₂ m⁻²叶面积 s⁻¹]\",\"offset\":7}]";
+                        "{\"id\":\"npp\",\"label\":\"NPP [μmol CO₂ m⁻²叶面积 s⁻¹]\",\"offset\":7},"
+                        "{\"id\":\"temperature\",\"label\":\"温度 [K]\",\"offset\":" << componentOffset + 1 << "}]";
             if (writeSoilProfile) {
                 metadata << ",\n  \"soilProfile\": {\n"
                          << "    \"layerCount\": " << TLASTNUM << ",\n"

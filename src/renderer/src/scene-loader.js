@@ -4,10 +4,13 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js'
 const PREVIEW_INSTANCE_LIMIT = 5000
 
 function positionsFromText(content) {
-  return String(content).split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
-    const values = line.split(/[\s,]+/).map(Number)
-    return { x: values[0] || 0, y: values[1] || 0, z: values[2] || 0, scale: Number.isFinite(values[3]) ? values[3] : 1, rotation: Number.isFinite(values[4]) ? values[4] : 0 }
-  })
+  return String(content).replace(/^\uFEFF/, '').split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#') && !line.startsWith('//'))
+    .map((line, sourceIndex) => {
+      const values = line.split(/[\s,]+/).map(Number)
+      return { x: values[0] || 0, y: values[1] || 0, z: values[2] || 0, scale: Number.isFinite(values[3]) ? values[3] : 1, rotation: Number.isFinite(values[4]) ? values[4] : 0, sourceIndex }
+    })
 }
 
 function samplePlacements(placements, limit = PREVIEW_INSTANCE_LIMIT) {
@@ -656,7 +659,7 @@ export async function loadXmlScene({ api, world, config, log }) {
   let sourceInstanceCount = 0
   let previewTextureMeshCount = 0
 
-  for (const item of items) {
+  for (const [itemIndex, item] of items.entries()) {
     try {
       let placements = [{ x: config.scene.x / 2, y: config.scene.y / 2, z: 0, scale: 1, rotation: 0 }]
       if (item.positionFile) {
@@ -725,6 +728,11 @@ export async function loadXmlScene({ api, world, config, log }) {
           const groundHeight = terrainHeight(config, placement.x, placement.y)
           object.position.set(placement.x * sceneScale - worldWidth / 2, (placement.z + groundHeight) * sceneScale, placement.y * sceneScale - worldDepth / 2)
           object.rotation.y = -THREE.MathUtils.degToRad(placement.rotation)
+          object.userData.projectObjectIndex = itemIndex
+          object.userData.projectPlacementIndex = placement.sourceIndex ?? placementIndex
+          object.userData.projectPlacement = { ...placement }
+          object.userData.projectInitialScale = object.scale.clone()
+          object.userData.projectVerticalAnchor = 0
           attachRandomMovement(object, item, placementIndex, config, sceneScale, worldWidth, worldDepth)
           world.add(object)
           instanceCount += 1
@@ -738,6 +746,11 @@ export async function loadXmlScene({ api, world, config, log }) {
           const groundHeight = terrainHeight(config, placement.x, placement.y)
           object.position.set(placement.x * sceneScale - worldWidth / 2, (placement.z + groundHeight) * sceneScale + object.scale.y / 2, placement.y * sceneScale - worldDepth / 2)
           object.rotation.y = -THREE.MathUtils.degToRad(placement.rotation)
+          object.userData.projectObjectIndex = itemIndex
+          object.userData.projectPlacementIndex = placement.sourceIndex ?? placementIndex
+          object.userData.projectPlacement = { ...placement }
+          object.userData.projectInitialScale = object.scale.clone()
+          object.userData.projectVerticalAnchor = object.scale.y / 2
           attachRandomMovement(object, item, placementIndex, config, sceneScale, worldWidth, worldDepth)
           object.castShadow = object.receiveShadow = true
           world.add(object)

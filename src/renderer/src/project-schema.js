@@ -374,6 +374,7 @@ export function createDefaultProject(options = {}) {
       },
       control: {
         depth: 4, samples: 32, gpu: 0,
+        facetBackend: 'gpu',
         heterogeneousVoxel: false,
         periodicTraversalCount: 0,
         skyboxEnabled: false,
@@ -620,6 +621,8 @@ export function normalizeProject(value = {}) {
           0
         )))),
         skyboxEnabled: Boolean(configuration.control?.skyboxEnabled),
+        facetBackend: ['cpu', 'auto'].includes(configuration.control?.facetBackend)
+          ? configuration.control.facetBackend : 'gpu',
         radiationSolver: configuration.control?.radiationSolver === 'accelerated'
           ? 'accelerated' : 'traditional',
         spectralAccelerationWidth: Math.max(1, Math.min(1000, number(
@@ -890,6 +893,7 @@ export function projectToXml(value, paths = {}) {
     <sampleCount>${number(c.control.samples, 32)}</sampleCount>
     <periodicNeighborCount>${Math.max(0, Math.min(20, Math.round(number(c.control.periodicTraversalCount, 0))))}</periodicNeighborCount>
     <skyboxEnabled>${c.control.skyboxEnabled ? 1 : 0}</skyboxEnabled>
+    <facetBackend>${['cpu', 'auto'].includes(c.control.facetBackend) ? c.control.facetBackend : 'gpu'}</facetBackend>
     <radiationSolver>${c.control.radiationSolver === 'accelerated' ? 'accelerated' : 'traditional'}</radiationSolver>
     <spectralAccelerationWidth>${Math.max(1, Math.min(1000, number(c.control.spectralAccelerationWidth, 100)))}</spectralAccelerationWidth>
     <GPU>${number(c.control.gpu, 0)}</GPU>

@@ -77,6 +77,13 @@ void main()
     bioId = meshLink0.bioId;
     typeId = meshLink0.type;
 
+    // Carbon-process output shares the existing per-voxel flux buffer.  Set
+    // non-vegetation voxels to zero before the vegetation branch below.
+    voxelHeatFlux[bufferId0].GPPsunlit = 0.0;
+    voxelHeatFlux[bufferId0].GPPshaded = 0.0;
+    voxelHeatFlux[bufferId0].NPPsunlit = 0.0;
+    voxelHeatFlux[bufferId0].NPPshaded = 0.0;
+
 	canopy = canopies[canopyId];
 
 
@@ -321,6 +328,7 @@ void main()
 				if (Ac != Ac && Aj == Aj) A = Aj;
 				if (Aj != Aj && Ac == Ac) A = Ac;
 				if (Ac == Ac && Aj == Aj)  A = min(Ac, Aj);                             // [umol/m2/s]       net photosynthesis
+				Ag = A + Rd;                                                            // [umol/m2/s]       gross photosynthesis
 
 				Ja = J;                                      // [umole-/m2/s]     actual electron transport rate, CO2-limited
 
@@ -350,6 +358,16 @@ void main()
 				//        A     = min(Ac,Aj);                              // [umol/m2/s]       net photosynthesis rate
 				//        Ja  = J * A/ Aj;                               // [umole-/m2/s]     actual electron transport rate (simple empirical formulation based on results)
 
+			}
+
+			if(kt == 0)
+			{
+				voxelHeatFlux[bufferId0].GPPsunlit = max(0.0, Ag);
+				voxelHeatFlux[bufferId0].NPPsunlit = A;
+			}else
+			{
+				voxelHeatFlux[bufferId0].GPPshaded = max(0.0, Ag);
+				voxelHeatFlux[bufferId0].NPPshaded = A;
 			}
 
 			//---------------------------------------------------------------------------------------------------------

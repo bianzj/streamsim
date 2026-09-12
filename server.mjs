@@ -3008,7 +3008,7 @@ const server = createServer(async (request, response) => {
 })
 
 const port = Number(process.env.STREAMSIM_PORT || 4173)
-if (isMainThread) server.listen(port, '127.0.0.1', () => console.log(`STREAMSIM: http://127.0.0.1:${apiOnly ? 5173 : port}`))
+if (isMainThread && process.env.STREAMSIM_SERVER_AUTOSTART !== '0') server.listen(port, '127.0.0.1', () => console.log(`STREAMSIM: http://127.0.0.1:${apiOnly ? 5173 : server.address().port}`))
 else if (workerData?.kind === 'facet-step') {
   parentPort.postMessage(writeRadiosityTiff(workerData.jsonPath, workerData.inputPath, 'eFacetEB', workerData.step))
   parentPort.close()

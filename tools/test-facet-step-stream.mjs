@@ -75,7 +75,7 @@ async function run(name, streaming, abort = false, sensorOverrides = {}) {
       const step = { node: Number(node), token, julianTime: Number(julianTime) }
       const stepPath = path.join(directory, '.facet_steps', 'energy_T=' + token + '.bin')
       assert.ok(fs.existsSync(stepPath))
-      assert.equal(fs.readdirSync(path.dirname(stepPath)).filter(f => f.endsWith('.bin')).length, 1)
+      assert.equal(fs.readdirSync(path.dirname(stepPath)).filter(f => f.startsWith('energy_T=') && f.endsWith('.bin')).length, 1)
       // Without ACK the next node cannot start, even when this consumer pauses.
       await new Promise(resolve => setTimeout(resolve, 100))
       assert.equal((log.match(/FACET_STEP\t/g) || []).length, count + 1)
@@ -180,7 +180,7 @@ try {
   assert.equal(events.filter(e => /输出缓存已释放/.test(e.text || '')).length, 2)
   assert.equal(events.some(e => /结果影像生成失败|节点影像生成失败/.test(e.text || '')), false)
   assert.equal(fs.readdirSync(path.join(apiProjectDir, 'output')).filter(f => f.endsWith('.tif')).length, 122)
-  assert.equal(fs.readdirSync(path.join(apiProjectDir, 'output/.facet_steps')).filter(f => f.endsWith('.bin')).length, 0)
+  assert.equal(fs.readdirSync(path.join(apiProjectDir, 'output/.facet_steps')).filter(f => f.startsWith('energy_T=') && f.endsWith('.bin')).length, 0)
   assert.equal(serviceErrors, '')
 } finally {
   controller.abort()

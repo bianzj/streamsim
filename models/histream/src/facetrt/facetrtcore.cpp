@@ -99,6 +99,7 @@ struct SurfaceParameters {
     bool vegetation{true};
     float pvEta25{0.22f}, pvGamma{-0.0035f}, pvBifaciality{0.0f};
     float convectiveScale{1.0f};
+    uint8_t outputComponent{0}; // 0 unknown, 1 soil/background, 2 vegetation, 3 building, 4 PV, 5 water
 
 };
 
@@ -1440,20 +1441,25 @@ std::vector<float> computeCpuSunlit(const Scene& scene)
 
 facetvk::SolveResult solveCpu(const CpuGraph& graph,
                               const std::vector<facetvk::SurfaceOptics>& optics,
-                              const Progress& progress)
+                              const Progress& progress,
+                              float skyRadiosity = kSkyDiffuseIrradiance,
+                              uint32_t maximumIterations = kIterations,
+                              float relaxation = 1.0f)
 {
     const uint32_t surfaceCount = graph.diagnostics.surfaceCount;
     std::vector<float> current(surfaceCount, 0.0f);
     std::vector<float> next(surfaceCount, 0.0f);
     float maxDelta = 0.0f;
+    maximumIterations = std::max(1U, maximumIterations);
+    relaxation = std::clamp(relaxation, 0.01f, 1.0f);
 
     auto incoming = [&](uint32_t side) {
         const uint32_t denominator = graph.denominators[side];
         if (denominator == 0U) {
-            return kSkyDiffuseIrradiance;
+            return skyRadiosity;
         }
         double value = static_cast<double>(graph.skyCounts[side]) *
-                       kSkyDiffuseIrradiance;
+                       skyRadiosity;
         for (uint32_t edgeIndex = graph.rowOffsets[side];
              edgeIndex < graph.rowOffsets[side + 1U]; ++edgeIndex) {
             const Edge& edge = graph.edges[edgeIndex];
@@ -1462,28 +1468,60 @@ facetvk::SolveResult solveCpu(const CpuGraph& graph,
         return static_cast<float>(value / denominator);
     };
 
-    for (uint32_t iteration = 0; iteration < kIterations; ++iteration) {
+    for (uint32_t iteration = 0; iteration < maximumIterations; ++iteration) {
         maxDelta = 0.0f;
         for (uint32_t facet = 0; facet < surfaceCount / 2U; ++facet) {
             const uint32_t side0 = facet * 2U;
             const uint32_t side1 = side0 + 1U;
             const float h0 = incoming(side0) + optics[side0].directIrradiance;
             const float h1 = incoming(side1) + optics[side1].directIrradiance;
-            next[side0] = optics[side0].emission + optics[side0].reflectance * h0 +
-                          optics[side0].transmittance * h1;
-            next[side1] = optics[side1].emission + optics[side1].reflectance * h1 +
-                          optics[side1].transmittance * h0;
+            const float candidate0 = optics[side0].emission +
+                optics[side0].reflectance * h0 + optics[side0].transmittance * h1;
+            const float candidate1 = optics[side1].emission +
+                optics[side1].reflectance * h1 + optics[side1].transmittance * h0;
+            next[side0] = current[side0] + relaxation * (candidate0 - current[side0]);
+            next[side1] = current[side1] + relaxation * (candidate1 - current[side1]);
             maxDelta = std::max(maxDelta, std::abs(next[side0] - current[side0]));
             maxDelta = std::max(maxDelta, std::abs(next[side1] - current[side1]));
         }
         current.swap(next);
         if ((iteration & 7U) == 7U) {
-            progress(80 + static_cast<int>(20U * (iteration + 1U) / kIterations),
+            progress(80 + static_cast<int>(20U * (iteration + 1U) / maximumIterations),
                      "CPU radiosity iteration " + std::to_string(iteration + 1U) + "/" +
-                         std::to_string(kIterations));
+                         std::to_string(maximumIterations));
         }
     }
-    return {std::move(current), kIterations, maxDelta};
+    return {std::move(current), maximumIterations, maxDelta};
+}
+
+std::vector<float> incidentIrradianceCpu(
+    const CpuGraph& graph,
+    const facetvk::SolveResult& solution,
+    const std::vector<facetvk::SurfaceOptics>& optics,
+    float skyRadiosity)
+{
+    const uint32_t surfaceCount = graph.diagnostics.surfaceCount;
+    if (solution.radiosity.size() != surfaceCount || optics.size() != surfaceCount) {
+        throw std::invalid_argument("CPU incident irradiance input size mismatch");
+    }
+    std::vector<float> irradiance(surfaceCount, 0.0f);
+    for (uint32_t side = 0; side < surfaceCount; ++side) {
+        double diffuse = skyRadiosity;
+        const uint32_t denominator = graph.denominators[side];
+        if (denominator != 0U) {
+            diffuse = static_cast<double>(graph.skyCounts[side]) * skyRadiosity;
+            for (uint32_t edgeIndex = graph.rowOffsets[side];
+                 edgeIndex < graph.rowOffsets[side + 1U]; ++edgeIndex) {
+                const Edge& edge = graph.edges[edgeIndex];
+                diffuse += static_cast<double>(edge.count) *
+                           solution.radiosity[edge.neighbor];
+            }
+            diffuse /= denominator;
+        }
+        irradiance[side] = std::max(
+            0.0f, static_cast<float>(diffuse) + optics[side].directIrradiance);
+    }
+    return irradiance;
 }
 
 std::vector<facetvk::SurfaceOptics> withoutDirectLight(
@@ -1830,6 +1868,7 @@ std::string facetInputView(const std::string& path)
     std::ostringstream xml;
     xml << "<HiStreamProject><Control>"
         << "<outDir>" << xmlEscaped(project.outputDirectory().string()) << "</outDir>"
+        << "<facetBackend>" << xmlEscaped(ProjectJson::string(control, "facetBackend", "gpu")) << "</facetBackend>"
         << "<GPU>" << ProjectJson::integer(control, "gpu", 0) << "</GPU>"
         << "<rayTracingDepth>" << ProjectJson::integer(control, "depth", 4) << "</rayTracingDepth>"
         << "<periodicNeighborCount>"
@@ -1884,6 +1923,7 @@ std::string facetInputView(const std::string& path)
         auto dimensions = ProjectJson::numbers(object.contains("dimensions") ? object["dimensions"] : ProjectJson::Json::array());
         while (dimensions.size() < 3) dimensions.push_back(1.0f);
         xml << "<object objName=\"" << xmlEscaped(name) << "\">"
+            << "<componentType>" << xmlEscaped(type) << "</componentType>"
             << "<meshNames>" << xmlEscaped(joinedNames(object, "name", name)) << "</meshNames>"
             << "<spectralNames>" << xmlEscaped(joinedNames(object, "spectralName", spectral)) << "</spectralNames>"
             << "<thermalNames>" << xmlEscaped(joinedNames(object, "thermalName", thermal)) << "</thermalNames>"
@@ -2864,6 +2904,9 @@ Scene loadProjectScene(const std::string& inputFile)
         bindings.reserve(bindingCount);
         for (size_t index = 0; index < bindingCount; ++index) {
             SurfaceParameters material = radiativeParameters.object;
+            const std::string componentType = trim(firstXmlTag(objectXml, "componentType"));
+            material.outputComponent = componentType == "Soil" ? 1 : componentType == "Vegetation" ? 2
+                : componentType == "Building" ? 3 : componentType == "Water" ? 5 : 0;
             const std::string spectralName = spectralNames.empty()
                 ? std::string{}
                 : spectralNames[std::min(index, spectralNames.size() - 1U)];
@@ -2893,6 +2936,7 @@ Scene loadProjectScene(const std::string& inputFile)
             }
             const uint32_t materialIndex =
                 static_cast<uint32_t>(scene.materials.size());
+            if (material.photovoltaic) material.outputComponent = 4;
             scene.materials.push_back(std::move(material));
             bindings.push_back({
                 meshNames.empty()
@@ -3023,6 +3067,16 @@ std::string outputFileFromInput(const std::string& inputPath,
     return (std::filesystem::path(output) / defaultName).lexically_normal().string();
 }
 
+std::string facetBackendFromInput(const std::string& xml)
+{
+    const char* environment = std::getenv("HISTREAM_FACET_BACKEND");
+    std::string backend = environment && *environment
+        ? trim(environment) : trim(firstXmlTag(xml, "facetBackend"));
+    std::transform(backend.begin(), backend.end(), backend.begin(),
+                   [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+    return backend == "cpu" || backend == "auto" ? backend : "gpu";
+}
+
 } // namespace
 
 int runFacetRTCore(const std::string& inputPath,
@@ -3045,9 +3099,24 @@ try {
     const Progress progress = [](int value, const std::string& stage) {
         std::cout << "PROGRESS\t" << value << '\t' << stage << std::endl;
     };
-    const RunResult result = runGpu(
-        scene, shaderDirectory, progress,
-        xml.empty() ? nullptr : &parameters);
+    const std::string requestedBackend = facetBackendFromInput(xml);
+    RunResult result;
+    if (requestedBackend == "cpu") {
+        std::cout << "facetrt: using retained CPU raster backend" << std::endl;
+        result = runCpu(scene, progress);
+    } else if (requestedBackend == "auto") {
+        try {
+            result = runGpu(scene, shaderDirectory, progress,
+                            xml.empty() ? nullptr : &parameters);
+        } catch (const std::exception& gpuError) {
+            std::cerr << "facetrt: GPU backend unavailable (" << gpuError.what()
+                      << "); falling back to retained CPU raster backend\n";
+            result = runCpu(scene, progress);
+        }
+    } else {
+        result = runGpu(scene, shaderDirectory, progress,
+                        xml.empty() ? nullptr : &parameters);
+    }
     std::filesystem::create_directories(std::filesystem::path(resultFile).parent_path());
     writeWebResult(resultFile, scene, result);
     std::cout << "RESULT\t" << resultFile << std::endl;
@@ -3228,19 +3297,64 @@ try {
               << (vegetationTemperatureMethod == 0
                       ? "Ball-Berry 经验法" : "Farquhar 机制法")
               << std::endl;
+    const std::string requestedBackend = facetBackendFromInput(xml);
     facetvk::FacetrtVulkan model;
-    model.initialize(config, shaderDirectory);
-    model.setGeometry(scene.vertices);
-    std::cout << "PROGRESS\t10\t构建共享面元可见性图" << std::endl;
-    const facetvk::GraphDiagnostics graph =
-        model.buildVisibilityGraph(makeHemisphereDirections());
+    CpuGraph cpuGraph;
+    bool useCpuBackend = requestedBackend == "cpu";
+    facetvk::GraphDiagnostics graph;
+    const auto buildCpuBackend = [&]() {
+        std::cout << "PROGRESS\t5\t构建 CPU 面元可见性图" << std::endl;
+        cpuGraph = buildCpuGraph(scene, [](int value, const std::string& stage) {
+            std::cout << "PROGRESS\t" << value << '\t' << stage << std::endl;
+        });
+        graph = cpuGraph.diagnostics;
+        useCpuBackend = true;
+    };
+    if (useCpuBackend) {
+        buildCpuBackend();
+    } else {
+        try {
+            model.initialize(config, shaderDirectory);
+            model.setGeometry(scene.vertices);
+            std::cout << "PROGRESS\t10\t构建共享面元可见性图" << std::endl;
+            graph = model.buildVisibilityGraph(makeHemisphereDirections());
+        } catch (const std::exception& gpuError) {
+            if (requestedBackend != "auto") throw;
+            std::cerr << "faceteb: GPU backend unavailable (" << gpuError.what()
+                      << "); falling back to retained CPU raster backend\n";
+            buildCpuBackend();
+        }
+    }
+    const auto solveRadiation = [&](const std::vector<facetvk::SurfaceOptics>& optics,
+                                    float skyRadiosity,
+                                    uint32_t iterations,
+                                    float relaxation) {
+        return useCpuBackend
+            ? solveCpu(cpuGraph, optics, [](int, const std::string&) {},
+                       skyRadiosity, iterations, relaxation)
+            : model.solve(optics, skyRadiosity, iterations, relaxation);
+    };
+    const auto incidentRadiation = [&](const facetvk::SolveResult& solution,
+                                       const std::vector<facetvk::SurfaceOptics>& optics,
+                                       float skyRadiosity) {
+        return useCpuBackend
+            ? incidentIrradianceCpu(cpuGraph, solution, optics, skyRadiosity)
+            : model.incidentIrradiance(solution, optics, skyRadiosity);
+    };
+    const auto computeSunlit = [&]() {
+        return useCpuBackend
+            ? computeCpuSunlit(scene)
+            : model.computeSunlitFraction(sunDirection(scene));
+    };
 
     const size_t surfaceCount = static_cast<size_t>(scene.facetCount()) * 2U;
     std::vector<float> temperature(
         surfaceCount, std::numeric_limits<float>::quiet_NaN());
 
     RunResult latest;
-    latest.backend = "Vulkan GPU Facet RT-EB coupled";
+    latest.backend = useCpuBackend
+        ? "CPU raster Facet RT-EB coupled"
+        : "Vulkan GPU Facet RT-EB coupled";
     latest.graph = graph;
     // Only the final state needs these summary arrays; do not retain a second
     // copy of the preceding node throughout the next solve.
@@ -3255,6 +3369,16 @@ try {
 
     const std::filesystem::path stepDirectory = outputDirectory / ".facet_steps";
     std::filesystem::create_directories(stepDirectory);
+    // Shared classification, in exactly the same order as geometry and node records.
+    {
+        std::ofstream components(stepDirectory / "components.bin", std::ios::binary | std::ios::trunc);
+        for (uint32_t facet = 0; facet < scene.facetCount(); ++facet) {
+            const uint8_t component = facet >= scene.leafFacetCount ? 1 : surfaceForFacet(scene, facet).outputComponent;
+            components.write(reinterpret_cast<const char*>(&component), sizeof(component));
+        }
+        components.close();
+        if (!components) throw std::runtime_error("FacetEB cannot write component identities");
+    }
     if (saveProcess) {
         std::filesystem::create_directories(outputDirectory / "process");
     }
@@ -3270,7 +3394,8 @@ try {
         // image/process preview. The final summary replaces this file later.
         std::ofstream geometry(resultFile, std::ios::binary | std::ios::trunc);
         geometry << std::setprecision(9)
-                 << "{\n  \"backend\": \"Vulkan GPU Facet RT-EB coupled\",\n"
+                 << "{\n  \"backend\": \"" << latest.backend << "\",\n"
+                 << "  \"componentFile\": \".facet_steps/components.bin\",\n"
                  << "  \"facetCount\": " << scene.facetCount() << ",\n"
                  << "  \"leafFacetCount\": " << scene.leafFacetCount << ",\n"
                  << "  \"vertexPositions\": [";
@@ -3291,8 +3416,7 @@ try {
         const std::string token = timeToken(meteo.julianTime);
         {
         // All per-node output/solver scratch arrays die before image export.
-        const std::vector<float> sunlit =
-            model.computeSunlitFraction(sunDirection(scene));
+        const std::vector<float> sunlit = computeSunlit();
 
         if (node == startNode) {
             // FacetEB temperatures are solved states.  XML thermal-material
@@ -3354,13 +3478,13 @@ try {
                 const std::vector<facetvk::SurfaceOptics> windowOptics =
                     makeEnergyShortwaveOptics(
                         scene, sunlit, windowDirectNormal, centreSample);
-                const facetvk::SolveResult windowSolution = model.solve(
+                const facetvk::SolveResult windowSolution = solveRadiation(
                     windowOptics, windowDiffuse, kIterations, 1.0f);
                 const std::vector<float> windowIncident =
-                    model.incidentIrradiance(
+                    incidentRadiation(
                         windowSolution, windowOptics, windowDiffuse);
                 const facetvk::SolveResult windowDiffuseSolution =
-                    model.solve(
+                    solveRadiation(
                         withoutDirectLight(windowOptics), windowDiffuse,
                         kIterations, 1.0f);
                 for (size_t side = 0; side < surfaceCount; ++side) {
@@ -3549,10 +3673,10 @@ try {
             const std::vector<facetvk::SurfaceOptics> longwaveOptics =
                 makeEnergyLongwaveOptics(scene, temperature);
             const facetvk::SolveResult longwaveSolution =
-                model.solve(
+                solveRadiation(
                     longwaveOptics, skyLongwave, kIterations, 1.0f);
             const std::vector<float> longwaveIncident =
-                model.incidentIrradiance(
+                incidentRadiation(
                     longwaveSolution, longwaveOptics, skyLongwave);
             evaluateEnergyFluxes(longwaveOptics, longwaveIncident);
 
@@ -3635,10 +3759,10 @@ try {
         const std::vector<facetvk::SurfaceOptics> finalLongwaveOptics =
             makeEnergyLongwaveOptics(scene, temperature);
         const facetvk::SolveResult finalLongwaveSolution =
-            model.solve(
+            solveRadiation(
                 finalLongwaveOptics, skyLongwave, kIterations, 1.0f);
         const std::vector<float> finalLongwaveIncident =
-            model.incidentIrradiance(
+            incidentRadiation(
                 finalLongwaveSolution, finalLongwaveOptics, skyLongwave);
         evaluateEnergyFluxes(
             finalLongwaveOptics, finalLongwaveIncident);
@@ -3686,7 +3810,7 @@ try {
             const float skySpectralRadiance = optical
                 ? diffuseSpectralIrradiance * 0.5f
                 : planckRadiance(wavelength, skyTemperature);
-            const facetvk::SolveResult spectralSolution = model.solve(
+            const facetvk::SolveResult spectralSolution = solveRadiation(
                 spectralOptics, skySpectralRadiance, kIterations, 1.0f);
             if (optical) {
                 const float referenceIrradiance =
@@ -3754,16 +3878,17 @@ try {
                     processBinaryPath.string());
             }
             for (size_t side = 0; side < surfaceCount; ++side) {
-                const float values[3] = {
+                const float values[5] = {
                     type == "photovoltaic" ? photovoltaicPower[side] : type == "radiation" ? shortwaveSolution.radiosity[side]
                                         : latentHeat[side],
                     type == "photovoltaic" ? temperature[side] : type == "radiation" ? finalLongwaveSolution.radiosity[side]
                                         : sensibleHeat[side],
                     type == "photovoltaic" ? absorbedShortwave[side] : type == "radiation" ? netRadiation[side]
-                                        : storageHeat[side]
+                                        : storageHeat[side],
+                    temperature[side], netRadiation[side]
                 };
                 processBinary.write(
-                    reinterpret_cast<const char*>(values), sizeof(values));
+                    reinterpret_cast<const char*>(values), (type == "energy" ? 5 : 3) * sizeof(float));
             }
             processBinary.close();
             if (!processBinary) throw std::runtime_error("FacetEB cannot finish process binary");
@@ -3781,11 +3906,12 @@ try {
                      << "  \"facetCount\": " << scene.facetCount() << ",\n"
                      << "  \"surfaceCount\": " << surfaceCount << ",\n"
                      << "  \"geometryFile\": \"../faceteb.json\",\n"
+                     << "  \"componentFile\": \"../.facet_steps/components.bin\",\n"
                      << "  \"dataFile\": \""
                      << processBinaryPath.filename().string() << "\",\n"
                      << "  \"dataType\": \"float32-little-endian\",\n"
                      << "  \"layout\": \"surface-interleaved\",\n"
-                     << "  \"recordFloats\": 3,\n"
+                     << "  \"recordFloats\": " << (type == "energy" ? 5 : 3) << ",\n"
                      << "  \"couplingIterations\": " << couplingIterations << ",\n"
                      << "  \"temperatureDelta\": "
                      << maximumTemperatureDelta << ",\n  \"fields\": ";
@@ -3800,7 +3926,9 @@ try {
             } else {
                 metadata << "[{\"id\":\"latentHeat\",\"label\":\"潜热 [W m⁻²]\",\"offset\":0},"
                             "{\"id\":\"sensibleHeat\",\"label\":\"显热 [W m⁻²]\",\"offset\":1},"
-                            "{\"id\":\"surfaceHeatFlux\",\"label\":\"表面热通量 [W m⁻²]\",\"offset\":2}]\n}\n";
+                            "{\"id\":\"surfaceHeatFlux\",\"label\":\"表面热通量 [W m⁻²]\",\"offset\":2},"
+                            "{\"id\":\"temperature\",\"label\":\"温度 [K]\",\"offset\":3},"
+                            "{\"id\":\"netRadiation\",\"label\":\"净辐射 [W m⁻²]\",\"offset\":4}]\n}\n";
             }
         };
         if (saveRadiationProcess) writeProcessMetadata("radiation");
@@ -3860,6 +3988,7 @@ try {
     }
     output << std::setprecision(9)
            << "{\n  \"backend\": \"" << latest.backend << "\",\n"
+           << "  \"componentFile\": \".facet_steps/components.bin\",\n"
            << "  \"facetCount\": " << scene.facetCount() << ",\n"
            << "  \"leafFacetCount\": " << scene.leafFacetCount << ",\n"
            << "  \"time\": \"" << latestTime << "\",\n"

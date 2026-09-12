@@ -27,6 +27,17 @@ extraResources:
       - "!log_nvprosample.txt"
   - from: docs
     to: docs
+  - from: statistic
+    to: statistic
+    filter:
+      - "**/*.py"
+      - "**/*.mjs"
+      - "**/*.md"
+      - "**/*.txt"
+      - "!**/test_*.py"
+      - "!**/__pycache__{,/**/*}"
+  - from: src/renderer/src/project-schema.js
+    to: src/renderer/src/project-schema.js
   - from: design/branding/streamsim-s-logo.ico
     to: branding/streamsim.ico
 win:

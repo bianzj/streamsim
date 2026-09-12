@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "examples": [
+    {
+      "id": "forest",
+      "label": "100 m 混交森林",
+      "model": "assets/obj-library/large_scene/forest_demo_100m.obj",
+      "recommendedMode": "eVoxelEB",
+      "focus": ["冠层温度", "短波/长波辐射", "GPP", "NPP"]
+    },
+    {
+      "id": "beijing",
+      "label": "北京四环北部城市",
+      "model": "assets/obj-library/large_scene/4th_ring_north.obj",
+      "recommendedMode": "eVoxelEB",
+      "focus": ["城市热环境", "建筑阴影", "局部计算域"]
+    },
+    {
+      "id": "ship",
+      "label": "典型现代船舶",
+      "model": "assets/obj-library/ship/typical/modern_container_ship.obj",
+      "recommendedMode": "eVoxelEB",
+      "focus": ["船体表面温度", "海面能量平衡", "多角度热红外"]
+    },
+    {
+      "id": "crop_gpp_npp",
+      "label": "20 m 玉米田 GPP/NPP",
+      "project": "assets/examples/crop_gpp_npp/project.json",
+      "recommendedMode": "eVoxelEB",
+      "focus": ["作物冠层温度", "GPP", "NPP", "日变化"]
+    }
+  ]
+}
