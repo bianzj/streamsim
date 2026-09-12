@@ -20,6 +20,7 @@
       <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M6 19h12a4 4 0 0 0 .5-8A7 7 0 0 0 5 9a5 5 0 0 0 1 10Z"/></symbol>
       <symbol id="i-wind" viewBox="0 0 24 24"><path d="M3 8h11a3 3 0 1 0-3-3"/><path d="M3 12h16a2.5 2.5 0 1 1-2.5 2.5"/><path d="M3 16h8"/></symbol>
       <symbol id="i-code" viewBox="0 0 24 24"><path d="m8 5-6 7 6 7m8-14 6 7-6 7m-2-17-4 20"/></symbol>
+      <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H11v17H6.5A2.5 2.5 0 0 0 4 21.5v-17Z"/><path d="M20 4.5A2.5 2.5 0 0 0 17.5 2H13v17h4.5a2.5 2.5 0 0 1 2.5 2.5v-17Z"/></symbol>
       <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.4 1A8 8 0 0 0 15 6l-.3-2.6h-4L10.4 6a8 8 0 0 0-1.5.9l-2.4-1-2 3.4 2 1.6a7 7 0 0 0 0 2.1l-2 1.6 2 3.4 2.4-1a8 8 0 0 0 1.5.9l.3 2.6h4L15 18a8 8 0 0 0 1.5-.9l2.4 1 2-3.4-2-1.6a7 7 0 0 0 .1-1Z"/></symbol>
       <symbol id="i-import" viewBox="0 0 24 24"><path d="M12 3v13m-5-5 5 5 5-5M4 20h16"/></symbol>
       <symbol id="i-fit" viewBox="0 0 24 24"><path d="M9 3H3v6m12-6h6v6M9 21H3v-6m12 6h6v-6"/></symbol>
@@ -89,7 +90,10 @@
 
           <div class="sidebar-footer">
             <div class="engine-state"><span id="engineDot"></span><div><strong id="engineState">引擎待命</strong><small id="enginePath">正在检测 HiStream...</small></div></div>
-            <button class="text-button" id="engineBtn"><svg><use href="#i-settings"/></svg>配置引擎路径</button>
+            <div class="sidebar-footer-actions">
+              <button class="text-button" id="engineBtn"><svg><use href="#i-settings"/></svg>配置引擎路径</button>
+              <button class="text-button" id="referenceBtn"><svg><use href="#i-book"/></svg>理论与参考</button>
+            </div>
           </div>
         </aside>
 
@@ -162,6 +166,58 @@
           <div class="console-output" id="consoleOutput"><div class="log-line muted"><time>--:--:--</time><span>STREAMSIM 已就绪，请打开场景工程的 project.json。</span></div></div>
         </section>
       </main>
+    </div>
+
+    <div class="drawer-backdrop" id="referenceDialog" hidden>
+      <section class="reference-dialog" role="dialog" aria-modal="true" aria-labelledby="referenceTitle">
+        <header>
+          <div><span class="eyebrow">STREAM / HiStream</span><h2 id="referenceTitle">理论、图例与主要参考文献</h2></div>
+          <button class="button ghost" id="closeReferenceBtn" type="button">关闭</button>
+        </header>
+        <div class="reference-scroll">
+          <section class="reference-section reference-overview">
+            <h3>模型框架</h3>
+            <p>StreamSim 面向复杂三维地表场景，将面元或体元辐射传输、温度与能量平衡、多角度成像和外部统计分析连接为统一流程。下列图例来自当前软件的实际场景与结果界面。</p>
+            <div class="reference-flow" aria-label="StreamSim 模型流程">
+              <span>三维场景与物化属性</span><i>→</i><span>Facet / Voxel 辐射传输</span><i>→</i><span>能量平衡与温度</span><i>→</i><span>多角度影像与统计</span>
+            </div>
+          </section>
+
+          <section class="reference-section">
+            <div class="reference-heading"><div><h3>主要图例</h3><p>单击图像可放大查看。</p></div><span>6 FIGURES</span></div>
+            <div class="reference-gallery">
+              <figure><button class="reference-shot" type="button" data-reference-title="森林场景构建与三维预览"><img src="/references/forest-workflow.png" alt="森林场景构建与三维预览" loading="lazy"></button><figcaption><strong>森林场景构建</strong><span>树木实例、太阳—传感器几何和场景边界的统一预览。</span></figcaption></figure>
+              <figure><button class="reference-shot" type="button" data-reference-title="城市建筑三维场景"><img src="/references/urban-scene.png" alt="城市建筑三维场景" loading="lazy"></button><figcaption><strong>城市建筑场景</strong><span>建筑群三维结构及面元/体元热辐射计算对象。</span></figcaption></figure>
+              <figure><button class="reference-shot" type="button" data-reference-title="作物场景表面温度分布"><img src="/references/crop-temperature.png" alt="作物场景表面温度分布" loading="lazy"></button><figcaption><strong>作物温度分布</strong><span>行播作物场景的空间温度差异及阴影效应。</span></figcaption></figure>
+              <figure><button class="reference-shot" type="button" data-reference-title="光伏阵列三维场景"><img src="/references/photovoltaic-scene.png" alt="光伏阵列三维场景" loading="lazy"></button><figcaption><strong>光伏阵列</strong><span>太阳能板几何、光谱物性与热电能量过程。</span></figcaption></figure>
+              <figure><button class="reference-shot" type="button" data-reference-title="船舶与海面场景"><img src="/references/ship-scene.png" alt="船舶与海面场景" loading="lazy"></button><figcaption><strong>船舶与海面</strong><span>复杂目标表面温度、多角度热红外和水体背景。</span></figcaption></figure>
+              <figure><button class="reference-shot" type="button" data-reference-title="热红外角度效应极坐标图"><img src="/references/angular-effect.png" alt="热红外角度效应极坐标图" loading="lazy"></button><figcaption><strong>热红外角度效应</strong><span>不同观测天顶角与方位角下的方向性温度分布。</span></figcaption></figure>
+            </div>
+          </section>
+
+          <section class="reference-section">
+            <div class="reference-heading"><div><h3>主要参考文献</h3><p>覆盖辐射度—能量平衡、GPU 光线追踪、温度方向性及 STREAM 系统。</p></div><span>CORE PAPERS</span></div>
+            <ol class="reference-list">
+              <li><span>R1 · 2017</span><div><strong>Bian, Z., et al. Modeling the Temporal Variability of Thermal Emissions From Row-Planted Scenes Using a Radiosity and Energy Budget Method.</strong><em>IEEE Transactions on Geoscience and Remote Sensing</em><a href="https://doi.org/10.1109/TGRS.2017.2719098" target="_blank" rel="noopener noreferrer">DOI 10.1109/TGRS.2017.2719098</a></div></li>
+              <li><span>R2 · 2018</span><div><strong>Bian, Z., et al. Modeling the Distributions of Brightness Temperatures of a Cropland Scene Using the Radiosity and Energy Budget Methods.</strong><em>Remote Sensing, 10(5), 736</em><a href="https://doi.org/10.3390/rs10050736" target="_blank" rel="noopener noreferrer">DOI 10.3390/rs10050736</a></div></li>
+              <li><span>R3 · 2020</span><div><strong>Bian, Z., et al. Modeling the Directional Anisotropy of Fine-Scale TIR Emissions Over Tree and Crop Canopies Based on UAV Measurements.</strong><em>Remote Sensing of Environment, 252, 112150</em><a href="https://doi.org/10.1016/j.rse.2020.112150" target="_blank" rel="noopener noreferrer">DOI 10.1016/j.rse.2020.112150</a></div></li>
+              <li><span>R4 · 2021</span><div><strong>卞尊健等，光学遥感三维计算机模拟模型的研究进展与应用。</strong><em>遥感学报</em><a href="https://doi.org/10.11834/jrs.20219274" target="_blank" rel="noopener noreferrer">DOI 10.11834/jrs.20219274</a></div></li>
+              <li><span>R5 · 2022</span><div><strong>Bian, Z., et al. A GPU-Based Solution for Ray Tracing 3-D Radiative Transfer Model of Complex Land Surface Scenes.</strong><em>IEEE Geoscience and Remote Sensing Letters</em><a href="https://doi.org/10.1109/LGRS.2022.3206312" target="_blank" rel="noopener noreferrer">DOI 10.1109/LGRS.2022.3206312</a></div></li>
+              <li><span>R6 · 2024</span><div><strong>Fan, M., et al. Modeling the Topographic Effect on Directional Anisotropies of Land Surface Temperature.</strong><em>Journal of Remote Sensing</em><a href="https://doi.org/10.34133/remotesensing.0226" target="_blank" rel="noopener noreferrer">DOI 10.34133/remotesensing.0226</a></div></li>
+              <li><span>R7 · 2025</span><div><strong>Fan, M., et al. STREAM: A System for Tracing Radiative Transfer and Energy Balance in Three-Dimensional Land Surface Scenes.</strong><em>International Journal of Applied Earth Observation and Geoinformation, 104763</em><a href="https://doi.org/10.1016/j.jag.2025.104763" target="_blank" rel="noopener noreferrer">DOI 10.1016/j.jag.2025.104763</a></div></li>
+              <li><span>R8 · 2025</span><div><strong>Bian, Z., et al. Evaluation of Three Modeling Frameworks of Thermal Infrared Radiative Transfer for Directional Anisotropies of Temperatures.</strong><em>IEEE Transactions on Geoscience and Remote Sensing, 63, 5001315</em><a href="https://doi.org/10.1109/TGRS.2025.3530503" target="_blank" rel="noopener noreferrer">DOI 10.1109/TGRS.2025.3530503</a></div></li>
+            </ol>
+          </section>
+        </div>
+        <footer><span>中国科学院空天信息创新研究院红外遥感组 · 卞尊健、曹彪、历华、杜永明、肖青、柳钦火</span><a href="mailto:bianzj@aircas.ac.cn">bianzj@aircas.ac.cn</a></footer>
+      </section>
+    </div>
+
+    <div class="drawer-backdrop reference-image-backdrop" id="referenceImageDialog" hidden>
+      <section class="reference-image-dialog" role="dialog" aria-modal="true" aria-labelledby="referenceImageTitle">
+        <header><h2 id="referenceImageTitle">图例预览</h2><button class="button ghost" id="closeReferenceImageBtn" type="button">关闭</button></header>
+        <div><img id="referenceImage" alt=""></div>
+      </section>
     </div>
 
     <div class="drawer-backdrop" id="xmlDrawer" hidden>

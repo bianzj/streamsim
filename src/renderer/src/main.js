@@ -5928,6 +5928,32 @@ function showSaveAsDialog() {
 
 function hideSaveAsDialog() { $('#saveAsDialog').hidden = true }
 
+function showReferenceDialog() {
+  $('#referenceDialog').hidden = false
+  $('#closeReferenceBtn').focus()
+}
+
+function hideReferenceDialog() {
+  $('#referenceImageDialog').hidden = true
+  $('#referenceImage').removeAttribute('src')
+  $('#referenceDialog').hidden = true
+}
+
+function showReferenceImage(button) {
+  const image = button.querySelector('img')
+  if (!image) return
+  $('#referenceImage').src = image.src
+  $('#referenceImage').alt = image.alt
+  $('#referenceImageTitle').textContent = button.dataset.referenceTitle || image.alt || '图例预览'
+  $('#referenceImageDialog').hidden = false
+  $('#closeReferenceImageBtn').focus()
+}
+
+function hideReferenceImage() {
+  $('#referenceImageDialog').hidden = true
+  $('#referenceImage').removeAttribute('src')
+}
+
 async function saveProjectAs(event) {
   event.preventDefault()
   const submit = $('#saveAsForm button[type="submit"]')
@@ -6058,6 +6084,12 @@ $('#projectForm').addEventListener('submit', createProject)
 $('#closeSaveAsBtn').addEventListener('click', hideSaveAsDialog)
 // 保留编辑内容：点击窗外不关闭，只能取消或保存成功后关闭。
 $('#saveAsForm').addEventListener('submit', saveProjectAs)
+$('#referenceBtn').addEventListener('click', showReferenceDialog)
+$('#closeReferenceBtn').addEventListener('click', hideReferenceDialog)
+$('#referenceDialog').addEventListener('click', (event) => { if (event.target === $('#referenceDialog')) hideReferenceDialog() })
+$$('.reference-shot').forEach((button) => button.addEventListener('click', () => showReferenceImage(button)))
+$('#closeReferenceImageBtn').addEventListener('click', hideReferenceImage)
+$('#referenceImageDialog').addEventListener('click', (event) => { if (event.target === $('#referenceImageDialog')) hideReferenceImage() })
 $('#closeGeometryBtn').addEventListener('click', hideGeometryDialog)
 $('#geometryDialog').addEventListener('click', (event) => { if (event.target === $('#geometryDialog')) hideGeometryDialog() })
 $('#geometryForm').addEventListener('input', updateGeometryDialog)
@@ -6164,7 +6196,7 @@ $('#xmlBtn').addEventListener('click', () => { $('#xmlDrawer').hidden = false })
 $('#xmlDrawer').addEventListener('click', (event) => { if (event.target === $('#xmlDrawer')) $('#xmlDrawer').hidden = true })
 $('#xmlEditor').addEventListener('input', () => { state.xmlText = $('#xmlEditor').value; state.xmlDirty = true; $('#unsavedMark').hidden = false; $('#xmlStatus').textContent = '有未保存的修改' })
 $('#applyXmlBtn').addEventListener('click', async () => { try { const project = parseProjectJson(state.xmlText); const mode = project.mode; state.project = project; state.config = ensureMaterialPresets(project.configuration); selectMode(mode); if (await saveXml()) { refreshFromState(); loadActualScene(state.config); renderInspector(); $('#xmlDrawer').hidden = true } } catch (error) { toast('JSON 格式错误', error.message, 'error') } })
-window.addEventListener('keydown', (event) => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); saveXml() } if (event.key === 'F5') { event.preventDefault(); runSimulation() } if (event.key === 'Escape') { if (!$('#resultDialog').hidden) hideResults(); else if (!$('#objectAttributeDialog').hidden) hideObjectAttributeDialog(); else if (!$('#objectDialog').hidden) hideObjectDialog(); else if (!$('#materialDialog').hidden) hideMaterialDialog(true); else if (!$('#geometryDialog').hidden) hideGeometryDialog(); else if (!$('#presetDialog').hidden) hidePresetDialog(); else if (!$('#projectDialog').hidden) hideProjectDialog(); else if (!$('#xmlDrawer').hidden) $('#xmlDrawer').hidden = true } })
+window.addEventListener('keydown', (event) => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); saveXml() } if (event.key === 'F5') { event.preventDefault(); runSimulation() } if (event.key === 'Escape') { if (!$('#referenceImageDialog').hidden) hideReferenceImage(); else if (!$('#referenceDialog').hidden) hideReferenceDialog(); else if (!$('#resultDialog').hidden) hideResults(); else if (!$('#objectAttributeDialog').hidden) hideObjectAttributeDialog(); else if (!$('#objectDialog').hidden) hideObjectDialog(); else if (!$('#materialDialog').hidden) hideMaterialDialog(true); else if (!$('#geometryDialog').hidden) hideGeometryDialog(); else if (!$('#presetDialog').hidden) hidePresetDialog(); else if (!$('#projectDialog').hidden) hideProjectDialog(); else if (!$('#xmlDrawer').hidden) $('#xmlDrawer').hidden = true } })
 setInterval(() => { if (state.running) renderRunProgress() }, 250)
 
 async function init() {
