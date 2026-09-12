@@ -101,3 +101,9 @@ CMake 编译仍需要本机 Vulkan SDK、Visual Studio 和 vcpkg 依赖。`eFace
 8. Bian, Z., et al. (2025). Evaluation of Three Modeling Frameworks of Thermal Infrared Radiative Transfer for Directional Anisotropies of Temperatures. *IEEE Transactions on Geoscience and Remote Sensing*, 63, 5001315. [DOI: 10.1109/TGRS.2025.3530503](https://doi.org/10.1109/TGRS.2025.3530503)
 
 完整理论说明和分章节参考文献见[模型理论手册](docs/theory-manual.md)。
+
+## 许可证 / License
+
+本项目采用 [PolyForm Noncommercial License 1.0.0](LICENSE)。允许依照许可证进行非商业使用、修改和分发；任何商业使用均须事先取得许可方的单独书面授权。
+
+This project is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE). Noncommercial use, modification, and distribution are permitted under its terms. Commercial use requires a separate prior written license from the licensor.
