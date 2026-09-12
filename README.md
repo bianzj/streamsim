@@ -2,6 +2,41 @@
 
 StreamSim 是调用本地辐射传输模型的 Web GUI。源码、编译结果和运行文件均集中在本项目目录。
 
+## 结果展示
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <img src="src/renderer/public/references/forest-workflow.png" alt="森林场景构建与三维预览"><br>
+      <strong>森林场景构建与三维预览</strong>
+    </td>
+    <td width="50%" align="center">
+      <img src="src/renderer/public/references/urban-scene.png" alt="城市建筑三维场景"><br>
+      <strong>城市建筑三维场景</strong>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <img src="src/renderer/public/references/crop-temperature.png" alt="作物场景表面温度分布"><br>
+      <strong>作物场景表面温度分布</strong>
+    </td>
+    <td width="50%" align="center">
+      <img src="src/renderer/public/references/photovoltaic-scene.png" alt="光伏阵列三维场景"><br>
+      <strong>光伏阵列三维场景</strong>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <img src="src/renderer/public/references/ship-scene.png" alt="船舶与海面场景"><br>
+      <strong>船舶与海面场景</strong>
+    </td>
+    <td width="50%" align="center">
+      <img src="src/renderer/public/references/angular-effect.png" alt="热红外角度效应极坐标图"><br>
+      <strong>热红外角度效应</strong>
+    </td>
+  </tr>
+</table>
+
 ```text
 streamsim/
 ├─ src/renderer/                GUI 源码
@@ -53,3 +88,16 @@ npm run build:all
 - `models/histream/shader/faceteb/`
 
 CMake 编译仍需要本机 Vulkan SDK、Visual Studio 和 vcpkg 依赖。`eFacetRT` 和 `eFacetEB` 现在统一由 `histream.exe` 调用，分别加载 `shader/facetrt` 和 `shader/faceteb`；运行时不再调用独立 `radiosity_web_runner.exe`。
+
+## 主要参考文献
+
+1. Bian, Z., et al. (2017). Modeling the Temporal Variability of Thermal Emissions From Row-Planted Scenes Using a Radiosity and Energy Budget Method. *IEEE Transactions on Geoscience and Remote Sensing*. [DOI: 10.1109/TGRS.2017.2719098](https://doi.org/10.1109/TGRS.2017.2719098)
+2. Bian, Z., et al. (2018). Modeling the Distributions of Brightness Temperatures of a Cropland Scene Using the Radiosity and Energy Budget Methods. *Remote Sensing*, 10(5), 736. [DOI: 10.3390/rs10050736](https://doi.org/10.3390/rs10050736)
+3. Bian, Z., et al. (2020). Modeling the Directional Anisotropy of Fine-Scale TIR Emissions Over Tree and Crop Canopies Based on UAV Measurements. *Remote Sensing of Environment*, 252, 112150. [DOI: 10.1016/j.rse.2020.112150](https://doi.org/10.1016/j.rse.2020.112150)
+4. 卞尊健等（2021）. 光学遥感三维计算机模拟模型的研究进展与应用. *遥感学报*. [DOI: 10.11834/jrs.20219274](https://doi.org/10.11834/jrs.20219274)
+5. Bian, Z., et al. (2022). A GPU-Based Solution for Ray Tracing 3-D Radiative Transfer Model of Complex Land Surface Scenes. *IEEE Geoscience and Remote Sensing Letters*. [DOI: 10.1109/LGRS.2022.3206312](https://doi.org/10.1109/LGRS.2022.3206312)
+6. Fan, M., et al. (2024). Modeling the Topographic Effect on Directional Anisotropies of Land Surface Temperature. *Journal of Remote Sensing*. [DOI: 10.34133/remotesensing.0226](https://doi.org/10.34133/remotesensing.0226)
+7. Fan, M., et al. (2025). STREAM: A System for Tracing Radiative Transfer and Energy Balance in Three-Dimensional Land Surface Scenes. *International Journal of Applied Earth Observation and Geoinformation*, 104763. [DOI: 10.1016/j.jag.2025.104763](https://doi.org/10.1016/j.jag.2025.104763)
+8. Bian, Z., et al. (2025). Evaluation of Three Modeling Frameworks of Thermal Infrared Radiative Transfer for Directional Anisotropies of Temperatures. *IEEE Transactions on Geoscience and Remote Sensing*, 63, 5001315. [DOI: 10.1109/TGRS.2025.3530503](https://doi.org/10.1109/TGRS.2025.3530503)
+
+完整理论说明和分章节参考文献见[模型理论手册](docs/theory-manual.md)。
