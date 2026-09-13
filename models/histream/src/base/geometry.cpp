@@ -5,6 +5,9 @@
 #include "geometry.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <stdexcept>
+#include <string>
 
 namespace {
 
@@ -272,9 +275,25 @@ void Geometry::configureSensor(const SensorXml& sensor, glm::vec3 sceneSize_XYZ,
 SensorMatrix Geometry::createConfiguredSensor(glm::vec3 size_XZY, glm::vec3 origin_XZY,
                                                float vza, float vaa, float ratio) {
     if (m_sensorProjection == Projection::PERSPECTIVE) {
-        return createPerspectiveSensor(m_sensorPosition_XZY, vza, vaa);
+        SensorMatrix sensor = createPerspectiveSensor(m_sensorPosition_XZY, vza, vaa);
+        if (const char* cone = std::getenv("STREAMSIM_HEX_CONE")) {
+            if (std::string(cone) != "lod") {
+                throw std::runtime_error(
+                    "STREAMSIM_HEX_CONE currently supports lod");
+            }
+            sensor.aperture = -4.0f;
+        }
+        return sensor;
     }
-    return createSensor(size_XZY, origin_XZY, vza, vaa, ratio);
+    SensorMatrix sensor = createSensor(size_XZY, origin_XZY, vza, vaa, ratio);
+    if (const char* cone = std::getenv("STREAMSIM_HEX_CONE")) {
+        if (std::string(cone) != "lod") {
+            throw std::runtime_error(
+                "STREAMSIM_HEX_CONE currently supports lod");
+        }
+        sensor.aperture = -4.0f;
+    }
+    return sensor;
 }
 
 SensorMatrix Geometry::createPerspectiveSensor(glm::vec3 position_XZY, float vza, float vaa) {

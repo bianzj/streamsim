@@ -186,6 +186,11 @@ struct VoxelHex
     float ay;
     float az;
     float rho;
+    float a;
+    float b;
+    float c;
+    int model;
+    vec4 children[8];
 };
 
 // transmittance

@@ -484,9 +484,9 @@ def cover(title: str, subtitle: str, styles):
         Spacer(1, 18 * mm),
         Table(
             [
-                [Paragraph("软件版本", styles["table"]), Paragraph("1.0.0", styles["table"])],
+                [Paragraph("软件版本", styles["table"]), Paragraph("1.1.0", styles["table"])],
                 [Paragraph("工程格式", styles["table"]), Paragraph("schemaVersion = 6", styles["table"])],
-                [Paragraph("更新日期", styles["table"]), Paragraph("2026-09-09", styles["table"])],
+                [Paragraph("更新日期", styles["table"]), Paragraph("2026-09-13", styles["table"])],
             ],
             colWidths=[35 * mm, 70 * mm],
             style=TableStyle(

@@ -62,13 +62,21 @@ async function createWindow() {
   await waitForServer(url)
 
   const workArea = screen.getPrimaryDisplay().workArea
-  const width = Math.min(1500, workArea.width)
+  // Use a conventional 16:9 startup window while keeping it inside the
+  // usable display area. Users can still resize it after launch.
+  const aspectRatio = 16 / 9
+  let height = workArea.height
+  let width = Math.floor(height * aspectRatio)
+  if (width > workArea.width) {
+    width = workArea.width
+    height = Math.floor(width / aspectRatio)
+  }
 
   mainWindow = new BrowserWindow({
     width,
-    height: workArea.height,
+    height,
     x: workArea.x + Math.round((workArea.width - width) / 2),
-    y: workArea.y,
+    y: workArea.y + Math.round((workArea.height - height) / 2),
     minWidth: Math.min(1100, workArea.width),
     minHeight: Math.min(720, workArea.height),
     icon: join(root, 'branding', 'streamsim.ico'),

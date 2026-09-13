@@ -4,16 +4,21 @@
 
 #include "scene.h"
 #include "hexvoxel.h"
+#include "hexneighbors.h"
+#include "hexprojection.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <map>
 #include <numeric>
 #include <stdexcept>
+#include <sstream>
 #include <tuple>
 #include <unordered_map>
 #include <vector>
@@ -516,6 +521,73 @@ void finalizeHexMixtures(HexMixAccumulator& accumulator,
     // identical mixtures to share one material instead of duplicating a full
     // spectrum for every world voxel.
     std::map<std::tuple<int, int, int, int, int>, std::pair<int, int>> compositeCache;
+
+    // Optional HEX mipmap hierarchy.  Each table contains all levels for
+    // every parent voxel; level 0 is 1^3 and each following level doubles.
+    std::map<std::tuple<int, int, int>, std::vector<hexprojection::Cell>> hierarchy;
+    std::vector<int> lodDivisions;
+    if (const char* path = std::getenv("STREAMSIM_HEX_LOD_TABLE")) {
+        std::ifstream input(path);
+        std::string magic;
+        float parentSize = 0.0f;
+        int levelCount = 0;
+        int rootCount = 0;
+        if (!(input >> magic >> parentSize >> levelCount >> rootCount) ||
+            magic != "HEX_LOD_V1" || !std::isfinite(parentSize) ||
+            parentSize <= 0.0f || levelCount < 1 || levelCount > 6 ||
+            rootCount < 1 || rootCount > 100000) {
+            throw std::runtime_error("Invalid HEX_LOD_V1 header");
+        }
+        if (std::abs(parentSize - modelio->stepsize_surface) > 1.0e-5f ||
+            std::abs(parentSize - modelio->stepsize_height) > 1.0e-5f) {
+            throw std::runtime_error("HEX LOD parent size must match cubic voxels");
+        }
+        std::size_t entryCount = 0;
+        for (int level = 0; level < levelCount; ++level) {
+            int n = 0;
+            if (!(input >> n) || n < 1 || n > 32 ||
+                (level == 0 && n != 1) ||
+                (level > 0 && n != 2 * lodDivisions.back())) {
+                throw std::runtime_error("HEX LOD subdivisions must double from 1");
+            }
+            lodDivisions.push_back(n);
+            entryCount += static_cast<std::size_t>(n) * n * n;
+        }
+        if (entryCount * static_cast<std::size_t>(rootCount) >= 16000000U) {
+            throw std::runtime_error("HEX LOD table exceeds GPU index capacity");
+        }
+        for (int root = 0; root < rootCount; ++root) {
+            int x = 0, y = 0, z = 0;
+            if (!(input >> x >> y >> z)) {
+                throw std::runtime_error("Missing HEX LOD root coordinate");
+            }
+            std::vector<hexprojection::Cell> values(entryCount);
+            for (auto& cell : values) {
+                for (float& value : cell) {
+                    if (!(input >> value) || !std::isfinite(value) || value < 0.0f) {
+                        throw std::runtime_error("Invalid HEX LOD cell");
+                    }
+                }
+            }
+            if (!hierarchy.emplace(std::make_tuple(x, y, z), std::move(values)).second) {
+                throw std::runtime_error("Duplicate HEX LOD root coordinate");
+            }
+        }
+        std::string trailing;
+        if (input >> trailing) throw std::runtime_error("Unexpected HEX LOD data");
+        if (hierarchy.size() != ordered.size()) {
+            throw std::runtime_error("HEX LOD root count does not match scene");
+        }
+    }
+    if (const char* cone = std::getenv("STREAMSIM_HEX_CONE")) {
+        if (std::string(cone) != "lod") {
+            throw std::runtime_error("STREAMSIM_HEX_CONE currently supports lod");
+        }
+        if (hierarchy.empty()) {
+            throw std::runtime_error(
+                "STREAMSIM_HEX_CONE=lod requires STREAMSIM_HEX_LOD_TABLE");
+        }
+    }
     for (HexWorldAccum* world : ordered) {
         if (world->categories.empty() || world->linkIndices.empty()) continue;
         const double pixelCount = static_cast<double>(world->sampleN) * world->sampleN;
@@ -551,6 +623,7 @@ void finalizeHexMixtures(HexMixAccumulator& accumulator,
         for (const HexCategoryAccum& category : world->categories) rho += category.rho;
 
         VoxelHex mixed{};
+        mixed.model = 10;
         mixed.rho = static_cast<float>(std::max(rho, 0.0));
         float* ci[3] = {&mixed.ax, &mixed.ay, &mixed.az};
         for (int axis = 0; axis < 3; ++axis) {
@@ -564,8 +637,117 @@ void finalizeHexMixtures(HexMixAccumulator& accumulator,
             *ci[axis] = value;
         }
 
+        // Use the same discrete projection that produced the masks for the
+        // current-scale descriptor, then retain pairwise gap correlation at
+        // each of the six voxel faces.
+        const float cellSize = modelio->stepsize_surface;
+        if (std::abs(cellSize - modelio->stepsize_height) > 1.0e-5f) {
+            throw std::runtime_error("Heterogeneous HEX requires cubic voxels");
+        }
+        if (hierarchy.empty()) {
+            for (int axis = 0; axis < 3; ++axis) {
+                *ci[axis] = hexneighbors::axisQ(
+                    1.0 - totalCover[axis], rho, cellSize,
+                    static_cast<std::size_t>(pixelCount));
+            }
+            for (int axis = 0; axis < 3; ++axis) {
+                for (int sign = 0; sign < 2; ++sign) {
+                    ObjVoxelCoord neighbour = world->coord;
+                    if (axis == 0) neighbour.x += sign != 0 ? 1 : -1;
+                    if (axis == 1) neighbour.y += sign != 0 ? 1 : -1;
+                    if (axis == 2) neighbour.z += sign != 0 ? 1 : -1;
+                    const auto found = accumulator.cells.find(neighbour);
+                    float correlation = 0.0f;
+                    if (found != accumulator.cells.end()) {
+                        if (found->second.sampleN != world->sampleN) {
+                            throw std::runtime_error(
+                                "Neighbour HEX projection resolutions differ");
+                        }
+                        correlation = hexneighbors::beta(
+                            world->unionMask[axis], found->second.unionMask[axis],
+                            static_cast<std::size_t>(pixelCount));
+                    }
+                    const int face = axis * 2 + sign;
+                    mixed.children[face / 3][face % 3] = correlation;
+                }
+            }
+        }
+
         const int hexId = static_cast<int>(voxelio->voxelHexs.size());
         voxelio->voxelHexs.emplace_back(mixed);
+
+        if (!hierarchy.empty()) {
+            const auto found = hierarchy.find(std::make_tuple(
+                world->coord.x, world->coord.y, world->coord.z));
+            if (found == hierarchy.end()) {
+                throw std::runtime_error("HEX LOD table missing parent voxel");
+            }
+            auto& root = voxelio->voxelHexs[hexId];
+            root.model = 5;
+            root.a = static_cast<float>(lodDivisions.size() - 1);
+            root.b = static_cast<float>(lodDivisions.size());
+            root.c = -1.0f;
+
+            const auto& values = found->second;
+            const int finest = lodDivisions.back();
+            const std::size_t fineOffset = values.size() -
+                static_cast<std::size_t>(finest) * finest * finest;
+            const std::vector<hexprojection::Cell> fine(
+                values.begin() + static_cast<std::ptrdiff_t>(fineOffset),
+                values.end());
+            if (!fine.empty()) {
+                root.ax = fine.front()[0];
+                root.ay = fine.front()[1];
+                root.az = fine.front()[2];
+                root.rho = fine.front()[3];
+            }
+
+            // Keep the six face beta values in metadata slots 6 and 7;
+            // hierarchy levels are limited to six so these slots stay free.
+            root.children[6][3] = 1.0f;
+            for (int axis = 0; axis < 3; ++axis) {
+                for (int sign = 0; sign < 2; ++sign) {
+                    ObjVoxelCoord neighbour = world->coord;
+                    if (axis == 0) neighbour.x += sign != 0 ? 1 : -1;
+                    if (axis == 1) neighbour.y += sign != 0 ? 1 : -1;
+                    if (axis == 2) neighbour.z += sign != 0 ? 1 : -1;
+                    float correlation = 0.0f;
+                    const auto neighbourFound = hierarchy.find(std::make_tuple(
+                        neighbour.x, neighbour.y, neighbour.z));
+                    if (neighbourFound != hierarchy.end()) {
+                        const auto& neighbourValues = neighbourFound->second;
+                        const std::size_t neighbourOffset = neighbourValues.size() -
+                            static_cast<std::size_t>(finest) * finest * finest;
+                        const std::vector<hexprojection::Cell> neighbourFine(
+                            neighbourValues.begin() +
+                                static_cast<std::ptrdiff_t>(neighbourOffset),
+                            neighbourValues.end());
+                        correlation = hexprojection::overlapLogRatio(
+                            fine, neighbourFine, finest, axis, cellSize);
+                    }
+                    const int face = axis * 2 + sign;
+                    root.children[6 + face / 3][face % 3] = correlation;
+                }
+            }
+
+            std::size_t source = 0;
+            for (std::size_t level = 0; level < lodDivisions.size(); ++level) {
+                const int n = lodDivisions[level];
+                root.children[level] = {
+                    static_cast<float>(voxelio->voxelHexs.size()),
+                    static_cast<float>(n), 1.0f / static_cast<float>(n), 0.0f};
+                for (int cell = 0; cell < n * n * n; ++cell) {
+                    const auto& value = values[source++];
+                    VoxelHex node{};
+                    node.model = 6;
+                    node.ax = value[0];
+                    node.ay = value[1];
+                    node.az = value[2];
+                    node.rho = value[3];
+                    voxelio->voxelHexs.emplace_back(node);
+                }
+            }
+        }
         for (int linkIndex : world->linkIndices) {
             if (linkIndex >= 0
                 && linkIndex < static_cast<int>(voxelio->voxellinks.size())) {

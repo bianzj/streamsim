@@ -99,6 +99,7 @@ float filteredSurfaceEnvironmentRadiance(NanoVDBLink nanoVDBLink,
 
 bool Voxel_raytracing(Ray ray, NanoVDBLink nanoVDBLink)
 {
+    ResetHexRay();
     // initialized the transmittance and accumulated radiance 
     float alpha_toSensor = 1.0;
     float alpha_toSolar, alpha_voxel;
@@ -212,8 +213,8 @@ bool Voxel_raytracing(Ray ray, NanoVDBLink nanoVDBLink)
 				float pathLength = Vector2Distance(sstate.position - sstate.lastPosition);// * 0.2; //!!!!需要改回去！！！
 				alpha_voxel = isParticipatingMedium(canopy)
                     ? canopyVoxelTransmittance(canopy, density, G, pathLength, scale)
-                    : ResolveTurbidInteraction(bufferId, density, G,
-                        sstate.position - sstate.lastPosition, pathLength, scale).x;
+                    : ResolveSpatialInteraction(bufferId, density, G,
+                        sstate.lastPosition, sstate.position, scale).x;
 				alpha_toSolar = voxelDirs[bufferId].solar;
 
 				if(alpha_toSensor < 0.001) return true;
@@ -244,8 +245,8 @@ bool Voxel_raytracing(Ray ray, NanoVDBLink nanoVDBLink)
 				else
 				{
 				// this is used for the hotspot effect
-				float solarDensity = max(density * ResolveClumpingIndex(bufferId, lightSet.direction), 0.000001);
-				float viewDensity = max(density * ResolveClumpingIndex(bufferId, sensorMatrix.direction), 0.000001);
+				float solarDensity = max(HexHotspotDensity(bufferId, lightSet.direction, density, G), 0.000001);
+				float viewDensity = max(HexHotspotDensity(bufferId, sensorMatrix.direction, density, G), 0.000001);
 				if(alpha_toSolar < 0.0001) pl_toSolar = 10000.0;
 				else pl_toSolar = -log(alpha_toSolar) / max(G, 0.000001) / solarDensity;
 				if(alpha_toSensor < 0.0001) pl_toSensor = 10000.0;
@@ -504,7 +505,12 @@ bool SamplePixel(vec2 imageCoords,vec2 sizeImage,int smpl)
 	//Ray ray = Ray(origin.xyz + randomAperturePos, finalRayDir);
     vec3 directionv = normalize(direction.xyz);
 	Ray ray = Ray(origin.xyz, directionv);
-
+    float pixelDiameter = max(
+        abs(sensorMatrix.projInverse[0][0]) * 2.0 / sizeImage.x,
+        abs(sensorMatrix.projInverse[1][1]) * 2.0 / sizeImage.y);
+    float halfAngle = atan(0.5 * pixelDiameter /
+                           max(sensorMatrix.focalDist, 1.0e-6));
+    ConfigureCone(ray.origin, ray.direction, pixelDiameter, halfAngle);
     return Voxel_raytracing(ray, nanoVDBLink);
 }
 

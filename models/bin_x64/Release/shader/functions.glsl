@@ -490,18 +490,294 @@ float ResolveClumpingIndex(int bufferId, vec3 direction)
     if (length2 <= 1.0e-12) return 1.0;
     VoxelHex medium = voxelHexs[mediumId];
     vec3 weights = abs(direction) * inversesqrt(length2);
+    if (medium.model == 10) {
+        weights /= max(weights.x + weights.y + weights.z, 1.0e-6);
+        return 2.0 * dot(weights, vec3(medium.ax, medium.ay, medium.az));
+    }
     return max(dot(weights, vec3(medium.ax, medium.ay, medium.az))
                / max(weights.x + weights.y + weights.z, 1.0e-6), 0.0);
+}
+
+float HexHotspotDensity(int bufferId, vec3 direction, float density, float G)
+{
+    int mediumId = voxelLinks[bufferId].hexId;
+    if (mediumId >= 0 && voxelHexs[mediumId].model == 10) {
+        vec3 weights = abs(direction) /
+            max(dot(abs(direction), vec3(1.0)), 1.0e-12);
+        return density * dot(
+            weights, vec3(voxelHexs[mediumId].ax,
+                          voxelHexs[mediumId].ay,
+                          voxelHexs[mediumId].az)) / max(G, 1.0e-6);
+    }
+    return density * ResolveClumpingIndex(bufferId, direction);
 }
 
 // x 为透过率，y 为拦截率，二者使用相同的 rho*G*CI(direction)。
 vec2 ResolveTurbidInteraction(int bufferId, float density, float G,
                               vec3 direction, float pathLength, float sceneScale)
 {
+    int mediumId = voxelLinks[bufferId].hexId;
+    if (mediumId >= 0 && voxelHexs[mediumId].model == 10) {
+        vec3 weights = abs(direction) /
+            max(dot(abs(direction), vec3(1.0)), 1.0e-12);
+        float extinction = voxelHexs[mediumId].rho * dot(
+            weights, vec3(voxelHexs[mediumId].ax,
+                          voxelHexs[mediumId].ay,
+                          voxelHexs[mediumId].az));
+        float transmission = exp(-max(extinction, 0.0) *
+                                  max(pathLength, 0.0) *
+                                  max(sceneScale, 0.0));
+        return vec2(transmission, 1.0 - transmission);
+    }
     float opticalDepth = max(density, 0.0) * max(G, 0.0)
         * ResolveClumpingIndex(bufferId, direction)
         * max(pathLength, 0.0) * max(sceneScale, 0.0);
     float transmission = exp(-opticalDepth);
+    return vec2(transmission, 1.0 - transmission);
+}
+
+// Negative aperture values are internal HEX render-mode tags.  They do not
+// alter the public camera aperture used by the ordinary perspective path.
+vec3 coneOrigin = vec3(0.0);
+vec3 coneAxis = vec3(0.0, 1.0, 0.0);
+float coneBaseDiameter = 0.0;
+float coneDiameterSlope = 0.0;
+bool overlapHasPrevious = false;
+vec3 overlapPreviousMin = vec3(0.0);
+vec3 overlapPreviousEnd = vec3(0.0);
+vec3 overlapPreviousSpan = vec3(0.0);
+
+void ResetHexRay()
+{
+    overlapHasPrevious = false;
+}
+
+bool ConeProjectionEnabled()
+{
+    return voxelHexs.length() > 0 && voxelHexs[0].model == 5 &&
+           sensorMatrix.aperture == -4.0;
+}
+
+bool ConeLODEnabled()
+{
+    return ConeProjectionEnabled();
+}
+
+void ConfigureCone(vec3 origin, vec3 axis, float diameter, float halfAngle)
+{
+    overlapHasPrevious = false;
+    coneOrigin = origin;
+    coneAxis = normalize(axis);
+    coneBaseDiameter = diameter;
+    coneDiameterSlope = 2.0 * tan(halfAngle);
+}
+
+// DDA through one mipmap level.  The segment is clipped to the parent
+// voxel, so empty child cells remain empty instead of being filled by an
+// enclosing bounding-box approximation.
+float HierarchyTransmission(int rootId, int level, vec3 start, vec3 end,
+                            vec3 parentMin, float sceneScale)
+{
+    vec4 metadata = voxelHexs[rootId].children[level];
+    int offset = int(metadata.x);
+    int n = int(metadata.y);
+    vec3 delta = end - start;
+    float enter = 0.0;
+    float leave = 1.0;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (abs(delta[axis]) < 1.0e-12) {
+            if (start[axis] < parentMin[axis] ||
+                start[axis] >= parentMin[axis] + 1.0) return 1.0;
+        } else {
+            float a = (parentMin[axis] - start[axis]) / delta[axis];
+            float b = (parentMin[axis] + 1.0 - start[axis]) / delta[axis];
+            enter = max(enter, min(a, b));
+            leave = min(leave, max(a, b));
+        }
+    }
+    if (leave <= enter) return 1.0;
+
+    vec3 directionSign = sign(delta);
+    ivec3 cell = clamp(ivec3(floor(
+        (start + enter * delta - parentMin) * float(n) +
+        directionSign * 1.0e-5)), ivec3(0), ivec3(n - 1));
+    vec3 nextBoundary = vec3(1.0e30);
+    vec3 stride = vec3(1.0e30);
+    for (int axis = 0; axis < 3; ++axis) {
+        if (abs(delta[axis]) < 1.0e-12) continue;
+        float boundary = parentMin[axis] +
+            float(cell[axis] + (delta[axis] > 0.0 ? 1 : 0)) / float(n);
+        nextBoundary[axis] = (boundary - start[axis]) / delta[axis];
+        stride[axis] = 1.0 / (float(n) * abs(delta[axis]));
+    }
+
+    vec3 weights = abs(delta) /
+        max(dot(abs(delta), vec3(1.0)), 1.0e-12);
+    float opticalDepth = 0.0;
+    float t = enter;
+    float distanceMetres = length(delta) * max(sceneScale, 0.0);
+    for (int visit = 0; visit < 3 * n + 3; ++visit) {
+        if (any(lessThan(cell, ivec3(0))) ||
+            any(greaterThanEqual(cell, ivec3(n)))) break;
+        float nextT = min(leave, min(nextBoundary.x,
+                                     min(nextBoundary.y, nextBoundary.z)));
+        int index = offset + (cell.x * n + cell.y) * n + cell.z;
+        vec3 k = vec3(voxelHexs[index].ax,
+                       voxelHexs[index].ay,
+                       voxelHexs[index].az);
+        opticalDepth += max(nextT - t, 0.0) * distanceMetres * dot(weights, k);
+        if (nextT >= leave) break;
+        for (int axis = 0; axis < 3; ++axis) {
+            if (nextBoundary[axis] <= nextT + 1.0e-7) {
+                cell[axis] += int(directionSign[axis]);
+                nextBoundary[axis] += stride[axis];
+            }
+        }
+        t = nextT;
+    }
+    return exp(-max(opticalDepth, 0.0));
+}
+
+float ResolveHierarchyTransmission(int rootId, vec3 start, vec3 end,
+                                   vec3 parentMin, float sceneScale)
+{
+    int maxDepth = int(voxelHexs[rootId].a);
+    vec3 midpoint = 0.5 * (start + end);
+    float distance = max(dot(midpoint - coneOrigin, coneAxis), 0.0);
+    float diameter = coneBaseDiameter + distance * coneDiameterSlope;
+    float depth = ConeLODEnabled()
+        ? clamp(-log2(max(diameter, 1.0e-12)), 0.0, float(maxDepth))
+        : float(maxDepth);
+    int coarse = int(floor(depth));
+    int fine = min(coarse + 1, maxDepth);
+    float blend = depth - float(coarse);
+    float coarseTransmission = HierarchyTransmission(
+        rootId, coarse, start, end, parentMin, sceneScale);
+    if (fine == coarse || blend < 1.0e-6) return coarseTransmission;
+    float fineTransmission = HierarchyTransmission(
+        rootId, fine, start, end, parentMin, sceneScale);
+    return mix(coarseTransmission, fineTransmission, blend);
+}
+
+// Apply the six-neighbour gap correction to a segment crossing a compact
+// current-scale HEX voxel.  Non-HEX media retain the original transport.
+vec2 ResolveSpatialInteraction(int bufferId, float density, float G,
+                               vec3 start, vec3 end, float sceneScale)
+{
+    vec3 delta = end - start;
+    float distance = length(delta);
+    int mediumId = voxelLinks[bufferId].hexId;
+
+    if (mediumId >= 0 && voxelHexs[mediumId].model == 5) {
+        if (distance < 1.0e-10) return vec2(1.0, 0.0);
+        vec3 semi = vec3(floor(setting.voxelSize.x * 0.5 + 0.5), 0.0,
+                         floor(setting.voxelSize.z * 0.5 + 0.5));
+        vec3 parentMin = vec3(voxelLinks[bufferId].voxelId) - semi;
+        float transmission = ResolveHierarchyTransmission(
+            mediumId, start, end, parentMin, sceneScale);
+
+        // Consecutive face neighbours use the same beta correction as the
+        // compact HEX path.  The beta values are stored in children[6/7].
+        float entry = 0.0;
+        float exitPoint = 1.0;
+        for (int axis = 0; axis < 3; ++axis) {
+            if (abs(delta[axis]) > 1.0e-12) {
+                float a = (parentMin[axis] - start[axis]) / delta[axis];
+                float b = (parentMin[axis] + 1.0 - start[axis]) / delta[axis];
+                entry = max(entry, min(a, b));
+                exitPoint = min(exitPoint, max(a, b));
+            }
+        }
+        if (exitPoint > entry) {
+            vec3 first = start + entry * delta;
+            vec3 last = start + exitPoint * delta;
+            vec3 span = abs(last - first);
+            vec3 difference = parentMin - overlapPreviousMin;
+            vec3 stepCell = round(difference);
+            if (overlapHasPrevious && length(first - overlapPreviousEnd) < 0.002 &&
+                length(difference - stepCell) < 0.001 &&
+                abs(dot(abs(stepCell), vec3(1.0)) - 1.0) < 0.001 &&
+                voxelHexs[mediumId].children[6].w > 0.5) {
+                int axis = abs(stepCell.x) > 0.5 ? 0 :
+                           (abs(stepCell.y) > 0.5 ? 1 : 2);
+                int face = axis * 2 + (stepCell[axis] < 0.0 ? 1 : 0);
+                float beta = voxelHexs[mediumId].children[6 + face / 3][face % 3];
+                float exposure = clamp(overlapPreviousSpan[axis], 0.0, 1.0) *
+                                 clamp(span[axis], 0.0, 1.0);
+                transmission = exp(min(0.0, log(max(transmission, 1.0e-30)) +
+                                             beta * exposure));
+            }
+            overlapHasPrevious = true;
+            overlapPreviousMin = parentMin;
+            overlapPreviousEnd = last;
+            overlapPreviousSpan = span;
+        } else {
+            overlapHasPrevious = false;
+        }
+        return vec2(transmission, 1.0 - transmission);
+    }
+
+    if (mediumId < 0 || voxelHexs[mediumId].model != 10) {
+        ResetHexRay();
+        return ResolveTurbidInteraction(bufferId, density, G, delta,
+                                        distance, sceneScale);
+    }
+    if (distance < 1.0e-10) return vec2(1.0, 0.0);
+
+    vec3 semi = vec3(floor(setting.voxelSize.x * 0.5 + 0.5), 0.0,
+                     floor(setting.voxelSize.z * 0.5 + 0.5));
+    vec3 lower = vec3(voxelLinks[bufferId].voxelId) - semi;
+    float entry = 0.0;
+    float exitPoint = 1.0;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (abs(delta[axis]) < 1.0e-12) {
+            if (start[axis] < lower[axis] ||
+                start[axis] >= lower[axis] + 1.0) {
+                ResetHexRay();
+                return vec2(1.0, 0.0);
+            }
+        } else {
+            float a = (lower[axis] - start[axis]) / delta[axis];
+            float b = (lower[axis] + 1.0 - start[axis]) / delta[axis];
+            entry = max(entry, min(a, b));
+            exitPoint = min(exitPoint, max(a, b));
+        }
+    }
+    if (exitPoint <= entry) {
+        ResetHexRay();
+        return vec2(1.0, 0.0);
+    }
+
+    vec3 first = start + entry * delta;
+    vec3 last = start + exitPoint * delta;
+    vec3 span = abs(last - first);
+    vec3 weights = abs(delta) /
+        max(dot(abs(delta), vec3(1.0)), 1.0e-12);
+    float extinction = voxelHexs[mediumId].rho * dot(
+        weights, vec3(voxelHexs[mediumId].ax,
+                      voxelHexs[mediumId].ay,
+                      voxelHexs[mediumId].az));
+    float opticalDepth = max(extinction, 0.0) * length(last - first) *
+                         max(sceneScale, 0.0);
+
+    vec3 difference = lower - overlapPreviousMin;
+    vec3 stepCell = round(difference);
+    if (overlapHasPrevious && length(first - overlapPreviousEnd) < 0.002 &&
+        length(difference - stepCell) < 0.001 &&
+        abs(dot(abs(stepCell), vec3(1.0)) - 1.0) < 0.001) {
+        int axis = abs(stepCell.x) > 0.5 ? 0 :
+                   (abs(stepCell.y) > 0.5 ? 1 : 2);
+        int face = axis * 2 + (stepCell[axis] < 0.0 ? 1 : 0);
+        float beta = voxelHexs[mediumId].children[face / 3][face % 3];
+        opticalDepth -= beta * clamp(overlapPreviousSpan[axis], 0.0, 1.0) *
+                        clamp(span[axis], 0.0, 1.0);
+    }
+
+    overlapHasPrevious = true;
+    overlapPreviousMin = lower;
+    overlapPreviousEnd = last;
+    overlapPreviousSpan = span;
+    float transmission = exp(-max(opticalDepth, 0.0));
     return vec2(transmission, 1.0 - transmission);
 }
 #endif

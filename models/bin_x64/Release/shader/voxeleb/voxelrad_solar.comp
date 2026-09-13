@@ -46,6 +46,7 @@ float GammaT[DIFFUSE_ANGLE_NUM * DIFFUSE_ANGLE_NUM];
 float SolarVisibilityFromOrigin(vec3 origin, vec3 lightDirection,
                                 NanoVDBLink nanoVDBLink, vec3 semiRange)
 {
+    ResetHexRay();
     float scale = setting.scale;
     float density = 1.0;
     float G = 0.5;
@@ -79,8 +80,8 @@ float SolarVisibilityFromOrigin(vec3 origin, vec3 lightDirection,
                 alphaVoxel = isParticipatingMedium(canopies[canopyId])
                     ? canopyVoxelTransmittance(canopies[canopyId], density, G,
                         pathLength, scale)
-                    : ResolveTurbidInteraction(bufferId, density, G,
-                        sstate.position - sstate.lastPosition, pathLength, scale).x;
+                    : ResolveSpatialInteraction(bufferId, density, G,
+                        sstate.lastPosition, sstate.position, scale).x;
             }
         }
 

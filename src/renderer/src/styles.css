@@ -20,6 +20,7 @@
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html, body, #app { width: 100%; height: 100%; margin: 0; overflow: hidden; background: var(--bg); color: var(--text); }
+#app { display: grid; grid-template-rows: 58px minmax(0, 1fr) 28px; }
 button, input, select, textarea { font: inherit; }
 button { color: inherit; }
 .svg-sprite { position: fixed; width: 0; height: 0; overflow: hidden; }
@@ -46,7 +47,7 @@ svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width:
 .button.danger { border-color: rgba(255,121,111,.3); color: var(--red); }
 .button:disabled { opacity: .35; cursor: default; }
 
-.app-grid { height: calc(100% - 58px); display: grid; grid-template-columns: 244px minmax(480px, 1fr) 310px; grid-template-rows: minmax(360px, 1fr) 208px; }
+.app-grid { height: auto; min-height: 0; display: grid; grid-template-columns: 244px minmax(480px, 1fr) 310px; grid-template-rows: minmax(360px, 1fr) 208px; }
 .sidebar { grid-row: 1 / 3; display: flex; flex-direction: column; border-right: 1px solid var(--border); background: var(--panel); min-width: 0; }
 .sidebar-section { padding: 16px 14px; border-bottom: 1px solid var(--border); }
 .eyebrow { display: block; color: var(--subtle); font-size: 9px; text-transform: uppercase; letter-spacing: .16em; font-weight: 700; margin-bottom: 10px; }
@@ -163,6 +164,8 @@ svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width:
 .log-line { display:grid; grid-template-columns:58px 1fr; gap:10px; color:#aebeb7; white-space:pre-wrap; overflow-wrap:anywhere; }
 .log-line time { color:#40554c; user-select:none; }.log-line.muted span { color:#61766d; }.log-line.error span { color:var(--red); }.log-line.success span { color:var(--green); }.log-line.command span { color:#d5c891; }
 .log-line.warning span { color:#b47719; }
+.app-footer { min-height: 28px; display: flex; align-items: center; justify-content: center; gap: 9px; border-top: 1px solid var(--border); background: var(--panel-2); color: var(--subtle); font-size: 10px; letter-spacing: .02em; }
+.app-footer-separator { color: var(--border-strong); }
 
 .drawer-backdrop { position:fixed; inset:0; z-index:20; display:grid; place-items:center; padding:30px; background:rgba(1,5,4,.74); backdrop-filter:blur(4px); }
 .drawer-backdrop[hidden] { display:none; }

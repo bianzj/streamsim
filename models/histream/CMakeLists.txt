@@ -247,6 +247,7 @@ foreach (VOXELEB_SHADER_SOURCE IN LISTS HISTREAM_VOXELEB_SHADER_FILES)
                     "${CMAKE_CURRENT_SOURCE_DIR}/shader/parameters.h"
                     "${CMAKE_CURRENT_SOURCE_DIR}/shader/bindingLayout.h"
                     "${CMAKE_CURRENT_SOURCE_DIR}/shader/global.glsl"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/shader/functions.glsl"
                     "${CMAKE_CURRENT_SOURCE_DIR}/shader/voxeleb/fluid_common.glsl"
                     "${CMAKE_CURRENT_SOURCE_DIR}/shader/voxeleb/fluid_coupling.glsl"
             VERBATIM)
@@ -274,6 +275,7 @@ foreach (VOXELRT_SHADER_SOURCE IN LISTS HISTREAM_VOXELRT_SHADER_FILES)
                     -o "${VOXELRT_SHADER_OUTPUT}"
             DEPENDS "${VOXELRT_SHADER_SOURCE}"
                     "${CMAKE_CURRENT_SOURCE_DIR}/shader/parameters.h"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/shader/functions.glsl"
             VERBATIM)
     list(APPEND HISTREAM_VOXELRT_SHADER_OUTPUTS "${VOXELRT_SHADER_OUTPUT}")
 endforeach()

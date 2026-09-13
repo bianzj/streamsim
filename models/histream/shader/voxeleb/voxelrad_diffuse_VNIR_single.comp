@@ -120,6 +120,7 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
   {
     directioni0 = DIFFUSE_DIRECTIONS[iangle];
     directioni = normalize(directioni0);
+    ConfigureCone(voxelPos0, directioni, 0.0, 0.0);
     Ray ray = Ray(voxelPos0, directioni);
     alpha_toSolar = 1.0;
     alpha_toVoxel = 1.0;
@@ -196,8 +197,8 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
               float pathLength = Vector2Distance(sstate.position - sstate.lastPosition);
               alpha_voxel = isParticipatingMedium(canopies[canopyId])
                   ? canopyVoxelTransmittance(canopies[canopyId], density, G, pathLength, scale)
-                  : ResolveTurbidInteraction(bufferId, density, G,
-                      sstate.position - sstate.lastPosition, pathLength, scale).x;
+                : ResolveSpatialInteraction(bufferId, density, G,
+                    sstate.lastPosition, sstate.position, scale).x;
               alpha_toSolar = voxelDirs[bufferId].solar;
 
             // get the phase function for solar direction to induced direction 

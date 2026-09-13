@@ -224,10 +224,16 @@ struct VoxelHex
     float ay{1.0f};
     float az{1.0f};
     float rho{0.0f};
+    // model 10: axis extinction coefficients and six face-neighbour beta values.
+    float a{1.0f};
+    float b{1.0f};
+    float c{1.0f};
+    int model{0};
+    std::array<std::array<float, 4>, 8> children{};
 };
 
 static_assert(sizeof(VoxelLink) == 48, "VoxelLink must match GLSL std430 stride");
-static_assert(sizeof(VoxelHex) == 16, "VoxelHex must match GLSL std430 stride");
+static_assert(sizeof(VoxelHex) == 160, "VoxelHex must match GLSL std430 stride");
 
 
 struct VoxelDir

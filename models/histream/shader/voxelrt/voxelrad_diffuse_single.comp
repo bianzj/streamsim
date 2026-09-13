@@ -156,6 +156,7 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
         DIFFUSE_DIRECTIONS[iangle], azimuthOffset);
     directioni = normalize(directioni0);
     Ray ray = Ray(voxelPos0, directioni);
+    ConfigureCone(voxelPos0, directioni, 0.0, 0.0);
     alpha_toSolar = 1.0;
     alpha_toVoxel = 1.0;
 	  voxelRads[voxelRadiationIndex(bufferId0, iangle)].induced = 0.0;
@@ -233,8 +234,8 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
               float pathLength = Vector2Distance(sstate.position - sstate.lastPosition);
               alpha_voxel = isParticipatingMedium(canopy)
                   ? canopyVoxelTransmittance(canopy, density, G, pathLength, scale)
-                  : ResolveTurbidInteraction(bufferId, density, G,
-                      sstate.position - sstate.lastPosition, pathLength, scale).x;
+                  : ResolveSpatialInteraction(bufferId, density, G,
+                      sstate.lastPosition, sstate.position, scale).x;
               alpha_toSolar = voxelDirs[bufferId].solar;
 
             // get the phase function for solar direction to induced direction 
@@ -453,6 +454,7 @@ void voxel_raytracing_diffuse_packet(
         DIFFUSE_DIRECTIONS[iangle], azimuthOffset);
     vec3 direction = normalize(direction0);
     Ray ray = Ray(voxelPos0, direction);
+    ConfigureCone(voxelPos0, direction, 0.0, 0.0);
     float alphaToVoxel = 1.0;
     int kstep = 0;
 
@@ -498,10 +500,8 @@ void voxel_raytracing_diffuse_packet(
           float alphaVoxel = isParticipatingMedium(canopy)
               ? canopyVoxelTransmittance(
                     canopy, density, canopy.G, pathLength, scale)
-              : ResolveTurbidInteraction(
-                    bufferId, density, canopy.G,
-                    sstate.position - sstate.lastPosition,
-                    pathLength, scale).x;
+              : ResolveSpatialInteraction(bufferId, density, canopy.G,
+                    sstate.lastPosition, sstate.position, scale).x;
           float alphaToSolar = voxelDirs[bufferId].solar;
           float gammaR = GammaSR[iangle];
           float gammaT = GammaST[iangle];
