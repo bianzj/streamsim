@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.15)
+project(voxel_boundary_test LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+add_executable(voxel_boundary_test main.cpp)
+enable_testing()
+add_test(NAME closed_outward_voxel_boundary COMMAND voxel_boundary_test)

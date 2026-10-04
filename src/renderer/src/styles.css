@@ -665,3 +665,28 @@ body { font-size: 14px; font-weight: 500; }
   .reference-dialog > footer { align-items:flex-start; flex-direction:column; justify-content:center; gap:3px; padding-block:8px; }
   .reference-list li { grid-template-columns:1fr; gap:6px; }
 }
+
+.histream-proxy-dialog { width:min(1120px,95vw); max-height:94vh; display:grid; grid-template-rows:64px minmax(0,1fr) 58px; overflow:hidden; border:1px solid var(--border); border-radius:11px; background:#fff; box-shadow:0 28px 90px rgba(25,42,64,.32); }
+.histream-proxy-dialog > header,.histream-proxy-dialog > footer { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:0 18px; border-bottom:1px solid var(--border); }
+.histream-proxy-dialog > header h2 { margin:0; color:var(--text); font-size:16px; font-weight:700; }
+.histream-proxy-dialog > header .eyebrow { margin-bottom:3px; }
+.histream-proxy-dialog > footer { border-top:1px solid var(--border); border-bottom:0; color:var(--muted); font-size:10px; }
+.histream-proxy-dialog > footer > span { max-width:720px; line-height:1.5; }
+.histream-proxy-body { min-height:0; overflow:auto; padding:16px 18px; }
+.histream-proxy-scope { padding:11px 13px; border:1px solid #bed7f2; border-radius:7px; color:#294866; background:#f2f7fd; font-size:11px; line-height:1.6; }
+.histream-proxy-controls { display:grid; grid-template-columns:minmax(260px,1fr) minmax(190px,.55fr) auto; align-items:end; gap:12px; margin:14px 0; }
+.histream-proxy-controls .dialog-field { min-width:0; }
+.histream-proxy-controls .select { width:100%; height:36px; }
+.histream-proxy-controls button { min-height:36px; white-space:nowrap; }
+.histream-proxy-status { min-height:24px; color:var(--muted); font-size:11px; line-height:1.6; overflow-wrap:anywhere; }
+.histream-proxy-preview-wrap { min-height:300px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; margin-top:9px; padding:10px; border:1px solid var(--border); border-radius:8px; background:#f1f4f8; }
+.histream-proxy-preview-title { color:var(--text); font-size:11px; font-weight:700; }
+.histream-proxy-preview-wrap img { max-width:100%; max-height:55vh; object-fit:contain; image-rendering:pixelated; background:#fff; }
+.histream-proxy-runtime { margin-top:9px; color:var(--muted); font:10px/1.6 ui-monospace,Consolas,monospace; overflow-wrap:anywhere; }
+.histream-proxy-dialog a[hidden],.histream-proxy-dialog img[hidden] { display:none; }
+@media (max-width:760px) {
+  .histream-proxy-dialog { height:94vh; grid-template-rows:64px minmax(0,1fr) auto; }
+  .histream-proxy-controls { grid-template-columns:1fr; }
+  .histream-proxy-dialog > footer { align-items:flex-start; flex-direction:column; justify-content:center; gap:7px; padding-block:8px; }
+  .histream-proxy-preview-wrap { min-height:220px; }
+}

@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -37,6 +38,39 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 using Vec3 = std::array<float, 3>;
+
+std::string utcTimestamp() {
+    const std::time_t now = std::time(nullptr);
+    std::tm utc{};
+#ifdef _WIN32
+    gmtime_s(&utc, &now);
+#else
+    gmtime_r(&now, &utc);
+#endif
+    std::ostringstream text;
+    text << std::put_time(&utc, "%Y-%m-%dT%H:%M:%SZ");
+    return text.str();
+}
+
+// This index references only the current invocation. A stopped CLI run may
+// leave older node files beside it; consumers must not infer completion from
+// the directory's contents.
+struct FacetRunIndex {
+    std::filesystem::path path;
+    ProjectJson::Json value;
+    void write() {
+        std::ofstream stream(path, std::ios::trunc);
+        stream << value.dump(2) << '\n';
+        if (!stream) throw std::runtime_error("FacetEB cannot write run index");
+    }
+    ~FacetRunIndex() {
+        if (value.value("status", "") == "running") {
+            value["status"] = "failed";
+            value["finishedAt"] = utcTimestamp();
+            try { write(); } catch (...) {}
+        }
+    }
+};
 constexpr float kPi = 3.14159265358979323846f;
 constexpr uint32_t kRasterSize = 1024;
 constexpr uint32_t kRasterLayers = 64;
@@ -3176,6 +3210,16 @@ try {
         xmlFloat(xml, "temperatureTolerance", 0.05f), 0.001f, 10.0f);
     const float temperatureRelaxation = std::clamp(
         xmlFloat(xml, "temperatureRelaxation", 0.5f), 0.05f, 1.0f);
+    FacetRunIndex runIndex{outputDirectory / "faceteb_run.json", {
+        {"kind", "faceteb-run"}, {"schemaVersion", 1}, {"status", "running"},
+        {"startedAt", utcTimestamp()}, {"input", inputPath},
+        {"requested", {{"startNode", startNode}, {"endNodeExclusive", endNode}}},
+        {"convergence", {{"temperatureTolerance_K", temperatureTolerance},
+            {"iterationBudget", maximumCouplingIterations},
+            {"criterion", "temperatureDelta and residual/thermal-response <= temperatureTolerance"}}},
+        {"completed", ProjectJson::Json::array()}, {"products", ProjectJson::Json::array()}
+    }};
+    runIndex.write();
     const size_t spectralAccelerationWidth = static_cast<size_t>(std::clamp(
         static_cast<int>(std::lround(
             xmlFloat(xml, "spectralAccelerationWidth", 100.0f))),
@@ -3365,6 +3409,9 @@ try {
     std::vector<float> latestStorageHeat;
     uint32_t latestCouplingIterations = 0;
     float latestTemperatureDelta = 0.0f;
+    float latestEnergyResidual = 0.0f;
+    float latestEnergyResidualEquivalent = 0.0f;
+    bool allNodesConverged = true;
     std::string latestTime;
 
     const std::filesystem::path stepDirectory = outputDirectory / ".facet_steps";
@@ -3386,6 +3433,8 @@ try {
     std::ofstream pvSummary(outputDirectory/"photovoltaic_summary.csv");
     pvSummary << "node,time,area_m2,temperature_C,incident_W,absorbed_W,electric_W,net_longwave_W,sensible_W,storage_W,max_residual_W_m2,energy_kWh\n";
     double pvEnergyKwh=0;
+    runIndex.value["products"].push_back("photovoltaic_summary.csv");
+    runIndex.value["products"].push_back(".facet_steps/components.bin");
     const char* stepSyncEnvironment = std::getenv("STREAMSIM_FACET_STEP_SYNC");
     const bool synchronizeStepOutput = stepSyncEnvironment &&
         std::string(stepSyncEnvironment) == "1";
@@ -3536,6 +3585,8 @@ try {
         std::vector<float> storageHeatSlope(surfaceCount);
         uint32_t couplingIterations = 0;
         float maximumTemperatureDelta = 0.0f;
+        float maximumEnergyResidual = 0.0f;
+        float maximumEnergyResidualEquivalent = 0.0f;
 
         std::vector<float> radiativeNet(surfaceCount);
         const auto evaluateEnergyFluxes =
@@ -3668,6 +3719,29 @@ try {
                 }
             };
 
+        // The residual tolerance is expressed in K through the local energy
+        // equation's thermal response, using the existing user tolerance.
+        // A universal W/m2 cutoff would treat high-inertia PV, foliage and
+        // soil differently even at the same requested temperature accuracy.
+        const auto measureEnergyResidual = [&](const std::vector<facetvk::SurfaceOptics>& optics) {
+            maximumEnergyResidual = 0.0f;
+            maximumEnergyResidualEquivalent = 0.0f;
+            for (uint32_t facet = 0; facet < scene.facetCount(); ++facet) {
+                const bool object = facet < scene.leafFacetCount;
+                const size_t first = static_cast<size_t>(facet) * 2U;
+                for (size_t side = first; side < first + (object ? 1U : 2U); ++side) {
+                    const float emissivity = std::clamp(1.0f - optics[side].reflectance - optics[side].transmittance, 0.0f, 1.0f);
+                    const float residual = netRadiation[side] - sensibleHeat[side] - latentHeat[side] - storageHeat[side] - (object ? photovoltaicPower[side] : 0.0f);
+                    const float response = (object ? 8.0f : 4.0f) * emissivity * kStefanBoltzmann * std::pow(temperature[side], 3.0f) +
+                        aerodynamicConductance * (object ? 2.0f * surfaceForFacet(scene, facet).convectiveScale : 1.0f) +
+                        latentHeatSlope[side] + storageHeatSlope[side] + (object ? photovoltaicSlope[side] : 0.0f);
+                    if (!std::isfinite(residual) || !std::isfinite(response)) throw std::runtime_error("FacetEB energy residual is not finite");
+                    maximumEnergyResidual = std::max(maximumEnergyResidual, std::abs(residual));
+                    maximumEnergyResidualEquivalent = std::max(maximumEnergyResidualEquivalent, std::abs(residual) / std::max(1.0f, response));
+                }
+            }
+        };
+
         for (uint32_t coupling = 0;
              coupling < maximumCouplingIterations; ++coupling) {
             const std::vector<facetvk::SurfaceOptics> longwaveOptics =
@@ -3679,6 +3753,7 @@ try {
                 incidentRadiation(
                     longwaveSolution, longwaveOptics, skyLongwave);
             evaluateEnergyFluxes(longwaveOptics, longwaveIncident);
+            measureEnergyResidual(longwaveOptics);
 
             maximumTemperatureDelta = 0.0f;
             for (uint32_t facet = 0;
@@ -3751,7 +3826,7 @@ try {
                 }
             }
             couplingIterations = coupling + 1U;
-            if (maximumTemperatureDelta <= temperatureTolerance) {
+            if (maximumTemperatureDelta <= temperatureTolerance && maximumEnergyResidualEquivalent <= temperatureTolerance) {
                 break;
             }
         }
@@ -3766,6 +3841,9 @@ try {
                 finalLongwaveSolution, finalLongwaveOptics, skyLongwave);
         evaluateEnergyFluxes(
             finalLongwaveOptics, finalLongwaveIncident);
+        measureEnergyResidual(finalLongwaveOptics);
+        const bool converged = maximumTemperatureDelta <= temperatureTolerance && maximumEnergyResidualEquivalent <= temperatureTolerance;
+        allNodesConverged = allNodesConverged && converged;
 
         std::ofstream pvCsv(outputDirectory/("photovoltaic_node_"+std::to_string(node)+".csv"));
         pvCsv << "area_m2,temperature_C,incident_W_m2,absorbed_W_m2,electric_W_m2,residual_W_m2,latent_W_m2,effective_W_m2,net_longwave_W_m2,sensible_W_m2,storage_W_m2,facet_index\n";
@@ -3870,6 +3948,8 @@ try {
                 processDirectory / (processStem + ".bin");
             const std::filesystem::path metadataPath =
                 processDirectory / (processStem + ".json");
+            runIndex.value["products"].push_back("process/" + processStem + ".bin");
+            runIndex.value["products"].push_back("process/" + processStem + ".json");
             std::ofstream processBinary(
                 processBinaryPath, std::ios::binary | std::ios::trunc);
             if (!processBinary) {
@@ -3914,7 +3994,13 @@ try {
                      << "  \"recordFloats\": " << (type == "energy" ? 5 : 3) << ",\n"
                      << "  \"couplingIterations\": " << couplingIterations << ",\n"
                      << "  \"temperatureDelta\": "
-                     << maximumTemperatureDelta << ",\n  \"fields\": ";
+                     << maximumTemperatureDelta
+                     << ",\n  \"converged\": " << (converged ? "true" : "false")
+                     << ",\n  \"energyResidual\": " << maximumEnergyResidual
+                     << ",\n  \"energyResidualUnits\": \"W m-2\""
+                     << ",\n  \"energyResidualTemperatureEquivalent\": " << maximumEnergyResidualEquivalent
+                     << ",\n  \"temperatureTolerance\": " << temperatureTolerance
+                     << ",\n  \"iterationBudget\": " << maximumCouplingIterations << ",\n  \"fields\": ";
             if (type == "photovoltaic") {
                 metadata << "[{\"id\":\"photovoltaicPower\",\"label\":\"光伏功率 [W m⁻²]\",\"offset\":0},"
                             "{\"id\":\"temperature\",\"label\":\"温度 [K]\",\"offset\":1},"
@@ -3941,6 +4027,18 @@ try {
         if (!binary || !pvCsv || !pvSummary) {
             throw std::runtime_error("FacetEB cannot finish time-step output");
         }
+        runIndex.value["products"].push_back(".facet_steps/energy_T=" + token + ".bin");
+        runIndex.value["products"].push_back("photovoltaic_node_" + std::to_string(node) + ".csv");
+        runIndex.value["completed"].push_back({
+            {"node", node}, {"token", token}, {"julianTime", meteo.julianTime},
+            {"converged", converged}, {"iterations", couplingIterations},
+            {"iterationBudget", maximumCouplingIterations},
+            {"temperatureDelta", maximumTemperatureDelta},
+            {"temperatureTolerance", temperatureTolerance},
+            {"energyResidual", maximumEnergyResidual}, {"energyResidualUnits", "W m-2"},
+            {"energyResidualTemperatureEquivalent", maximumEnergyResidualEquivalent}
+        });
+        runIndex.write();
 
         if (node == endNode - 1) {
             latest.sunlit = sunlit;
@@ -3954,6 +4052,8 @@ try {
             latestStorageHeat = std::move(storageHeat);
             latestCouplingIterations = couplingIterations;
             latestTemperatureDelta = maximumTemperatureDelta;
+            latestEnergyResidual = maximumEnergyResidual;
+            latestEnergyResidualEquivalent = maximumEnergyResidualEquivalent;
             latestTime = token;
         }
 
@@ -3965,6 +4065,9 @@ try {
                   << "，迭代=" << couplingIterations
                   << "，最大温差=" << maximumTemperatureDelta << " K"
                   << std::endl;
+        std::cout << "FACET_CONVERGENCE\t" << node << '\t' << (converged ? 1 : 0)
+                  << '\t' << couplingIterations << '\t' << maximumTemperatureDelta
+                  << '\t' << maximumEnergyResidual << '\t' << maximumEnergyResidualEquivalent << std::endl;
         }
         if (synchronizeStepOutput) {
             // Backpressure: never overlap the next GPU solve with the current
@@ -4009,6 +4112,12 @@ try {
            << "  \"maxDelta\": " << latest.solution.maxDelta << ",\n"
            << "  \"couplingIterations\": " << latestCouplingIterations << ",\n"
            << "  \"temperatureDelta\": " << latestTemperatureDelta << ",\n";
+    output << "  \"converged\": " << (allNodesConverged ? "true" : "false") << ",\n"
+           << "  \"energyResidual\": " << latestEnergyResidual << ",\n"
+           << "  \"energyResidualUnits\": \"W m-2\",\n"
+           << "  \"energyResidualTemperatureEquivalent\": " << latestEnergyResidualEquivalent << ",\n"
+           << "  \"temperatureTolerance\": " << temperatureTolerance << ",\n"
+           << "  \"iterationBudget\": " << maximumCouplingIterations << ",\n";
 
     const auto writeArray = [&output](
         const char* name, const std::vector<float>& values, bool comma) {
@@ -4030,9 +4139,15 @@ try {
     writeArray("photovoltaicPower", latestPhotovoltaicPower, false);
     output << "}\n";
 
-    std::cout << "PROGRESS\t100\t面元辐射传输与能量平衡耦合完成" << std::endl;
+    output.close();
+    if (!output) throw std::runtime_error("FacetEB cannot finish result output");
+    runIndex.value["products"].push_back(std::filesystem::path(resultFile).filename().generic_string());
+    runIndex.value["status"] = allNodesConverged ? "completed" : "non_converged";
+    runIndex.value["finishedAt"] = utcTimestamp();
+    runIndex.write();
+    std::cout << "PROGRESS\t100\t" << (allNodesConverged ? "面元辐射传输与能量平衡耦合收敛" : "面元计算结束：存在未收敛节点，结果已保留") << std::endl;
     std::cout << "RESULT\t" << resultFile << std::endl;
-    return 0;
+    return allNodesConverged ? 0 : 2;
 } catch (const std::exception& error) {
     std::cerr << "faceteb: " << error.what() << '\n';
     return 1;

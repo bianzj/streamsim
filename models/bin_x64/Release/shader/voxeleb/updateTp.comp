@@ -133,12 +133,15 @@ void main()
                     voxelTlasts[TlastId + kdepth].sunlit,
                     sunlitFraction);
                 TnewProfile[kdepth] = 0.0;
-                Mprofile[kdepth] = ubom.meteo.sm;
+                Mprofile[kdepth] = soilMoistureFraction(
+                    soilSets[bioId].SMC, soilSets[bioId].SatWater);
             }
             Soilheatflux(ToldProfile, Mprofile,
                          actualSurfaceTemperature - 273.15,
                          soilSets[bioId].Tsoil,
-                         Gst, TnewProfile, dtime);
+                         Gst, TnewProfile, dtime,
+                         soilSets[bioId].cs, soilSets[bioId].rhos,
+                         soilSets[bioId].lambdas, soilSets[bioId].SatWater);
 
             for(int kdepth = 0; kdepth < TLASTNUM; kdepth++){
                 voxelTlasts[TlastId + kdepth].sunlit = TnewProfile[kdepth];

@@ -61,6 +61,7 @@ void main()
    uint spectralId,canopyId,bioId,typeId;
    uint bufferId0 = uint(gl_GlobalInvocationID.x);
    if(bufferId0 >= uint(setting.voxelCount)) return;
+   if(voxelLinks[bufferId0].isValid == 0) return;
    uint instanceId0 = voxelLinks[bufferId0].instanceId;
    ivec3 voxelId0 = voxelLinks[bufferId0].voxelId;
    float scale = setting.scale;
@@ -84,16 +85,22 @@ void main()
     voxelHeatFlux[bufferId0].NPPsunlit = 0.0;
     voxelHeatFlux[bufferId0].NPPshaded = 0.0;
 
-	canopy = canopies[canopyId];
-
-
-    if(typeId == TYPE_SOIL)
+    if(typeId == TYPE_SOIL || typeId == TYPE_BUILDING)
     {
         rss = soilSets[bioId].rss;
         atomicStore(voxelRsss[bufferId0].sunlit,rss, gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
 		atomicStore(voxelRsss[bufferId0].shaded,rss, gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
-    }else
+    }
+    else if(typeId == TYPE_WATER)
     {
+        rss = max(waterSets[bioId].rss, 0.0);
+        atomicStore(voxelRsss[bufferId0].sunlit, rss, gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
+        atomicStore(voxelRsss[bufferId0].shaded, rss, gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
+    }
+    else if(typeId == TYPE_VEGETATION)
+    {
+        canopy = canopies[canopyId];
+        if(isParticipatingMedium(canopy)) return;
         qLs = leafBios[bioId].qLs;
         NPQs = leafBios[bioId].kNPQs;
         vcmax = leafBios[bioId].Vcmax;

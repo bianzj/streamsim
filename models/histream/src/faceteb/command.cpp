@@ -18,8 +18,9 @@ bool Command::runEB(std::shared_ptr<FacetebIO>& modelio)
     if (!modelio || !modelio->commandReady) {
         return false;
     }
-    return runFacetEBCore(modelio->inputPath, modelio->shaderDirectory,
-                          modelio->outputPath) == 0;
+    modelio->exitCode = runFacetEBCore(modelio->inputPath, modelio->shaderDirectory,
+                                      modelio->outputPath);
+    return modelio->exitCode == 0;
 }
 
 void Command::destroy(std::shared_ptr<FacetebIO>& modelio)

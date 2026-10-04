@@ -100,7 +100,11 @@ layout(binding = B_WAVE) buffer _bufferWAVE { float wave[]; };
 layout(binding = B_LIGHT) uniform _LightSet { LightSet lightSet; };
 layout(binding = B_ATOM) buffer _bufferWAVEset { AtomCond atomConds[]; };
 layout(binding = B_DIR) buffer _bufferDir { VoxelDir voxelDirs[]; };
-layout(binding = B_RADS) buffer _bufferRad { VoxelRad voxelRads[]; };
+// Physical addresses allow the 64-direction scratch field to exceed 4 GiB.
+layout(buffer_reference, scalar, buffer_reference_align = 8) buffer VoxelRadianceBuffer {
+  VoxelRad values[];
+};
+#define voxelRads VoxelRadianceBuffer(setting.radianceAddress).values
 //12 -20
 layout(binding = B_NETRAD) buffer _bufferNET {VoxelNetRad voxelNetRads[];}; //
 layout(binding = B_PNET) buffer _bufferPNRad { VoxelPnet voxelPnets[]; };

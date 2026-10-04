@@ -94,7 +94,12 @@ struct alignas(32)  VoxelLstSetting
     int voxelCount{0};
     int periodicNeighborCount{0};
     int skyboxEnabled{0};
+    // City scenes exceed Vulkan's storage-buffer descriptor range.
+    uint64_t radianceAddress{0};
 };
+
+static_assert(offsetof(VoxelLstSetting, radianceAddress) == 80,
+              "VoxelLstSetting must match the GLSL push-constant layout");
 
 struct alignas(32)  VoxelRTSetting
 {

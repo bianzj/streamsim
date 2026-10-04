@@ -489,7 +489,9 @@ bool FileIO::readJson(const std::string& path, Mode mode) {
             value.waterset.slopeVariance = std::max(0.0f, ProjectJson::number(params, "slopeVariance", 0.0f));
             value.waterset.diffuseFraction = std::clamp(ProjectJson::number(params, "diffuseFraction", 0.02f), 0.0f, 1.0f);
         } else {
-            value.type = Type::SOIL;
+            // Buildings and mobile solids share the soil thermal parameter
+            // layout, but retain their impermeable-solid physical type.
+            if (value.type != Type::BUILDING) value.type = Type::SOIL;
             value.soilset = {std::clamp(ProjectJson::integer(project.control(),"soilTemperatureMethod",ProjectJson::integer(params,"method",1)),0,2),ProjectJson::number(params,"rss",2000),ProjectJson::number(params,"cs",1180),ProjectJson::number(params,"rhos",1800),ProjectJson::number(params,"lambdas",1.55f),ProjectJson::number(params,"Tsoil",25),ProjectJson::number(params,"SMC",25),ProjectJson::number(params,"Satwater",.45f)};
         }
         properties.push_back(std::move(value));

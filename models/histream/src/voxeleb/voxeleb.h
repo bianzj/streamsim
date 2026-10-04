@@ -41,6 +41,8 @@ public:
     bool upload(std::shared_ptr<FileIO> &fileio, std::shared_ptr<VoxelebIO> &voxellstio);
     bool create(std::shared_ptr<VoxelebIO> & modelio);
     bool run(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<FileIO> &fileio);
+    bool runObserver(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<FileIO> &fileio,
+                     const std::string& manifestPath);
     bool destroy( std::shared_ptr<VoxelebIO> &modelio);
 
 
@@ -69,6 +71,7 @@ public:
     std::shared_ptr<Buffer>  m_pBuffer;
     std::shared_ptr<Descriptor> m_pDescriptor;
     std::shared_ptr<Command> m_pCommand;
+    std::vector<Meteo> m_stableMeteos;
 
     bool uploadDefined(std::shared_ptr<FileIO> &fileio, std::shared_ptr<VoxelebIO> &modelio);
 };

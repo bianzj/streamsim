@@ -136,18 +136,13 @@ void main()
     }// IF TYPE
 
     // soil heat storage 
-    float Gsunlit,Gshaded;
-    if(typeId == TYPE_WATER)
+    float Gsunlit = voxelHeatFlux[bufferId].Gsunlit;
+    float Gshaded = voxelHeatFlux[bufferId].Gshaded;
+    if((typeId == TYPE_SOIL || typeId == TYPE_BUILDING) &&
+       soilSets[bioId].method == 0)
     {
-        Gsunlit = voxelHeatFlux[bufferId].Gsunlit;
-        Gshaded = voxelHeatFlux[bufferId].Gshaded;
-    }
-    else
-    {
-        if(abs(voxelHeatFlux[bufferId].Gsunlit - GST)<0.01) Gsunlit = netSunlitRad * GST;
-        else Gsunlit = voxelHeatFlux[bufferId].Gsunlit;
-        if(abs(voxelHeatFlux[bufferId].Gshaded - GST)<0.01) Gshaded = netShadedRad * GST;
-        else Gshaded = voxelHeatFlux[bufferId].Gshaded;
+        Gsunlit = netSunlitRad * GST;
+        Gshaded = netShadedRad * GST;
     }
 
     //-------------------------------------------------------
@@ -218,13 +213,24 @@ void main()
         {
             radiativeScale = 1.0 - GST;
         }
-        else
+        else if(soilSets[bioId].method == 1)
         {
             float inertia = thermal_inertial(
                 soilSets[bioId].cs, soilSets[bioId].rhos,
                 soilSets[bioId].lambdas);
             storageDerivative = 2.0 * inertia /
                 sqrt(PI * max(ubom.meteo.dtime, 1.0));
+        }
+        else
+        {
+            float Mprofile[TLASTNUM];
+            for(int kdepth = 0; kdepth < TLASTNUM; ++kdepth)
+                Mprofile[kdepth] = soilMoistureFraction(
+                    soilSets[bioId].SMC, soilSets[bioId].SatWater);
+            storageDerivative = soilHeatFluxSurfaceDerivative(
+                Mprofile, ubom.meteo.dtime, soilSets[bioId].cs,
+                soilSets[bioId].rhos, soilSets[bioId].lambdas,
+                soilSets[bioId].SatWater);
         }
     }
     // if(setting.theIteration>5) wc = 0.3;

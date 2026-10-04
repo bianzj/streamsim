@@ -17,5 +17,7 @@ public:
     bool descriptorReady{false};
     bool pipelineReady{false};
     bool commandReady{false};
+    // Preserve the core result: 2 denotes retained, non-converged output.
+    int exitCode{1};
 
 };

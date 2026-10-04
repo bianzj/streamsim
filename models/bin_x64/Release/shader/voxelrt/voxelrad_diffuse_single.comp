@@ -58,6 +58,33 @@ uint voxelBandRadiationIndex(uint bufferId, uint band)
     return voxelRadiationIndex(bufferId, uint(DIFFUSE_ANGLE_NUM) + band);
 }
 
+float voxelSurfaceEmission(float wavelength, float sunlitTemperature,
+                           float shadedTemperature, float sunlitFraction,
+                           float emissivity, float pathTransmittance)
+{
+    // Optical transport is normalized illumination; thermal emission uses
+    // Planck spectral radiance in W m-2 sr-1 um-1, with temperatures in K.
+    if(wavelength <= 5000.0) return 0.0;
+    float fraction = clamp(sunlitFraction, 0.0, 1.0);
+    float radiance = fraction * Planck(wavelength, sunlitTemperature)
+        + (1.0 - fraction) * Planck(wavelength, shadedTemperature);
+    return radiance * clamp(emissivity, 0.0, 1.0)
+        * clamp(pathTransmittance, 0.0, 1.0);
+}
+
+float voxelSurfaceEmissivity(MeshLink surface, int band,
+                             vec3 outgoingDirection, vec3 normal)
+{
+    uint spectralIndex = surface.spectralId * uint(setting.n_wave) + uint(band);
+    float refl = spectralMaterials[spectralIndex].reflectance;
+    float trans = spectralMaterials[spectralIndex].transmittance;
+    return surface.type == TYPE_WATER
+        ? clamp(1.0 - waterDirectionalReflectance(surface.bioId, refl,
+            outgoingDirection, normal) - trans, 0.0, 1.0)
+        : surfaceThermalEmissivity(refl, trans, outgoingDirection, normal,
+            surface.angularEffectStrength);
+}
+
 vec3 rotateDiffuseAzimuth(vec3 direction, float angle)
 {
     float c = cos(angle);
@@ -298,7 +325,7 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
                   thermalRadiance = (1-alpha_toSolar)*shadedRadiance + alpha_toSolar*sunlitRadiance;
                   radiance+= (thermalRadiance*(1-alpha_voxel)*emis* alpha_toVoxel);
                 }
-                radiance += (alpha_toSolar * gamma * Esun/cosSolar * alpha_toVoxel *(1-alpha_voxel));
+              radiance += (alpha_toSolar * gamma * Esun/max(cosSolar, 0.001) * alpha_toVoxel *(1-alpha_voxel));
               }
               //////////////////////////////
               /// Solar 
@@ -316,6 +343,7 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
 
       if (alignBufferId >= 0)
       {
+        alignBufferId = ResolveVoxelSurfaceState(alignBufferId, sstate.normal);
         //////////////////////////////
         /// facet case
         /////////////////////////////
@@ -323,17 +351,13 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
         
         instanceId = voxelLinks[alignBufferId].instanceId;
         meshId = instanceLinks[instanceId].meshId;
-        typeId = meshLinks[meshId].type;
-        canopyId = meshLinks[meshId].canopyId;
-        spectralId = meshLinks[meshId].spectralId;
-        thermalId = meshLinks[meshId].thermalId;
+        meshLink = meshLinks[meshId];
+        typeId = meshLink.type;
+        canopyId = meshLink.canopyId;
+        spectralId = meshLink.spectralId;
+        thermalId = meshLink.thermalId;
         uint spectralIdBase = spectralId*n_wave;
 
-        if(typeId == TYPE_BUILDING)
-        {
-          int faceId = getFaceIdSimple(sstate.position,semiRange,alignVoxelId);
-          alignBufferId = alignBufferId + faceId;
-        }
     
         alpha_toSolar = voxelDirs[alignBufferId].solar;
         vec3 wo = directioni;  // FROM SELECTED VOXEL OUT TO HIT FACET  
@@ -345,18 +369,11 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
         shadedTemperature = thermalMaterials[thermalId].shadedTemperature;
         float radiance=0;
           wavelength = wave[kwave];
-          sunlitRadiance = Planck(wavelength,sunlitTemperature);
-          shadedRadiance = Planck(wavelength,shadedTemperature);
-          thermalRadiance = (1-alpha_toSolar)*shadedRadiance + alpha_toSolar*sunlitRadiance;
           // SPECTRAL
           trans = spectralMaterials[spectralId*n_wave+kwave].transmittance;
           refl = spectralMaterials[spectralId*n_wave+kwave].reflectance;
-          float angularStrength = meshLinks[meshId].angularEffectStrength;
-          emis = typeId == TYPE_WATER
-              ? clamp(1.0 - waterDirectionalReflectance(meshLink.bioId, refl,
-                  -directioni, ffnormal) - trans, 0.0, 1.0)
-              : surfaceThermalEmissivity(
-                  refl, trans, -directioni, ffnormal, angularStrength);
+          float angularStrength = meshLink.angularEffectStrength;
+          emis = voxelSurfaceEmissivity(meshLink, kwave, -directioni, ffnormal);
           // //////////////////////////////
           // /// Multiple case
           // /////////////////////////////
@@ -384,10 +401,10 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
                     refl, wi, wo, ffnormal, angularStrength);
             radiance += (surfaceWeight * Esun * alpha_toSolar * alpha_toVoxel);
           }
-          // ////////////////////////////////
-          // //emitter
-          // ////////////////////////////////
-        //   radiance+= (thermalRadiance * emis * alpha_toVoxel);
+          // A solid hit occludes everything behind it, but its own thermal
+          // emission reaches this voxel through the preceding medium.
+          radiance += voxelSurfaceEmission(wavelength, sunlitTemperature,
+              shadedTemperature, alpha_toSolar, emis, alpha_toVoxel);
           //////////////////////////////
           /// Save back
           /////////////////////////////
@@ -551,7 +568,7 @@ void voxel_raytracing_diffuse_packet(
                     * emis * alphaToVoxel;
               }
               radiance += alphaToSolar * gamma
-                  * packetEsun[bandOffset] / cosSolar
+                  * packetEsun[bandOffset] / max(cosSolar, 0.001)
                   * alphaToVoxel * (1.0 - alphaVoxel);
             }
             compensatedAdd(directionalRadiance[bandOffset],
@@ -565,39 +582,41 @@ void voxel_raytracing_diffuse_packet(
 
       if(alignBufferId >= 0)
       {
+        alignBufferId = ResolveVoxelSurfaceState(alignBufferId, sstate.normal);
         uint instanceId = voxelLinks[alignBufferId].instanceId;
         uint meshId = instanceLinks[instanceId].meshId;
-        uint typeId = meshLinks[meshId].type;
-        uint canopyId = meshLinks[meshId].canopyId;
-        uint spectralId = meshLinks[meshId].spectralId;
-        if(typeId == TYPE_BUILDING) {
-          int faceId = getFaceIdSimple(
-              sstate.position, semiRange, alignVoxelId);
-          alignBufferId += faceId;
-        }
+        MeshLink surface = meshLinks[meshId];
+        uint typeId = surface.type;
+        uint spectralId = surface.spectralId;
+        ThermalMaterial thermal = thermalMaterials[surface.thermalId];
 
         float alphaToSolar = voxelDirs[alignBufferId].solar;
         vec3 wo = direction;
         vec3 wi = lightSet.direction;
         vec3 faceNormal = sstate.normal;
         bool inSameSides = IsSameSide(wo, wi, faceNormal);
-        float angularStrength = meshLinks[meshId].angularEffectStrength;
+        float angularStrength = surface.angularEffectStrength;
 
-        if(inSameSides) {
-          for(int bandOffset = 0; bandOffset < bandCount; ++bandOffset)
-          {
+        for(int bandOffset = 0; bandOffset < bandCount; ++bandOffset)
+        {
             int kwave = firstBand + bandOffset;
             float refl = spectralMaterials[
                 spectralId * uint(setting.n_wave) + uint(kwave)].reflectance;
-            float surfaceWeight = typeId == TYPE_WATER
-                ? waterCoxMunkWeight(meshLinks[meshId].bioId, refl, wi, wo, faceNormal)
-                : backgroundReflectanceWeight(
-                    refl, wi, wo, faceNormal, angularStrength);
+            float radiance = voxelSurfaceEmission(wave[kwave],
+                thermal.sunlitTemperature, thermal.shadedTemperature,
+                alphaToSolar,
+                voxelSurfaceEmissivity(surface, kwave, -direction, faceNormal),
+                alphaToVoxel);
+            if(inSameSides) {
+              float surfaceWeight = typeId == TYPE_WATER
+                  ? waterCoxMunkWeight(surface.bioId, refl, wi, wo, faceNormal)
+                  : backgroundReflectanceWeight(
+                      refl, wi, wo, faceNormal, angularStrength);
+              radiance += surfaceWeight * packetEsun[bandOffset]
+                  * alphaToSolar * alphaToVoxel;
+            }
             compensatedAdd(directionalRadiance[bandOffset],
-                directionalCorrection[bandOffset],
-                surfaceWeight * packetEsun[bandOffset]
-                    * alphaToSolar * alphaToVoxel);
-          }
+                directionalCorrection[bandOffset], radiance);
         }
         alphaToVoxel = 0.0;
         break;
@@ -735,8 +754,10 @@ void main()
               Scattering_phase_function_solar_diffuse(iterationOffset);
               voxel_raytracing_diffuse(voxelPos0, bufferId0, nanoVDBLink,
                   kwave, Esun, Esky, kiter, iterationOffset);
-              groupMemoryBarrier();  
-              barrier();
+              // This invocation exclusively owns bufferId0's directional
+              // records. Other voxels supply read-only geometry/materials.
+              // Order SSBO accesses without synchronizing inactive lanes.
+              memoryBarrierBuffer();
 
               float iterationRadiance = 0.0;
               float iterationCorrection = 0.0;

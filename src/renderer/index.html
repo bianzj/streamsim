@@ -92,6 +92,7 @@
             <div class="engine-state"><span id="engineDot"></span><div><strong id="engineState">引擎待命</strong><small id="enginePath">正在检测 HiStream...</small></div></div>
             <div class="sidebar-footer-actions">
               <button class="text-button" id="engineBtn"><svg><use href="#i-settings"/></svg>配置引擎路径</button>
+              <button class="text-button" id="openHistreamProxyBtn" type="button"><svg><use href="#i-cube"/></svg>histream-proxy 固定场景</button>
               <button class="text-button" id="referenceBtn"><svg><use href="#i-book"/></svg>理论与参考</button>
             </div>
           </div>
@@ -481,6 +482,37 @@
         <footer>
           <span id="resultStatus">支持 .tif/.tiff、.hdr + .img、.txt、.csv、.dat</span>
           <button class="button ghost" id="resultFolderBtn" type="button"><svg><use href="#i-folder"/></svg>在资源管理器中打开</button>
+        </footer>
+      </section>
+    </div>
+    <div class="drawer-backdrop" id="histreamProxyDialog" hidden>
+      <section class="histream-proxy-dialog" role="dialog" aria-modal="true" aria-labelledby="histreamProxyTitle">
+        <header>
+          <div><span class="eyebrow">Independent radiometric proxy</span><h2 id="histreamProxyTitle">histream-proxy · 固定场景数值预测</h2></div>
+          <button class="button ghost" id="closeHistreamProxyBtn" type="button">关闭</button>
+        </header>
+        <div class="histream-proxy-body">
+          <div class="histream-proxy-scope" id="histreamProxyScope">正在读取训练部署…</div>
+          <div class="histream-proxy-controls">
+            <label class="dialog-field"><span>训练捕获帧（固定数据集）</span><select class="select" id="histreamProxyFrameSelect" disabled></select></label>
+            <label class="dialog-field"><span>显示波段</span><select class="select" id="histreamProxyBandSelect">
+              <option value="reflectance_475nm">475 nm 反射率 · unitless</option>
+              <option value="reflectance_560nm">560 nm 反射率 · unitless</option>
+              <option value="reflectance_668nm">668 nm 反射率 · unitless</option>
+              <option value="brightness_temperature_10500nm_K">10.5 μm 亮温 · K</option>
+            </select></label>
+            <button class="button primary" id="runHistreamProxyBtn" type="button" disabled>生成所选数值影像</button>
+          </div>
+          <div class="histream-proxy-status" id="histreamProxyStatus" role="status">尚未运行</div>
+          <div class="histream-proxy-preview-wrap">
+            <div class="histream-proxy-preview-title" id="histreamProxyPreviewTitle">数值影像预览</div>
+            <img id="histreamProxyPreview" alt="histream-proxy 单波段数值预览" hidden>
+          </div>
+          <div class="histream-proxy-runtime" id="histreamProxyRuntime"></div>
+        </div>
+        <footer>
+          <span>该入口仅处理训练清单中的 Aoyun capture 帧，不读取当前 project.json，也不调用 histream.exe。</span>
+          <a class="button ghost" id="downloadHistreamProxyBtn" hidden>下载4波段数值 NPZ</a>
         </footer>
       </section>
     </div>

@@ -3,6 +3,8 @@
 //
 
 #include "command.h"
+#include <cstdlib>
+#include <stdexcept>
 
 namespace {
 
@@ -290,6 +292,7 @@ void Command::submit(std::shared_ptr<VoxelebIO> &modelio, VoxelEBStage stage, gl
     auto & setting = modelio->setting;
     auto & pipelineLayout = modelio->m_pipelineLayout;
     auto & pipeline = modelio->m_pipelines[stage];
+    if (std::getenv("STREAMSIM_GPU_DIAGNOSTICS")) std::cout << "GPU_STAGE\t" << static_cast<int>(stage) << std::endl;
 
 
     auto & m_currentSemaphore = modelio->m_currentSemaphore;
@@ -391,7 +394,8 @@ void Command::recordCommandBuffer(VkCommandBuffer cmdBuf, VkDescriptorSet descSe
 
 void Command::waitFence(std::shared_ptr<VoxelebIO> &modelio)
 {
-    vkWaitForFences(modelio->m_device, 1, &(modelio->m_fence), VK_TRUE, UINT64_MAX);
+    const VkResult result = vkWaitForFences(modelio->m_device, 1, &(modelio->m_fence), VK_TRUE, UINT64_MAX);
+    if (result != VK_SUCCESS) throw std::runtime_error("VoxelEB GPU execution failed: " + std::to_string(result));
     vkResetFences(modelio->m_device, 1,  &(modelio->m_fence));
 }
 

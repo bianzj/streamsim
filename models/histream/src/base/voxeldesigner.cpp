@@ -1,4 +1,5 @@
 #include "voxeldesigner.h"
+#include "voxel_boundary.h"
 #include <nvh/gltfscene.cpp>
 //#include "autogen/VoxelDesigner.comp.h"
 // using BufferT = nanovdb::HostBuffer;
@@ -109,7 +110,7 @@ std::vector<glm::ivec3> VoxelDesigner::createCube(float length, float width, flo
     return discreteCoord;
 }
 
-PrimMesh VoxelDesigner::createTriVoxels(const std::vector<glm::ivec3>& voxelIds)
+PrimMesh VoxelDesigner::createTriVoxels(const std::vector<glm::ivec3>& voxelIds, bool solidBoundary)
 {
     PrimMesh mesh{};
     mesh.meshId = 0;
@@ -126,6 +127,12 @@ PrimMesh VoxelDesigner::createTriVoxels(const std::vector<glm::ivec3>& voxelIds)
         }
     };
 
+    if (solidBoundary) {
+        voxel_boundary::emit(voxelIds, [&](const voxel_boundary::Quad& quad, const voxel_boundary::Cell&) {
+            const auto point = [&](int i) { return glm::vec3(quad[i][0], quad[i][1], quad[i][2]); };
+            appendQuad(point(0), point(1), point(2), point(3));
+        });
+    }
     glm::vec3 centerSum(0.0f);
     for (const glm::ivec3& id : voxelIds) {
         const glm::vec3 base(id);
@@ -133,12 +140,16 @@ PrimMesh VoxelDesigner::createTriVoxels(const std::vector<glm::ivec3>& voxelIds)
         const float y = base.y;
         const float z = base.z;
 
+        // Participating media retain interior integration planes. Opaque cells
+        // use the closed outward boundary above, never these crossed planes.
+        if (!solidBoundary) {
         appendQuad({x, y, z + 0.5f}, {x + 1.0f, y, z + 0.5f},
                    {x + 1.0f, y + 1.0f, z + 0.5f}, {x, y + 1.0f, z + 0.5f});
         appendQuad({x + 0.5f, y, z}, {x + 0.5f, y + 1.0f, z},
                    {x + 0.5f, y + 1.0f, z + 1.0f}, {x + 0.5f, y, z + 1.0f});
         appendQuad({x, y + 0.5f, z}, {x, y + 0.5f, z + 1.0f},
                    {x + 1.0f, y + 0.5f, z + 1.0f}, {x + 1.0f, y + 0.5f, z});
+        }
 
         mesh.voxelIds.emplace_back(id);
         mesh.isValids.emplace_back(int5{1, 1, 1, 1, 1});

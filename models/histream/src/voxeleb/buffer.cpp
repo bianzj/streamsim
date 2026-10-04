@@ -475,11 +475,21 @@ bool Buffer::createBuffer(std::shared_ptr<VoxelebIO> &voxellstio){
 
     // rads
     VkCommandBuffer cmdBufRads = cmdGen.createCommandBuffer();
-    std::vector<VoxelRad> voxelRads(n_voxel * DIFFUSENUM, VoxelRad{0, 0});
-    voxelio->m_pRadsBuffer = std::make_shared<nvvk::Buffer>(m_pAlloc->createBuffer(cmdBufRads, voxelRads,
-                                                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                                                                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
+    const VkDeviceSize radianceBytes = static_cast<VkDeviceSize>(n_voxel) * DIFFUSENUM * sizeof(VoxelRad);
+    auto& radianceAllocator = voxellstio->m_radianceAllocator;
+    radianceAllocator = std::make_unique<nvvk::ResourceAllocatorDedicated>(
+        m_device, voxellstio->m_physicalDevice);
+    voxelio->m_pRadsBuffer = std::make_shared<nvvk::Buffer>(radianceAllocator->createBuffer(
+        radianceBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
+    if (!voxelio->m_pRadsBuffer->buffer) throw std::runtime_error("Cannot allocate voxel radiance buffer");
+    vkCmdFillBuffer(cmdBufRads, voxelio->m_pRadsBuffer->buffer, 0, radianceBytes, 0);
     cmdGen.submitAndWait(cmdBufRads);
+    voxellstio->setting.radianceAddress =
+        nvvk::getBufferDeviceAddress(m_device, voxelio->m_pRadsBuffer->buffer);
+    if (!voxellstio->setting.radianceAddress) throw std::runtime_error("Voxel radiance device address is null");
+    std::cout << "RADIANCE_BUFFER\tbytes=" << radianceBytes
+              << "\taddress=" << voxellstio->setting.radianceAddress << std::endl;
 
     // netRad
     VkCommandBuffer cmdBufNetRad = cmdGen.createCommandBuffer();
@@ -713,7 +723,8 @@ void Buffer::destroy(std::shared_ptr<VoxelebIO> &voxellstio){
     }
 
     m_pAlloc->destroy(*(voxelio->m_pDirBuffer));
-    m_pAlloc->destroy(*(voxelio->m_pRadsBuffer));
+    voxellstio->m_radianceAllocator->destroy(*(voxelio->m_pRadsBuffer));
+    voxellstio->m_radianceAllocator.reset();
     m_pAlloc->destroy(*(voxelio->m_pNetRadBuffer));
     m_pAlloc->destroy(*(voxelio->m_pPnetBuffer));
     m_pAlloc->destroy(*(virtualio->m_pBufferStorage));

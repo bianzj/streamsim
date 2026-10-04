@@ -2,12 +2,14 @@
 // Created by admin on 2024/1/24.
 //
 
+#include "projectjson.h"
 #include "geometry.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
+#include <fstream>
 
 namespace {
 
@@ -274,6 +276,31 @@ void Geometry::configureSensor(const SensorXml& sensor, glm::vec3 sceneSize_XYZ,
 
 SensorMatrix Geometry::createConfiguredSensor(glm::vec3 size_XZY, glm::vec3 origin_XZY,
                                                float vza, float vaa, float ratio) {
+    // The Stream3D bridge supplies the exact sensor frame, including orthographic
+    // footprint and roll. Existing project cameras retain their normal behaviour.
+    if (const char* cameraPath = std::getenv("STREAMSIM_SENSOR_CAMERA")) {
+        std::ifstream input(cameraPath);
+        if (!input) throw std::runtime_error("Cannot open explicit sensor camera");
+        ProjectJson::Json camera; input >> camera;
+        SensorMatrix sensor{};
+        for (const char* field : {"viewInverse", "projInverse"}) {
+            const auto& values = camera.at(field);
+            if (!values.is_array() || values.size() != 16)
+                throw std::runtime_error("Sensor matrices require 16 column-major values");
+            glm::mat4 matrix(1.0f);
+            for (int i = 0; i < 16; ++i) {
+                const float value = values.at(i).get<float>();
+                if (!std::isfinite(value)) throw std::runtime_error("Non-finite sensor matrix");
+                matrix[i / 4][i % 4] = value;
+            }
+            if (std::string(field) == "viewInverse") sensor.viewInverse = matrix;
+            else sensor.projInverse = matrix;
+        }
+        sensor.focalDist = camera.value("orthographic", false) ? -1.0f : 1.0f;
+        sensor.aperture = 0.0f;
+        sensor.direction = glm::vec3(sensor.viewInverse[2]);
+        return sensor;
+    }
     if (m_sensorProjection == Projection::PERSPECTIVE) {
         SensorMatrix sensor = createPerspectiveSensor(m_sensorPosition_XZY, vza, vaa);
         if (const char* cone = std::getenv("STREAMSIM_HEX_CONE")) {

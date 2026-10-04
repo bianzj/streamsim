@@ -36,7 +36,7 @@ public:
 
 	PrimMesh createTriBackground(float sceneLength, float sceneWidth, float stepSize);
     PrimMesh createTriEntity(Shape shape, float stepSize);
-    PrimMesh createTriVoxels(const std::vector<glm::ivec3>& voxelIds);
+    PrimMesh createTriVoxels(const std::vector<glm::ivec3>& voxelIds, bool solidBoundary = false);
 
 //    VoxelTriModel createTriEntity_rotate(ShapeType shapeType, Shape shape,
 //                                         float stepSize, float rotateAngle,std::vector<glm::ivec3> voxelIds);

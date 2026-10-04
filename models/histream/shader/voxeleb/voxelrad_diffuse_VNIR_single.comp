@@ -258,7 +258,7 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
                 radiance += alpha_toSolar * Esun / max(cosSolar, 0.001)
                     * alpha_toVoxel * scatteringFraction * scatteringPhase;
               } else {
-                radiance += (alpha_toSolar * gamma * Esun/cosSolar * alpha_toVoxel *(1-alpha_voxel));
+                radiance += (alpha_toSolar * gamma * Esun/max(cosSolar, 0.001) * alpha_toVoxel *(1-alpha_voxel));
               }
               //////////////////////////////
               /// Save back
@@ -277,11 +277,7 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
         /// facet case
         /////////////////////////////
        
-        if(sstate.typeId == TYPE_BUILDING)
-        {
-          int faceId = getFaceIdSimple(sstate.position,semiRange,alignVoxelId);
-          alignBufferId = alignBufferId + faceId;
-        }
+        alignBufferId = ResolveVoxelSurfaceState(alignBufferId, sstate.normal);
         instanceId = voxelLinks[alignBufferId].instanceId;
         meshId = instanceLinks[instanceId].meshId;
         typeId = meshLinks[meshId].type;
@@ -449,8 +445,10 @@ void main()
           for(int kiter=0;kiter< 5;kiter++)
           {
               voxel_raytracing_diffuse(voxelPos0, bufferId0, nanoVDBLink, kiter,kband_center,Esun,Esky,kstep);
-              groupMemoryBarrier();  
-              barrier();
+              // Directional records belong exclusively to bufferId0; no
+              // other invocation supplies an iterative radiation value.
+              // Tail and invalid lanes may return before this memory fence.
+              memoryBarrierBuffer();
 
               for(uint iangle=0;iangle < DIFFUSE_ANGLE_NUM;iangle++)
               {

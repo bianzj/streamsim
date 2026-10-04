@@ -1434,9 +1434,19 @@ void FileIO::readMeteo(std::shared_ptr<DefinedIO> &defineio,int & n_node,
     std::vector<std::string> fields;
     std::string deli(" "), line;
 
-    std::getline(infile, line);
+    if (!std::getline(infile, line)) {
+        throw std::runtime_error("Meteorology file is empty: " + meteofile);
+    }
     fields = Utils::splitt(line, deli);
-    n_node = std::stoi(fields[0].c_str());
+    if (fields.empty()) {
+        throw std::runtime_error("Meteorology header is invalid: " + meteofile);
+    }
+    const int fileNodeCount = std::stoi(fields[0].c_str());
+    if (fileNodeCount <= 0) {
+        throw std::runtime_error("Meteorology node count must be positive");
+    }
+    meteos.clear();
+    meteos.reserve(static_cast<size_t>(fileNodeCount));
 
     int meteoNum = 0;
     float z = m_meteoXml.meta.z;//15;
@@ -1448,10 +1458,15 @@ void FileIO::readMeteo(std::shared_ptr<DefinedIO> &defineio,int & n_node,
     float SatWater = m_meteoXml.meta.SatWater;//0.45;
     float dTime = m_meteoXml.meta.dTime;//1800;
 
-    for (int i = 0; i < n_node; i++)
+    int rowIndex = 0;
+    while (std::getline(infile, line))
     {
-        std::getline(infile, line);
+        if (line.empty()) continue;
         fields = Utils::splitt(line, deli);
+        if (fields.size() < 7) {
+            throw std::runtime_error("Meteorology node " + std::to_string(rowIndex) +
+                                     " requires seven fields");
+        }
 
         Meteo mi;
         mi.t = std::atof(fields[0].c_str());
@@ -1469,8 +1484,13 @@ void FileIO::readMeteo(std::shared_ptr<DefinedIO> &defineio,int & n_node,
         mi.dTime = dTime;
 
         meteos.emplace_back(mi);
+        ++rowIndex;
         //m_meteoParams.emplace_back(mi);
     }
+    if (meteos.size() < static_cast<size_t>(fileNodeCount)) {
+        throw std::runtime_error("Meteorology file contains fewer rows than its header");
+    }
+    n_node = static_cast<int>(meteos.size());
 
     ///-----------------------------------------------------------------------------
     ///   WaveLength and atmospheric condition
@@ -1714,6 +1734,7 @@ bool FileIO::writeTIFData(const std::string& projectDir, const float* pData, int
                  << std::setw(2) << std::setfill('0') << minutesOfDay % 60;
         outputPath = projectDir + "/T=" + timeText.str()
             + "_VZA=" + vzaText.str() + "_VAA=" + vaaText.str()
+            + (positionIndex >= 0 ? "_P=" + std::to_string(positionIndex) : "")
             + modelSuffix + ".tif";
     } else {
         std::ostringstream szaText;

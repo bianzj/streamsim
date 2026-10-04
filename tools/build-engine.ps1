@@ -36,4 +36,7 @@ if ($VcpkgRoot) {
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 & $CmakeExecutable --build $BuildDirectory --config $Configuration --parallel
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+& node (Join-Path $PSScriptRoot 'write-build-manifest.mjs') (Join-Path $ProjectRoot "models\bin_x64\$Configuration")
 exit $LASTEXITCODE

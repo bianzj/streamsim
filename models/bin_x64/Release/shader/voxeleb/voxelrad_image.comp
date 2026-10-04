@@ -355,6 +355,7 @@ bool Voxel_raytracing(Ray ray, NanoVDBLink nanoVDBLink)
 
         if(alignBufferId >= 0)
 		{
+            alignBufferId = ResolveVoxelSurfaceState(alignBufferId, sstate.normal);
             instanceId = voxelLinks[alignBufferId].instanceId;
             meshId = instanceLinks[instanceId].meshId;
             typeId = meshLinks[meshId].type;
@@ -381,14 +382,6 @@ bool Voxel_raytracing(Ray ray, NanoVDBLink nanoVDBLink)
 // LST = vegTemperatureSum/vegNum;//voxelNetRads[bufferId].diffuseTrad;;
 // return true;
             
-                int faceId = 0;
-                if(typeId == TYPE_BUILDING)
-                {
-                    faceId  = getFaceIdSimple(sstate.position,semiRange,alignVoxelId);
-                    alignBufferId = alignBufferId + faceId;
-                    // LST = faceId;
-                    // return true;
-                }
                 // LST = voxelHeatFlux[bufferId].Gshaded;
                 // return true;
                 // LST = 0;

@@ -129,6 +129,8 @@ VoxelebIO(){
     std::shared_ptr<DefinedIO> m_defined;
 
     VoxelLstSetting setting;
+    // The general DMA allocator uses 32-bit suballocation sizes.
+    std::unique_ptr<nvvk::ResourceAllocatorDedicated> m_radianceAllocator;
 
     std::shared_ptr<nvvk::Buffer> m_pBufferWave;
     std::shared_ptr<nvvk::Buffer> m_pBufferAtomcond;

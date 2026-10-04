@@ -1,0 +1,1105 @@
+{
+  "kind": "streamsim-build",
+  "schemaVersion": 1,
+  "applicationVersion": "1.1.1",
+  "createdAt": "2026-10-04T03:25:23.936Z",
+  "commit": "c71eb6bf21e0ecc96b2237077c5f4d4ec4a3fb65",
+  "dirty": true,
+  "sourceTreeSha256": "2e728fc6180828cb392c99032e76688ddf6726d34300a9c54ea2599c4b6457ca",
+  "engine": {
+    "path": "histream.exe",
+    "sha256": "c6869f12e9ecc08a0b71420728f9232f628db65481c46c504c6a56fb0fe10036"
+  },
+  "sources": [
+    {
+      "path": "models/histream/CMakeLists.txt",
+      "sha256": "14f41f9df3da54c4adbe89c2b42875f7aba45c547330120c4d3208b90a2098bb"
+    },
+    {
+      "path": "models/histream/src/base/accelstruct.cpp",
+      "sha256": "593b2e4ca5f1739553ea8ef51be4a92e5a3748e9ec6cbcddfe394ca23179d3db"
+    },
+    {
+      "path": "models/histream/src/base/accelstruct.h",
+      "sha256": "f1d35d3355227f27875768d05506c26463085927a3508f6e3e2ab2f9344952d2"
+    },
+    {
+      "path": "models/histream/src/base/appsetting.cpp",
+      "sha256": "adf08253a299161e06538e44e20a06ffd36d5cf3a8ae77bc7b904258e0ddf51c"
+    },
+    {
+      "path": "models/histream/src/base/appsetting.h",
+      "sha256": "84b11e0a6011b5a4b3c50dc4b0c6e1aa972c151e8b061ceba567fceeaef31f35"
+    },
+    {
+      "path": "models/histream/src/base/atmosphere_lut.h",
+      "sha256": "1ed5341f268c671a61beee1d07b0afcbadb33728e051fa9b8e5a62bfa6ce5b79"
+    },
+    {
+      "path": "models/histream/src/base/compo.cpp",
+      "sha256": "eb02ffde7ea6d52502ba0e7de68d5a2672d4456d46d8e768e882c58f584342e9"
+    },
+    {
+      "path": "models/histream/src/base/compo.h",
+      "sha256": "52c8a3cfeecffbd17e75213b7633a5992422b2aa28ce098ee4745973af186c65"
+    },
+    {
+      "path": "models/histream/src/base/defined.cpp",
+      "sha256": "3abec6901ccb6a33794f603a967306ed84cbc56a247c28df31578fc039e046a3"
+    },
+    {
+      "path": "models/histream/src/base/defined.h",
+      "sha256": "4ba2ad4328741d628575f9949bff47e4e159ea6749bdda93c1438e5f06f23a62"
+    },
+    {
+      "path": "models/histream/src/base/engine.cpp",
+      "sha256": "e538617ce5e0eed577442214cbeb6653aadf8cde37490e6830aa54deb898c21e"
+    },
+    {
+      "path": "models/histream/src/base/engine.h",
+      "sha256": "096088999b267dc22de265c6fae5ae83838bb328d26eb6f1ff219939f831db2c"
+    },
+    {
+      "path": "models/histream/src/base/fileio.cpp",
+      "sha256": "66ca20a0412ea7c22a0f950a9efb1f78f99c1d4ba3afd2e6ea40a48874a64ceb"
+    },
+    {
+      "path": "models/histream/src/base/fileio.h",
+      "sha256": "a5d921b7ca3d35bc9c8c683a341edf0f5acbdbc950f0c2e621674fea8d3412c2"
+    },
+    {
+      "path": "models/histream/src/base/fileio_json.cpp",
+      "sha256": "d53f03410ddd194cbbe0c7af732aeafda2d623dc12070cc7e40ddf9517861568"
+    },
+    {
+      "path": "models/histream/src/base/geometry.cpp",
+      "sha256": "59fef959256839d2b377954e57d5c96335591c2f019fad26dd92222396cf559b"
+    },
+    {
+      "path": "models/histream/src/base/geometry.h",
+      "sha256": "7c72748ea16ae94a2be9b5df5d186dfa15e065136ac2a9fbb6b744feab58f3b7"
+    },
+    {
+      "path": "models/histream/src/base/gridio.cpp",
+      "sha256": "0090ab66200e821c9d6bfd20729e730a272f5973199c227075a24c9573fba037"
+    },
+    {
+      "path": "models/histream/src/base/gridio.h",
+      "sha256": "c9d4bfbd5fda6ee8af2c0f6a8abd855a74e12acacff649349ca3907133ecdc68"
+    },
+    {
+      "path": "models/histream/src/base/hexneighbors.h",
+      "sha256": "47e9424f671703a5ab0cbc94e1e5136c58d1e24d5116ba03608199dd223589ed"
+    },
+    {
+      "path": "models/histream/src/base/hexprojection.h",
+      "sha256": "1d584be8707063f9867657403db9cab95cf01c924a0e876fbdbc2d17a573730c"
+    },
+    {
+      "path": "models/histream/src/base/hexvoxel.cpp",
+      "sha256": "38bed7a254e4c6d8e0ccb54998ca077f2f5ba9d9c5f444daaff6679c07459527"
+    },
+    {
+      "path": "models/histream/src/base/hexvoxel.h",
+      "sha256": "bdc3cc3c1251ad733746e117adddde875267c3886c924b81e178f8dd5f1005d6"
+    },
+    {
+      "path": "models/histream/src/base/instanceio.cpp",
+      "sha256": "e09b4655de59cfdd746f5bba45131113e18a1b4361d3bc6ec08fd994bf1e5273"
+    },
+    {
+      "path": "models/histream/src/base/instanceio.h",
+      "sha256": "88081fdb660ad0da101449f99b2d4c25011caccedebb952cade25edddabf93c8"
+    },
+    {
+      "path": "models/histream/src/base/meshio.cpp",
+      "sha256": "951d1a6e28290720ad000cb6f89a1550a79223271d47e6b86790be8ab6dc502f"
+    },
+    {
+      "path": "models/histream/src/base/meshio.h",
+      "sha256": "401130eb8ef7e8ea8f4583016f6466c47d9da8a2348c9ec515ec26c875e1a6d4"
+    },
+    {
+      "path": "models/histream/src/base/myfunction.cpp",
+      "sha256": "170ac89cad31c12b2fdf73943337d6ed2c97a6ee2fb7f1c070c787f9286f10e0"
+    },
+    {
+      "path": "models/histream/src/base/myfunction.h",
+      "sha256": "61041b74f9ce7b75ce358b3b9db6ece040acc19054cea37d6b25055d267c361c"
+    },
+    {
+      "path": "models/histream/src/base/objloader.cpp",
+      "sha256": "07207c0c7d8de5bbe27e35253bdb39d0f43ac47fdfddf34727f6c115be87165c"
+    },
+    {
+      "path": "models/histream/src/base/objloader.h",
+      "sha256": "3d28d7943d96afe117a2821c4f997ca537c967f62ddca07118dd165fb3874f1b"
+    },
+    {
+      "path": "models/histream/src/base/pixelio.cpp",
+      "sha256": "d485ad2221210ed9ef7423b4887a3868046af450aeb5908ca86f14b7dc24cae1"
+    },
+    {
+      "path": "models/histream/src/base/pixelio.h",
+      "sha256": "8de914db4b793021f5d13449eb51410d77ad34f91ee7033d67b03eac92c65ac9"
+    },
+    {
+      "path": "models/histream/src/base/projectjson.cpp",
+      "sha256": "8dba6510e7fc550472d709de7c6f481b02545e08bee7eb9d486f30ccd8ea96db"
+    },
+    {
+      "path": "models/histream/src/base/projectjson.h",
+      "sha256": "5636f4a780d3cec267fc4f2ec8935a4a7f3e5c5ffd514dfd1dc69a4d39b9b40e"
+    },
+    {
+      "path": "models/histream/src/base/queue.h",
+      "sha256": "b762f91a37dfaa671f67bc8df85cc119f2c91b0e0c6265dec32d9b51f2e86970"
+    },
+    {
+      "path": "models/histream/src/base/scene.cpp",
+      "sha256": "218c32a99ffece6ce012cb0fc9d94dd1345b6230ae84c3c8ec4488a9ed66f048"
+    },
+    {
+      "path": "models/histream/src/base/scene.h",
+      "sha256": "517ec2149e9c82164b6bfe2c6aabfb72b9faa6639493f93ea72414631a21ae88"
+    },
+    {
+      "path": "models/histream/src/base/structs.h",
+      "sha256": "cb05b5f20594b1d2ed2c9953a8a2672299cc5e37f178169aa4106d8d27a26e01"
+    },
+    {
+      "path": "models/histream/src/base/structs_cg.h",
+      "sha256": "e46b9587fda27056bae00eb68580940d6acae91176de6b10c060d8a060b17661"
+    },
+    {
+      "path": "models/histream/src/base/surfio.cpp",
+      "sha256": "cb1fa890f01c0a80ff1ee95edfc1ef243e47dd5929f01949c99320bcf61d03cc"
+    },
+    {
+      "path": "models/histream/src/base/surfio.h",
+      "sha256": "9ccf70d7a37f3b977e32d49700aa63efe8f6f1bf3d4af0183a848e8bbb46bd8f"
+    },
+    {
+      "path": "models/histream/src/base/utils.cpp",
+      "sha256": "5761c4b8ce203469a70d8850c339a7714d056850874728ca5b812051860de666"
+    },
+    {
+      "path": "models/histream/src/base/utils.h",
+      "sha256": "7eedf388ebdd11e6dcbd361493e8bfb940f29cbeb27bbd00eee1330e5b3e7124"
+    },
+    {
+      "path": "models/histream/src/base/virtualio.cpp",
+      "sha256": "d009335fcbf09c8b47eafb8dd679eaf26e6b806f1db3f6c714bb3392e3bd9abb"
+    },
+    {
+      "path": "models/histream/src/base/virtualio.h",
+      "sha256": "ec30bc326c870fdac44411b524ac295334c93422b434b657eefe4ed297d42e62"
+    },
+    {
+      "path": "models/histream/src/base/virtualscreen.cpp",
+      "sha256": "f42b9a60f73fee99448128952394b1ee23299a489dbf297d47b9bf94b4e98e08"
+    },
+    {
+      "path": "models/histream/src/base/virtualscreen.h",
+      "sha256": "83db6c546f2f344d9db05c8654c95809de4a8617e7c61f5f5d8d98aba79cb03f"
+    },
+    {
+      "path": "models/histream/src/base/voxel_boundary.h",
+      "sha256": "c90a5de7bb97d41adef92bc6bf867574e590ed51687b2f8a66f7dd3422a9ce00"
+    },
+    {
+      "path": "models/histream/src/base/voxeldesigner.cpp",
+      "sha256": "af9367400495f157bb00420d60eab032a1f4150c80dc04ba01c20c0d109d961b"
+    },
+    {
+      "path": "models/histream/src/base/voxeldesigner.h",
+      "sha256": "6230619d8fcd170a5e61ea7750807e4efa12e8f4a3e68688dcfb0169ad666acd"
+    },
+    {
+      "path": "models/histream/src/base/voxelio.cpp",
+      "sha256": "d4941e947ba918d741c67eed54e9f951399bc133344b5827615d469a2cb1677d"
+    },
+    {
+      "path": "models/histream/src/base/voxelio.h",
+      "sha256": "c705e910fac033db73996793d5bc678f0d4cb1b08cd2a314f6497006fe5b48e6"
+    },
+    {
+      "path": "models/histream/src/base/xmlexamples.cpp",
+      "sha256": "cb792932c818daee177e2ed952230c35a80fc347f15db58d77cfca957f9cf412"
+    },
+    {
+      "path": "models/histream/src/base/xmlexamples.h",
+      "sha256": "0ee0661250b4a139e416334f923c52f0168335c291cb470add89f2c0f5352052"
+    },
+    {
+      "path": "models/histream/src/cases/Huailai/structs.h",
+      "sha256": "c4ccaad72e32b4c34c0bb9c1c7f69db2b336115bc618c63df78528768653527f"
+    },
+    {
+      "path": "models/histream/src/faceteb/buffer.cpp",
+      "sha256": "0bd2956ca77a9d79b071cb4c3bf39a196b7d3ab4edd9f7b819a245af4987b28b"
+    },
+    {
+      "path": "models/histream/src/faceteb/buffer.h",
+      "sha256": "322bcc2593f492901aaaedd4f3292ef0f5f8a21447438d55e8474af1eb3a7637"
+    },
+    {
+      "path": "models/histream/src/faceteb/command.cpp",
+      "sha256": "8978a5c1196feed0af248519ef42b4d5a596848cde272e3902ce6f03f7058397"
+    },
+    {
+      "path": "models/histream/src/faceteb/command.h",
+      "sha256": "44fb8cdfec50a5f2b250f406b0e811de373351ae0129c0e9279edaecdc39e775"
+    },
+    {
+      "path": "models/histream/src/faceteb/descriptor.cpp",
+      "sha256": "5a13196464264cac1cabb8aae4d5f7b7cb880ba13588feb1674db7bf84c900c4"
+    },
+    {
+      "path": "models/histream/src/faceteb/descriptor.h",
+      "sha256": "d9d48e7ba6e40ec3cd49675455419523cb854bfde78eac07924982b91d049e0a"
+    },
+    {
+      "path": "models/histream/src/faceteb/faceteb.cpp",
+      "sha256": "51b019c34d6cc5766a1ee0a2511e5297c910274e223b5e564550f7c2ae8ee30f"
+    },
+    {
+      "path": "models/histream/src/faceteb/faceteb.h",
+      "sha256": "91143356851e611fe692ce46ba2b95631d2d01ebc10e77097713a3e417f576bf"
+    },
+    {
+      "path": "models/histream/src/faceteb/facetebio.cpp",
+      "sha256": "cafbba47f1fabc11f9fe3fba563ed1471884ddfa6e0d25ff346107b38cfba751"
+    },
+    {
+      "path": "models/histream/src/faceteb/facetebio.h",
+      "sha256": "132679a3adb1ec36ef190e2f5819d5a62845e68c4fe027660de2b2c10e08b08f"
+    },
+    {
+      "path": "models/histream/src/faceteb/pipeline.cpp",
+      "sha256": "60009c7e80abce4d4bd8eee67c91c049f44a0c2df696288ace1a824d50b0fdcc"
+    },
+    {
+      "path": "models/histream/src/faceteb/pipeline.h",
+      "sha256": "28171a135273602007ffbabf0497fefb0dc299eccce1ef279a8ed0e695ef7af5"
+    },
+    {
+      "path": "models/histream/src/facetrt/buffer.cpp",
+      "sha256": "b76d219b7c924eaeeb2a64abfb2104e084a36ef3686b4440151e9ec251a4e9b8"
+    },
+    {
+      "path": "models/histream/src/facetrt/buffer.h",
+      "sha256": "d2ef7cd40d82b9f3a1897d840af091317eb9835aa52cb5e8a97b882e324ed013"
+    },
+    {
+      "path": "models/histream/src/facetrt/command.cpp",
+      "sha256": "8821a371516dc6b9330fe63841e73d306ee402dfb4d49b34327fb407f52eb292"
+    },
+    {
+      "path": "models/histream/src/facetrt/command.h",
+      "sha256": "b13d9c5bf4f8cfe2d4a57ce68994daf0f37ac54877a5f18aca90cf436e38b3ac"
+    },
+    {
+      "path": "models/histream/src/facetrt/descriptor.cpp",
+      "sha256": "4e357379d7107677a2676425fd932868826abbdc83e57051e3e83e229d82f364"
+    },
+    {
+      "path": "models/histream/src/facetrt/descriptor.h",
+      "sha256": "ad60ce692c8fc736dfca6170f43f159c8d0ac3bb656eb04f1eef56369f800239"
+    },
+    {
+      "path": "models/histream/src/facetrt/facetrt.cpp",
+      "sha256": "47ab6c1d0e5d387990fa674d14282fd85bce6121ef061bb8568a6859f69bf544"
+    },
+    {
+      "path": "models/histream/src/facetrt/facetrt.h",
+      "sha256": "80ec41733c7c2fbe2f6744612da8f5ef67bf75290fe9bff1621fa8e5569fa1b0"
+    },
+    {
+      "path": "models/histream/src/facetrt/facetrt_vulkan.cpp",
+      "sha256": "7043283db6bb7270fa9cd69d0fc47e8fbe22824fa8fcbafc248fdfc6793a9950"
+    },
+    {
+      "path": "models/histream/src/facetrt/facetrt_vulkan.h",
+      "sha256": "afd27c9217bdb47b22581a5103b2060d22b874481bfb43877f93507bdc98368e"
+    },
+    {
+      "path": "models/histream/src/facetrt/facetrtcore.cpp",
+      "sha256": "c4ec12e3fdbb369800f884bb8461db9bd08cbe14f8380842373d69aaa19bc996"
+    },
+    {
+      "path": "models/histream/src/facetrt/facetrtcore.h",
+      "sha256": "1fb0c9fbd7578c5b8748cdf1892f61261e0697c6a8e4525dfade3f9d38fc69bc"
+    },
+    {
+      "path": "models/histream/src/facetrt/facetrtio.cpp",
+      "sha256": "401a35f11b28d63de221d4801ca1cf8b3dd406cd91cca6cb4af98248b047c1c0"
+    },
+    {
+      "path": "models/histream/src/facetrt/facetrtio.h",
+      "sha256": "ccf54878e2a6df6dcd3618bdcb2e27ac96c7f7ea895b061a8e1414e9bb4ad8fa"
+    },
+    {
+      "path": "models/histream/src/facetrt/pipeline.cpp",
+      "sha256": "2125ea831240ad886042fc46ba038b48ba70e0a6ab80beb6e8256a64b60f4266"
+    },
+    {
+      "path": "models/histream/src/facetrt/pipeline.h",
+      "sha256": "2fce0432fc0a9b2e40e6f4f53a9556b23dd411700585cdea55a1fd62ef4b153f"
+    },
+    {
+      "path": "models/histream/src/main.cpp",
+      "sha256": "f50e02d86f8e674fd40fc17b2a735b136433044ce82c98137e0ba99a0b645a7b"
+    },
+    {
+      "path": "models/histream/src/raytracing/buffer.cpp",
+      "sha256": "c90e418a98184befd7cc713e212accdad12d80ff2a36990c2d929dc1c0d275e9"
+    },
+    {
+      "path": "models/histream/src/raytracing/buffer.h",
+      "sha256": "9c03eada1d3684c75639ccd68f2532370138c569f2cbbde589abc5d40512cd34"
+    },
+    {
+      "path": "models/histream/src/raytracing/command.cpp",
+      "sha256": "06ed60e3ee0fb9bfed120ce310627f861adce494d0329cdec8e857c3ea8262a1"
+    },
+    {
+      "path": "models/histream/src/raytracing/command.h",
+      "sha256": "8bc7f4379b430da8e9357bee127f0a29fe4646a8447dd0759261d386d6571269"
+    },
+    {
+      "path": "models/histream/src/raytracing/descriptor.cpp",
+      "sha256": "3df3dc5d749fb99814d31d73d461ce7a3a42518fd39ab7c784c7681c2fb3dce6"
+    },
+    {
+      "path": "models/histream/src/raytracing/descriptor.h",
+      "sha256": "5158290f9b61b1d882e898a7c538dadd79c1b92674cd547f1a00ae210c2adb4e"
+    },
+    {
+      "path": "models/histream/src/raytracing/pipeline.cpp",
+      "sha256": "3d4325932dcaf58097c83d0cfa365aea9816cac7be7c4f88c04c64cc7f0bda92"
+    },
+    {
+      "path": "models/histream/src/raytracing/pipeline.h",
+      "sha256": "a2698b3573c57c77f0633223ca3012097bcc012c746708e285dab3b3bad16bbe"
+    },
+    {
+      "path": "models/histream/src/raytracing/raytracing.cpp",
+      "sha256": "5a5a53a6aaa3c97867a67af299da62bd79eb023f8f4c4c373876b7921be0d92c"
+    },
+    {
+      "path": "models/histream/src/raytracing/raytracing.h",
+      "sha256": "94971bf0676ddbeffc0352635e2397e8d7b7788891a64be317bd2267a5e885f1"
+    },
+    {
+      "path": "models/histream/src/raytracing/raytracingio.cpp",
+      "sha256": "090df492e5832e8580b92d69617a5fa9a78e0d22e67d59baf94a85866ff887a4"
+    },
+    {
+      "path": "models/histream/src/raytracing/raytracingio.h",
+      "sha256": "689295b9036815bd5ab9e5613f8876bd67bc88f2cdf05cff00df92e26eef021f"
+    },
+    {
+      "path": "models/histream/src/thirdparty/CNanoVDB.h",
+      "sha256": "791cab7af9369e56a6d1f172bf0f5505e42075825a5ce707193f2b6d27d3be9a"
+    },
+    {
+      "path": "models/histream/src/thirdparty/NanoVDB.h",
+      "sha256": "caedac7afcc5bd70c8815659df1294283ec62bd2e006999b612e302a45b4ddb4"
+    },
+    {
+      "path": "models/histream/src/thirdparty/nanoutil/CSampleFromVoxels.h",
+      "sha256": "6bfd1a6ecf4b7ab24237068f7d93ba9f47ed33c78d8eea65bcb71168e8919493"
+    },
+    {
+      "path": "models/histream/src/thirdparty/nanoutil/CudaDeviceBuffer.h",
+      "sha256": "08795d51650cc7f979051a08698162def94528028faf0f813369db780b60200e"
+    },
+    {
+      "path": "models/histream/src/thirdparty/nanoutil/DitherLUT.h",
+      "sha256": "ffafb3342810a7dbf9870ae1561232f14feb1065bf37e9b2763fc243800de244"
+    },
+    {
+      "path": "models/histream/src/thirdparty/nanoutil/ForEach.h",
+      "sha256": "fd2cef43c768f734a4e592eb50f34162710308505cfa208990b93ddb59b6af34"
+    },
+    {
+      "path": "models/histream/src/thirdparty/nanoutil/GridBuilder.h",
+      "sha256": "fdc8f72fc9d9b6db62417f4772e80f4c7d80629ae60a47bb0f5beb714d842d7c"
+    },
+    {
+      "path": "models/histream/src/thirdparty/nanoutil/GridChecksum.h",
+      "sha256": "3001a1bfaff96c3e1a967759e93b9776a6b5e6a31d208cbfeb6253c09d1be899"
+    },
+    {
+      "path": "models/histream/src/thirdparty/nanoutil/GridHandle.h",
+      "sha256": "1c08937be6a78c30924c5258668be148dc53d026645e7e368eb6c87b0cb446a4"
+    },
+    {
+      "path": "models/histream/src/thirdparty/nanoutil/GridStats.h",
+      "sha256": "201bb78862fe6eca2102aa9071c64e531ef3c2ea63446f29cf11c0e39e8021d2"
+    },
+    {
+      "path": "models/histream/src/thirdparty/nanoutil/GridValidator.h",
+      "sha256": "5b66756ee4a2fbc36a9b6e22ca591cdb9a39455d995135d06493f15602702bdc"
+    },
+    {
+      "path": "models/histream/src/thirdparty/nanoutil/HDDA.h",
+      "sha256": "e91b2bc3c9f63da00ad73e9ac4d4c2becc81ad344615e30a95a455fa473919ca"
+    },
+    {
+      "path": "models/histream/src/thirdparty/nanoutil/HostBuffer.h",
+      "sha256": "d843c56f32eca674d2472943551442e0b1118739deba3d51b622cc8976b1a65c"
+    },
+    {
+      "path": "models/histream/src/thirdparty/nanoutil/IO.h",
+      "sha256": "879e59816536c70a02cdced722a65d63494bfbcd8a019120bd1ccdef72d41162"
+    },
+    {
+      "path": "models/histream/src/thirdparty/nanoutil/Invoke.h",
+      "sha256": "cdf98bfe41e7f1ff6e78405a9bb794cefeb79ab9ed476c14c2794c33d1cf0cf5"
+    },
+    {
+      "path": "models/histream/src/thirdparty/nanoutil/NanoToOpenVDB.h",
+      "sha256": "c947c9ef53cfe2bc5543f0225891013399260ab90a32ec3d6aca2743394751f4"
+    },
+    {
+      "path": "models/histream/src/thirdparty/nanoutil/NodeManager.h",
+      "sha256": "aae9122ccc73ed5704fcd6695133a62234c5fa77d60eaa8fc21a2e1d2c251af6"
+    },
+    {
+      "path": "models/histream/src/thirdparty/nanoutil/OpenToNanoVDB.h",
+      "sha256": "b55fdf770fe86dc1a0c125520ffddf8cbffd1a39ea1369fff3f6ec50ff09e65d"
+    },
+    {
+      "path": "models/histream/src/thirdparty/nanoutil/Primitives.h",
+      "sha256": "632507b64a23a4630c967e138af1b400138a88c9c13919575fd64c51723db551"
+    },
+    {
+      "path": "models/histream/src/thirdparty/nanoutil/Range.h",
+      "sha256": "c3e6e52081e78300c5e90a57ff119e4392995c2e48fade9a674d4b11e906986f"
+    },
+    {
+      "path": "models/histream/src/thirdparty/nanoutil/Ray.h",
+      "sha256": "5031916a8eb441bb94801f424f31b260f2ef9f5f3c352cfd8d7975d5d52dfeab"
+    },
+    {
+      "path": "models/histream/src/thirdparty/nanoutil/Reduce.h",
+      "sha256": "d1536cf8212217629cbd61446741af2cbd6631deaeccae008a11f01ad1dd5df3"
+    },
+    {
+      "path": "models/histream/src/thirdparty/nanoutil/SampleFromVoxels.h",
+      "sha256": "5040ea00265127a7142a711f513f9691cf1ac11f3bc0e9e9fbf5dad4bf331b2d"
+    },
+    {
+      "path": "models/histream/src/thirdparty/nanoutil/Stencils.h",
+      "sha256": "dd216da7329c046faf880d54db5ec2c3abddad1e36e939573cf2421896d0165e"
+    },
+    {
+      "path": "models/histream/src/thirdparty/spa.cpp",
+      "sha256": "09588b8e373e70bb7b7a604a7a32ccad2e5d6301a426f9e223750a48126ec1b2"
+    },
+    {
+      "path": "models/histream/src/thirdparty/spa.h",
+      "sha256": "fadf17ffa24b4548318fd06eb331b689db94da31350dc7e7efe6fd3dd7b67c02"
+    },
+    {
+      "path": "models/histream/src/thirdparty/tiny_obj_loader.h",
+      "sha256": "3ea508d3b412c36b627c1b027098601148ec75cc3aa36766a53cddb9fdf1b114"
+    },
+    {
+      "path": "models/histream/src/thirdparty/tinystr.cpp",
+      "sha256": "bb6831dfb997769f55f2ff7125b5f3d9ea75659d430baf81fa6002976eccaa97"
+    },
+    {
+      "path": "models/histream/src/thirdparty/tinystr.h",
+      "sha256": "84a1967d570993551379b60d7451e90dada8757852ad025132f7c2b56e4c2e5a"
+    },
+    {
+      "path": "models/histream/src/thirdparty/tinyxml.cpp",
+      "sha256": "4ecb35d92ba602a8ef4a5c2d6f934a05395d6c9553b2c33e621e7877064e7d6e"
+    },
+    {
+      "path": "models/histream/src/thirdparty/tinyxml.h",
+      "sha256": "3cde67c8ec8642fcb3eff387a01bf9abc4c6d8ac8834d85cd8c226b97eb232d6"
+    },
+    {
+      "path": "models/histream/src/thirdparty/tinyxmlerror.cpp",
+      "sha256": "6efbb540c234890ec356bf9285ab23a7d9f68b6b4676773758507a09a0b29eb1"
+    },
+    {
+      "path": "models/histream/src/thirdparty/tinyxmlparser.cpp",
+      "sha256": "3ddb202208be54c645abf12776968187107fde0d0fabfc884e6bfa34f79a3065"
+    },
+    {
+      "path": "models/histream/src/voxeleb/buffer.cpp",
+      "sha256": "b84294d83d79db44f11ebaacc975e8b2bf48a7a0cc0f5d5e046a69fe4ecfdf9a"
+    },
+    {
+      "path": "models/histream/src/voxeleb/buffer.h",
+      "sha256": "95df6e0870c363c92990613d841b961f21ab968ba8018ae2e0106ed6322354f9"
+    },
+    {
+      "path": "models/histream/src/voxeleb/command.cpp",
+      "sha256": "e83a6bf11e77be2350bd57506e56440af0cff2fb9517cad8f3cf0c7541a0a470"
+    },
+    {
+      "path": "models/histream/src/voxeleb/command.h",
+      "sha256": "d3a4fcc4a3a30d6dfea70db2cf8878103eafd3127565fc824c434bdac0465dac"
+    },
+    {
+      "path": "models/histream/src/voxeleb/descriptor.cpp",
+      "sha256": "8d730944b7857ecce805f5597bcf445b7d6c18eb343335fed483ef0cde738052"
+    },
+    {
+      "path": "models/histream/src/voxeleb/descriptor.h",
+      "sha256": "304eec7b70806e7756c84ebe6d104cbff8849e9e02b1e667eaeaccef926049a7"
+    },
+    {
+      "path": "models/histream/src/voxeleb/observer_capture.inl",
+      "sha256": "9d301ceef8f2ff00586c6579162ca13124bb9ea3f339bbe2286733de3fe5d5e2"
+    },
+    {
+      "path": "models/histream/src/voxeleb/pipeline.cpp",
+      "sha256": "a04a2a0f277865a8d412c9016c72e1fc3858537f6abc9349b3677315cf3af58c"
+    },
+    {
+      "path": "models/histream/src/voxeleb/pipeline.h",
+      "sha256": "fe49cfae00e3377528195e5dd328568b50997be9495e1a2b7647bbe3066715f3"
+    },
+    {
+      "path": "models/histream/src/voxeleb/voxeleb.cpp",
+      "sha256": "5df255de9b91811e9eb1cbeb2a99d6e0ce81fad79457b4f05e009d82103a144b"
+    },
+    {
+      "path": "models/histream/src/voxeleb/voxeleb.h",
+      "sha256": "ca66d95c50b27ddab9cb5b1be876d0356a204664cecacb003142d50b00b0cf2d"
+    },
+    {
+      "path": "models/histream/src/voxeleb/voxelebio.cpp",
+      "sha256": "9d43b240ebbc7e6a65a320e4ddf04f84a830d251a7ff578f9d6c8c0d3f78e171"
+    },
+    {
+      "path": "models/histream/src/voxeleb/voxelebio.h",
+      "sha256": "9d9d7c7193caf41b64ee759675e18c1bb6e884fa3c36729b4b5b155891adb735"
+    },
+    {
+      "path": "models/histream/src/voxelrt/buffer.cpp",
+      "sha256": "2710b7067039c18d8e27603d9ad7dfc3ce5778375e4792449f37260d06fabd07"
+    },
+    {
+      "path": "models/histream/src/voxelrt/buffer.h",
+      "sha256": "a071bf461b440048246b4729cad74422c093a2b967719aa0ceb9ff77c9fc7daa"
+    },
+    {
+      "path": "models/histream/src/voxelrt/command.cpp",
+      "sha256": "18177b6443607ae762bea82f7dfb7d1473a808b9a1dca5c75c3f1956a6590ff5"
+    },
+    {
+      "path": "models/histream/src/voxelrt/command.h",
+      "sha256": "dd1ac708c02718f88c00a29f00099bc1eac41934f70b9e8aeef80419fe578096"
+    },
+    {
+      "path": "models/histream/src/voxelrt/descriptor.cpp",
+      "sha256": "c6b9ca89b238f48bd1e354fcd627408c484f506a0708346623c97dcc109d1469"
+    },
+    {
+      "path": "models/histream/src/voxelrt/descriptor.h",
+      "sha256": "63235891ec78dc9b2d3bc1a1c7ab5da6278cbcbe9462d17014d2225da9b54afc"
+    },
+    {
+      "path": "models/histream/src/voxelrt/pipeline.cpp",
+      "sha256": "4334bbdb1daaedeb8b86266e0d9ac4d6b69e62d699fb2d6c88ada953b2e544f6"
+    },
+    {
+      "path": "models/histream/src/voxelrt/pipeline.h",
+      "sha256": "15c0972f7e6cb7229bf7cc74aa0a172af5d7fa123cbc2f7c222b1f234b49e431"
+    },
+    {
+      "path": "models/histream/src/voxelrt/voxelrt.cpp",
+      "sha256": "c00e70cfc8a9cf0fe0270f7883e78ad707611d814207369765f300f55034f5b9"
+    },
+    {
+      "path": "models/histream/src/voxelrt/voxelrt.h",
+      "sha256": "100ce1f220247debdd2ee0754daa4220f7dca5dc695c33c2182ba336cf09ce26"
+    },
+    {
+      "path": "models/histream/src/voxelrt/voxelrtio.cpp",
+      "sha256": "7a4d333109eed01832525605402c5f9a9143bd638837c70865c8820909ae7629"
+    },
+    {
+      "path": "models/histream/src/voxelrt/voxelrtio.h",
+      "sha256": "e216e266499c6625a2fc9d8699d06e3aa332019c8b7c1aab30165d841a3a5c23"
+    },
+    {
+      "path": "models/histream/shader/PNanoVDB.h",
+      "sha256": "987f647615cb5f0804f394fb81660e359fee027ad4aa026911d9166ce25889ae"
+    },
+    {
+      "path": "models/histream/shader/RayTracing/closestHit.rchit",
+      "sha256": "4ad73d8cb278c2b66f873561af0154fc79cb49388f2c1e54ebe502725b9ece32"
+    },
+    {
+      "path": "models/histream/shader/RayTracing/offline.rgen",
+      "sha256": "a740221c63a8374c78f8464690fd9a3f672f0a891e3a7f384705fbb570e1a96c"
+    },
+    {
+      "path": "models/histream/shader/RayTracing/rmiss.rmiss",
+      "sha256": "c1e0c9955d3cdde9529cd4dad3a1c11f761cfbd447bd0a7e046120561bf41f30"
+    },
+    {
+      "path": "models/histream/shader/RayTracing/shadow.rmiss",
+      "sha256": "99527679be41efa6fb3a5d17b4413a3e2e3a532ad6f25290c1ece349c25218bd"
+    },
+    {
+      "path": "models/histream/shader/background_hapke.glsl",
+      "sha256": "b61a177044a5826bbc8c98dcf6c8fcccccd91bd56469d2f64a9189175935db1b"
+    },
+    {
+      "path": "models/histream/shader/bindingLayout.h",
+      "sha256": "3c4848ad413d7f2f87db619c94cd203532a81bf8f9a274117a48c41523c0e114"
+    },
+    {
+      "path": "models/histream/shader/bsdf.glsl",
+      "sha256": "2a5fae03e6d61bf0bb28bfee4b5f2a107cfb66030c771beaf27fd94d75e85039"
+    },
+    {
+      "path": "models/histream/shader/cases/RayTracing_Hapke/closestHit.rchit",
+      "sha256": "4ad73d8cb278c2b66f873561af0154fc79cb49388f2c1e54ebe502725b9ece32"
+    },
+    {
+      "path": "models/histream/shader/cases/RayTracing_Hapke/offline.rgen",
+      "sha256": "e6dfb8ecbad352454f06ef9f6a07ddbae95634b81f103d603ba5a259a985c680"
+    },
+    {
+      "path": "models/histream/shader/cases/RayTracing_Hapke/rmiss.rmiss",
+      "sha256": "c1e0c9955d3cdde9529cd4dad3a1c11f761cfbd447bd0a7e046120561bf41f30"
+    },
+    {
+      "path": "models/histream/shader/cases/RayTracing_Hapke/shadow.rmiss",
+      "sha256": "99527679be41efa6fb3a5d17b4413a3e2e3a532ad6f25290c1ece349c25218bd"
+    },
+    {
+      "path": "models/histream/shader/cases/RayTracing_Lambert/closestHit.rchit",
+      "sha256": "4ad73d8cb278c2b66f873561af0154fc79cb49388f2c1e54ebe502725b9ece32"
+    },
+    {
+      "path": "models/histream/shader/cases/RayTracing_Lambert/offline.rgen",
+      "sha256": "fbbf3f14ee464a8deb387cb1810500517b992c569c85cf0c4fec3b2767898ff4"
+    },
+    {
+      "path": "models/histream/shader/cases/RayTracing_Lambert/rmiss.rmiss",
+      "sha256": "c1e0c9955d3cdde9529cd4dad3a1c11f761cfbd447bd0a7e046120561bf41f30"
+    },
+    {
+      "path": "models/histream/shader/cases/RayTracing_Lambert/shadow.rmiss",
+      "sha256": "99527679be41efa6fb3a5d17b4413a3e2e3a532ad6f25290c1ece349c25218bd"
+    },
+    {
+      "path": "models/histream/shader/cases/VoxelTracing/diffuse.comp",
+      "sha256": "716d4502a4bae70dd2784ba63a5be8ec20227487f924220db1d0fdd759834103"
+    },
+    {
+      "path": "models/histream/shader/cases/VoxelTracing/outImage.comp",
+      "sha256": "675f09808a1c15faa2e5c34bbaa92c116a5b89a6ec30844040df39143feacc13"
+    },
+    {
+      "path": "models/histream/shader/cases/VoxelTracing/raytrace2_.rchit",
+      "sha256": "51cb311d100c22e8088d2b7cb722b017c8e8815fcaea01a6f5c1bf04fc138730"
+    },
+    {
+      "path": "models/histream/shader/cases/VoxelTracing/raytraceShadow_.rmiss",
+      "sha256": "0bb8c37bf91c868b28e93f25202b87b576feab1cb2249cb5195729dd63abb6ca"
+    },
+    {
+      "path": "models/histream/shader/cases/VoxelTracing/raytrace_.rchit",
+      "sha256": "fe19af2cdb3f284c552acfe9aaf465cf8bca0825f93b983cde550ddbdffd8c9a"
+    },
+    {
+      "path": "models/histream/shader/cases/VoxelTracing/raytrace_.rgen",
+      "sha256": "041d8b948775644326815d78e1c5cd854991c9eabd48e90c39da5f96dffef1b8"
+    },
+    {
+      "path": "models/histream/shader/cases/VoxelTracing/raytrace_.rmiss",
+      "sha256": "bd610f21d40202cbee7d315d8666153c9f2ef73fbeb2ccbf27117586ca33d514"
+    },
+    {
+      "path": "models/histream/shader/cases/VoxelTracing/solar.comp",
+      "sha256": "6aee191f766494cba80f6d58a5405d33803f30bab2d5618a8341cf0697f82e67"
+    },
+    {
+      "path": "models/histream/shader/cases/VoxelTriTracing/diffuse.comp",
+      "sha256": "72b8eb2743c9bfeba00dacf3150d0a9f2aabc3bc239a1d71f7e6ed9d38d58e61"
+    },
+    {
+      "path": "models/histream/shader/cases/VoxelTriTracing/outImageTri.comp",
+      "sha256": "69fcb0bc6b420c63934c20947f0d70ffb5790e2cc5aaa0cd178fdd70d4042beb"
+    },
+    {
+      "path": "models/histream/shader/cases/VoxelTriTracing/solar.comp",
+      "sha256": "7b8404379e863f54ecec1552fe8f3fd980648087bc2081f03402d009ae3c30ee"
+    },
+    {
+      "path": "models/histream/shader/compress.glsl",
+      "sha256": "8ff3b700f56ab218e4a60abec72aa259d5339d18165a8b252aeb5f27c6d300e7"
+    },
+    {
+      "path": "models/histream/shader/faceteb/direct_resolve.comp",
+      "sha256": "9e618b91016f175cb5d32ccd9bb0971a69659dbd64e305834e9e5cbbe90ceb55"
+    },
+    {
+      "path": "models/histream/shader/faceteb/radiosity.comp",
+      "sha256": "d62bdc8139d52f2bc201eb756715532296877d9e3c2a69e7d8dfa1072a1f3c47"
+    },
+    {
+      "path": "models/histream/shader/faceteb/visibility.frag",
+      "sha256": "54d9ce30dfe0593a95d6eaf026a39cb277f6368dea6090d576cc7611a3eac5e4"
+    },
+    {
+      "path": "models/histream/shader/faceteb/visibility.vert",
+      "sha256": "85ac08e66cb94245a0ace95534909845a5c3b3e473fc514f0bba9b091f1e8d05"
+    },
+    {
+      "path": "models/histream/shader/faceteb/visibility_resolve.comp",
+      "sha256": "867474ff40d897aa9e7b20fb464294174bb2812c5b984ea0af4736059c294665"
+    },
+    {
+      "path": "models/histream/shader/facetrt/direct_resolve.comp",
+      "sha256": "9e618b91016f175cb5d32ccd9bb0971a69659dbd64e305834e9e5cbbe90ceb55"
+    },
+    {
+      "path": "models/histream/shader/facetrt/radiosity.comp",
+      "sha256": "d62bdc8139d52f2bc201eb756715532296877d9e3c2a69e7d8dfa1072a1f3c47"
+    },
+    {
+      "path": "models/histream/shader/facetrt/visibility.frag",
+      "sha256": "54d9ce30dfe0593a95d6eaf026a39cb277f6368dea6090d576cc7611a3eac5e4"
+    },
+    {
+      "path": "models/histream/shader/facetrt/visibility.vert",
+      "sha256": "85ac08e66cb94245a0ace95534909845a5c3b3e473fc514f0bba9b091f1e8d05"
+    },
+    {
+      "path": "models/histream/shader/facetrt/visibility_resolve.comp",
+      "sha256": "867474ff40d897aa9e7b20fb464294174bb2812c5b984ea0af4736059c294665"
+    },
+    {
+      "path": "models/histream/shader/functions.glsl",
+      "sha256": "264a905ecc0266dc1f0cb4651d757f7579d1cfe38eb42ff6eeae3e69121de63e"
+    },
+    {
+      "path": "models/histream/shader/global.glsl",
+      "sha256": "039b9584946915d6f3e5bae5a11a597a95953e0955f6edd9be150a5682770136"
+    },
+    {
+      "path": "models/histream/shader/nanovdb_info.glsl",
+      "sha256": "4bf34b3c8e7a11264f252457529ea4c462519c8f63bf3bf22fdee314f2269fed"
+    },
+    {
+      "path": "models/histream/shader/parameters.h",
+      "sha256": "5b04c49e9d01f26362849119ff6ee76f818d7d40cd9d8d05ab4ed9d737a63c43"
+    },
+    {
+      "path": "models/histream/shader/random.glsl",
+      "sha256": "45835c32e7de346df67a42ad0e274fdf83627809bb40ead805cdb5d41f95d7d9"
+    },
+    {
+      "path": "models/histream/shader/sampling.glsl",
+      "sha256": "4ed3721bf204904b3e092e68d041ac32ae8f292383eaf79f06a3ed2f063bbab2"
+    },
+    {
+      "path": "models/histream/shader/settings.h",
+      "sha256": "29f2af6a41f050f50534deffa620224c52b5a72ac397d0f196b87e982485c9d5"
+    },
+    {
+      "path": "models/histream/shader/shade_state.glsl",
+      "sha256": "f9b911cc6982011e886cd8b295c0208f0c20fcb16ca22a249b867e97b6424f1a"
+    },
+    {
+      "path": "models/histream/shader/shade_state_voxel.glsl",
+      "sha256": "fe817778c5eb8efe3dd12c9e71c74cbe96cc50917ba504ef23ec04d414e28751"
+    },
+    {
+      "path": "models/histream/shader/surface_brdf.glsl",
+      "sha256": "ae2acfefe82c81623b00749af203bb24c379b653eb429158ff44b9f075b2bb8e"
+    },
+    {
+      "path": "models/histream/shader/traceray_comp.glsl",
+      "sha256": "06998485692f752b06f023f13712296fc7bc43e345cf0f9c22da15abf04d9c58"
+    },
+    {
+      "path": "models/histream/shader/voxeleb/aeresist.comp",
+      "sha256": "1e46bd7884ace567f9f8a38be444217bf8ccd91f6dd208f00e84099a84588930"
+    },
+    {
+      "path": "models/histream/shader/voxeleb/biochemical.comp",
+      "sha256": "ad015bd6731bf98d21ba926facc0ef7d198b46ab705197b025db06c44e485de7"
+    },
+    {
+      "path": "models/histream/shader/voxeleb/biochemical_m12.comp",
+      "sha256": "ea9cb64da309d5cdd969779cb7f02aadd204064d8eb691c9048c4704cbe65840"
+    },
+    {
+      "path": "models/histream/shader/voxeleb/budget.comp",
+      "sha256": "0d3c80c05495f28c05ee9b42b47356aefe132c1de2f83edbb4e5e5b98b1eef49"
+    },
+    {
+      "path": "models/histream/shader/voxeleb/evapo.comp",
+      "sha256": "a634ce4c033ca333eddef40f4b35b211bdea9408c9fdc3ef04b350fa2e5e0795"
+    },
+    {
+      "path": "models/histream/shader/voxeleb/fluid_common.glsl",
+      "sha256": "cef70f4113a8c145d193a0ce8bcf4c4d4c53d9be9ff0080a61327fd9d00baf14"
+    },
+    {
+      "path": "models/histream/shader/voxeleb/fluid_coupling.glsl",
+      "sha256": "fae997d6a7d9d38f0d32a05d67ed232c5e24e68c626634641d7f813da9de6023"
+    },
+    {
+      "path": "models/histream/shader/voxeleb/fluid_lbm.comp",
+      "sha256": "6e7267b14572717edfa26f4e126f261612531b466a16bdb8bccea09793ddcf7e"
+    },
+    {
+      "path": "models/histream/shader/voxeleb/fluid_lbm_commit.comp",
+      "sha256": "c5043ca09e9c6269724cfa9f3c45e74a19f731ca1c0ae349764b701ff840bead"
+    },
+    {
+      "path": "models/histream/shader/voxeleb/updateL.comp",
+      "sha256": "362ad18150728973cabf80e436e2169d901e9d522f361ea8d6efd0643571c9c4"
+    },
+    {
+      "path": "models/histream/shader/voxeleb/updateTp.comp",
+      "sha256": "ce3190f8e57e21e3814a9a35cd41b2ec3a77ea06f6244d455fcadae1fd4ba595"
+    },
+    {
+      "path": "models/histream/shader/voxeleb/voxelrad_diffuse_TIR_single.comp",
+      "sha256": "29d828d9acfae36c45fbbd6f4cab0a6656aa329059dea51ca0b4e6efc470a2a6"
+    },
+    {
+      "path": "models/histream/shader/voxeleb/voxelrad_diffuse_VNIR_single.comp",
+      "sha256": "2217f0435a886a3b38c247aed35901d3c406c13e5d7b80c4df6ab1c6e33fb8df"
+    },
+    {
+      "path": "models/histream/shader/voxeleb/voxelrad_direct_TIR.comp",
+      "sha256": "6fa00e2a6d63a3051b0b670381d6fd063cf7bb987d4ba82995c06819a907994e"
+    },
+    {
+      "path": "models/histream/shader/voxeleb/voxelrad_direct_VNIR.comp",
+      "sha256": "21bb2cf891533dc5696edb63f12317704c35eaf64300dbe0292d5982f82ebc6e"
+    },
+    {
+      "path": "models/histream/shader/voxeleb/voxelrad_image.comp",
+      "sha256": "934695b4642b5da8eab0f0f35e17105973851e63cff882b3180471d52af6b465"
+    },
+    {
+      "path": "models/histream/shader/voxeleb/voxelrad_solar.comp",
+      "sha256": "9fa26037cf45ff107c7b28d6a21570f4d99e831d4a96a108b6b3d2148a8928cf"
+    },
+    {
+      "path": "models/histream/shader/voxelrad_diffuse_TIR_single - 副本.comp",
+      "sha256": "9c6aa80dde764fc07cfcd97bcc385422dfba22667601e5c5f0f91c8e6f186a58"
+    },
+    {
+      "path": "models/histream/shader/voxelrad_diffuse_VNIR_single - 副本.comp",
+      "sha256": "57f8e5264a13ef6070636c75692a86e5d9ece07c8bf312fb2e80328641ec3650"
+    },
+    {
+      "path": "models/histream/shader/voxelrt/voxelrad_diffuse_single.comp",
+      "sha256": "0ee86bbfd6a33476b73538fc234d9a7c45936d75a24d2c956d3cc2a6b95e123a"
+    },
+    {
+      "path": "models/histream/shader/voxelrt/voxelrad_image.comp",
+      "sha256": "09cec0a9688232e59a56d4dc79d74d462377ce06236b1cddd1c58bc11c1ba017"
+    },
+    {
+      "path": "models/histream/shader/voxelrt/voxelrad_solar.comp",
+      "sha256": "4512019248de93c5e697145094317cf8e651b091f492bfe79ede516415a17cca"
+    },
+    {
+      "path": "models/histream/shader/water_brdf.glsl",
+      "sha256": "1a58c34b5498ee442dca21829922039caf61f1fc877bdf933859388e9396e029"
+    },
+    {
+      "path": "server.mjs",
+      "sha256": "2b52cb32c90f39603c49a75597119c80b748ad3dd90f2e66115f69fb1925ee32"
+    },
+    {
+      "path": "tools/runtime-scene.mjs",
+      "sha256": "1ab602ad201220eb4e6fc607bc146bd73e0b00b50ba1d78412aa873d2f97affb"
+    },
+    {
+      "path": "src/renderer/src/project-schema.js",
+      "sha256": "219d580a6c8c655e9d3f80cc1608d21c55ea3e4580dabcbc6c8963c3418ec372"
+    },
+    {
+      "path": "src/renderer/src/main.js",
+      "sha256": "f2edb9821a4eca7149c41ded4530c89349a009c0ee00e230a34f1e851fef2409"
+    },
+    {
+      "path": "package.json",
+      "sha256": "82daa37ff3b9a3e4de4a9ffff33c098378b45b21a7d39bc76048784c6394df82"
+    }
+  ],
+  "shaderBinaries": [
+    {
+      "path": "shader/RayTracing/closestHit.rchit.spv",
+      "sha256": "c99cde026e27bd054c2005a0c8d5f888ef7758baf0b8ba9764d14cda2854c0e9"
+    },
+    {
+      "path": "shader/RayTracing/offline.rgen.spv",
+      "sha256": "e5498236170e4ecc8fca06d1d8b245e4082a4e5acd66333ca40ca808c5bb1d31"
+    },
+    {
+      "path": "shader/RayTracing/rmiss.rmiss.spv",
+      "sha256": "1fa0fd50525441b8d96dc28f5418d69fa23a774e875d47c5ec3693b73fae2b34"
+    },
+    {
+      "path": "shader/RayTracing/shadow.rmiss.spv",
+      "sha256": "f76c6465c5956306f5e16d8567160fca508861c6b9a7148254a410a186669cc5"
+    },
+    {
+      "path": "shader/cases/VoxelTriTracing/diffuse.comp.spv",
+      "sha256": "fcb8d557328ba014768b672d876ae859896cf26c72dcee71e2978771e36f5ac3"
+    },
+    {
+      "path": "shader/cases/VoxelTriTracing/outImageTri.comp.spv",
+      "sha256": "534c45407b6afa80aea5f7e8a3d8b373ad9559552c8920f45dcd5a60b317947d"
+    },
+    {
+      "path": "shader/cases/VoxelTriTracing/solar.comp.spv",
+      "sha256": "e53d3c9617748dcf082239d5a6848c335a0dc7b178dc258763512ac1f843c427"
+    },
+    {
+      "path": "shader/faceteb/direct_resolve.comp.spv",
+      "sha256": "bc020ed90a01d9d46b26ea9c95804e45c2fee4668790d17094bd56614492d7b9"
+    },
+    {
+      "path": "shader/faceteb/radiosity.comp.spv",
+      "sha256": "ab939f968e29f47bd25dd81e17ded10d30f27f9497b163f37204aab04bbc6b85"
+    },
+    {
+      "path": "shader/faceteb/visibility.frag.spv",
+      "sha256": "0a2f994b376a52e24ec06a1d6a559f05723bd73893f8326493f7c1192154ed4a"
+    },
+    {
+      "path": "shader/faceteb/visibility.vert.spv",
+      "sha256": "54d4d33457070468b10a48e726ee8acea79aba6757f210a93ba755041eba74d4"
+    },
+    {
+      "path": "shader/faceteb/visibility_resolve.comp.spv",
+      "sha256": "b00b109fd6af583415c31a66c1f7615d8e9ef3d120ea3b87e1f43e3f138432ba"
+    },
+    {
+      "path": "shader/facetrt/direct_resolve.comp.spv",
+      "sha256": "bc020ed90a01d9d46b26ea9c95804e45c2fee4668790d17094bd56614492d7b9"
+    },
+    {
+      "path": "shader/facetrt/radiosity.comp.spv",
+      "sha256": "ab939f968e29f47bd25dd81e17ded10d30f27f9497b163f37204aab04bbc6b85"
+    },
+    {
+      "path": "shader/facetrt/visibility.frag.spv",
+      "sha256": "0a2f994b376a52e24ec06a1d6a559f05723bd73893f8326493f7c1192154ed4a"
+    },
+    {
+      "path": "shader/facetrt/visibility.vert.spv",
+      "sha256": "54d4d33457070468b10a48e726ee8acea79aba6757f210a93ba755041eba74d4"
+    },
+    {
+      "path": "shader/facetrt/visibility_resolve.comp.spv",
+      "sha256": "b00b109fd6af583415c31a66c1f7615d8e9ef3d120ea3b87e1f43e3f138432ba"
+    },
+    {
+      "path": "shader/voxeleb/aeresist.comp.spv",
+      "sha256": "b1f894a763e61dd029445816c436c7f1cc3d68f40a273960aaad51e867e85377"
+    },
+    {
+      "path": "shader/voxeleb/biochemical.comp.spv",
+      "sha256": "155bcfd4562a61fc480cd71d1b0d57b9a1eb457b46c9e9cbd66e9cd8236f0113"
+    },
+    {
+      "path": "shader/voxeleb/biochemical_m12.comp.spv",
+      "sha256": "523655d39f5c2b5a6397eb6f57439f2747482029cb45b075bd4b5a1a9ce6b853"
+    },
+    {
+      "path": "shader/voxeleb/budget.comp.spv",
+      "sha256": "1cd3d999a4d22b553dc2ff7921d2e5e03810c87018b4f9bf78258564c05316cb"
+    },
+    {
+      "path": "shader/voxeleb/evapo.comp.spv",
+      "sha256": "54c41d1b65abdf8d864fe1a11afb88673e84fbfa68a07c2ac1d62df541ae1b3a"
+    },
+    {
+      "path": "shader/voxeleb/fluid_advect.comp.spv",
+      "sha256": "6dce75a60b28c103d61e71424a7bb47508af239f1a767266fad224d80a159b57"
+    },
+    {
+      "path": "shader/voxeleb/fluid_divergence.comp.spv",
+      "sha256": "3c30646f29e32304c948401fbd97665d1477fbf67e2d9cd83887234481ba88cd"
+    },
+    {
+      "path": "shader/voxeleb/fluid_lbm.comp.spv",
+      "sha256": "2d4c8749a46124d818fa53b2442ac4fcd6231e330a625b902f94da60db8b6bbb"
+    },
+    {
+      "path": "shader/voxeleb/fluid_lbm_commit.comp.spv",
+      "sha256": "5f84a0ffed3d2580f177efb2d3e7d2438590e2d9f49c2c799df4938c4302e247"
+    },
+    {
+      "path": "shader/voxeleb/fluid_pressure_ab.comp.spv",
+      "sha256": "91cfb30c5724d24c21c6c24ec6716383cdc95e8c7bb65120675b971e14f83816"
+    },
+    {
+      "path": "shader/voxeleb/fluid_pressure_ba.comp.spv",
+      "sha256": "ada554c9910fc7bcbab60adc070b9dc7bd10cff321f35b9c931054684d8ec889"
+    },
+    {
+      "path": "shader/voxeleb/fluid_project.comp.spv",
+      "sha256": "ba35a108207ede89f4d96af193edb7439813c6e05ca3f74d3a43ad2cfab106ee"
+    },
+    {
+      "path": "shader/voxeleb/updateL.comp.spv",
+      "sha256": "7cbda04abfa79c56e1edf9c4cdefd878f485a530b559a05fa360d9bee3f525cd"
+    },
+    {
+      "path": "shader/voxeleb/updateTp.comp.spv",
+      "sha256": "e8f75642c25d9be45f5a008edd83fac334a66608c21689f807bd11680652bff3"
+    },
+    {
+      "path": "shader/voxeleb/voxelrad_diffuse_TIR_single.comp.spv",
+      "sha256": "7594618d48f1c0d81d49b2671e211fb5a301b0bee175934e1854c9b5870d2037"
+    },
+    {
+      "path": "shader/voxeleb/voxelrad_diffuse_VNIR_single.comp.spv",
+      "sha256": "3012ad7c1b5aa8ca663dd485e08bc1a3a12360df3f8fb495f399d2eba98a67ad"
+    },
+    {
+      "path": "shader/voxeleb/voxelrad_direct_TIR.comp.spv",
+      "sha256": "2bfba8ff0f7c9164dde8835b9a2345fd67f3f10c848806ee5cf6b1d708e3403f"
+    },
+    {
+      "path": "shader/voxeleb/voxelrad_direct_VNIR.comp.spv",
+      "sha256": "82cbed26004e7aa13aa1d75afda3babbbff77e35bf6bc64ef68b8b2605a1014d"
+    },
+    {
+      "path": "shader/voxeleb/voxelrad_image.comp.spv",
+      "sha256": "128d1b6a622e6744b73e939c78a905c86f0d67ebcfccd007335fe7ddbef6b856"
+    },
+    {
+      "path": "shader/voxeleb/voxelrad_solar.comp.spv",
+      "sha256": "e456cc40d32ff88e740f49015a8122588f23332a021a8397af78f5e6659ca423"
+    },
+    {
+      "path": "shader/voxelrt/voxelrad_diffuse_single.comp.spv",
+      "sha256": "d3630b5c7aa96cf9c294d45d5a5aa832d2b8e7c8f37d34897c371ca2229ec8de"
+    },
+    {
+      "path": "shader/voxelrt/voxelrad_image.comp.spv",
+      "sha256": "bcd57b4680b88f1241caf7c697a7c6a1c0db9d1f004aadf42ce2b3b465ac421c"
+    },
+    {
+      "path": "shader/voxelrt/voxelrad_solar.comp.spv",
+      "sha256": "5e8fad87b927f261701ceb32ec7f12056877ea3fd93148b97afc478d31d332f5"
+    }
+  ]
+}

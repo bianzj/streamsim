@@ -47,6 +47,9 @@ struct VoxellstSetting
 	int voxelCount;
 	int periodicNeighborCount;
 	int skyboxEnabled;
+#if defined(VOXELLST)
+	uint64_t radianceAddress;
+#endif
 };
 
 struct VoxelrtSetting

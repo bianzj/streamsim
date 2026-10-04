@@ -164,7 +164,9 @@ int Engine::run() {
         return m_pFacetrt && m_pFacetrt->run(m_pFacetrtio) ? 0 : 1;
     }
     if (m_mode == Mode::eFacetEB) {
-        return m_pFaceteb && m_pFaceteb->run(m_pFacetebio) ? 0 : 1;
+        if (!m_pFaceteb || !m_pFacetebio) return 1;
+        m_pFaceteb->run(m_pFacetebio);
+        return m_pFacetebio->exitCode;
     }
     if (m_mode == Mode::eRaytracing) {
         return m_pRaytracing && m_pRaytracing->run(m_pRaytracingio, m_pFileio) ? 0 : 1;

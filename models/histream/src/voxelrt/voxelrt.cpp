@@ -22,6 +22,25 @@ float planckRadiance(const float wavelengthNanometers, const float temperatureKe
         (std::pow(wavelength, 5.0) * std::expm1(c2 / (temperature * wavelength))));
 }
 
+void writeVoxelrtProcessField(std::ostream& metadata, const float wavelength,
+                             const int offset) {
+    const bool thermal = wavelength > 5000.0f;
+    metadata << "{\"id\":\"" << (thermal ? "spectral_radiance_" : "illumination_")
+             << wavelength << "\",\"aliases\":[\"radiosity_" << wavelength
+             << "\"],\"label\":\""
+             << (thermal ? "平均出射光谱辐亮度 " : "归一化入射照明 ")
+             << wavelength << (thermal ? " nm [W m⁻² sr⁻¹ μm⁻¹]" : " nm [-]")
+             << "\",\"offset\":" << offset << ",\"wavelengthNm\":" << wavelength
+             << ",\"quantity\":\""
+             << (thermal ? "outgoing_spectral_radiance" : "incoming_normalized_illumination")
+             << "\",\"unit\":\"" << (thermal ? "W m-2 sr-1 um-1" : "1")
+             << "\",\"definition\":\""
+             << (thermal
+                 ? "(reflectance + transmittance) * environment_radiance + emissivity * mixed_Planck_radiance; local material average, without a sensor viewing direction"
+                 : "environment_illumination + sunlit_fraction * configured_direct_fraction; configured direct/diffuse fractions, without spectral irradiance scaling or local outgoing reflectance")
+             << "\"}";
+}
+
 std::vector<std::string> voxelrtBandNames(const std::vector<float>& waves,
                                           const bool temperatureOutput) {
     std::vector<std::string> names;
@@ -314,13 +333,17 @@ void Voxelrt::outputRadiationProcess(std::shared_ptr<VoxelrtIO>& modelio) {
                 std::isfinite(environmentValue) ? std::max(0.0f, environmentValue) : 0.0f;
             const float wavelength = band < static_cast<int>(modelio->waves.size())
                 ? modelio->waves[band] : static_cast<float>(band + 1);
+            const bool isThermalBand = wavelength > 5000.0f;
             float shadedRadiance = environmentRadiance;
-            float sunlitRadiance = environmentRadiance + std::max(0.0f, modelio->light.direct);
+            // Optical values are normalized incoming illumination. Longwave
+            // values use Planck radiance and must never include that fraction.
+            float sunlitRadiance = environmentRadiance +
+                (isThermalBand ? 0.0f : std::max(0.0f, modelio->light.direct));
 
             // Longwave radiance is emitted by the local surface.  Compute the
             // illuminated and shaded states separately, then mix them using
             // the voxel's solar transmittance/fraction.
-            if (wavelength > 5000.0f && mesh != nullptr &&
+            if (isThermalBand && mesh != nullptr &&
                 mesh->thermalId >= 0 &&
                 mesh->thermalId < static_cast<int>(modelio->m_meshio->thermals.size())) {
                 float reflectance = 0.0f;
@@ -361,12 +384,13 @@ void Voxelrt::outputRadiationProcess(std::shared_ptr<VoxelrtIO>& modelio) {
              << "  \"model\": \"voxelrt\",\n"
              << "  \"processType\": \"radiation\",\n"
              << "  \"geometry\": \"voxel\",\n"
+             << "  \"schemaVersion\": 2,\n"
              << "  \"voxelCount\": " << voxelCount << ",\n"
              << "  \"voxelSize\": " << scale << ",\n"
              << "  \"dataFile\": \"" << binaryPath.filename().string() << "\",\n"
              << "  \"dataType\": \"float32-little-endian\",\n"
              << "  \"layout\": \"voxel-interleaved\",\n"
-             << "  \"aggregation\": \"sunlitFraction * sunlitRadiance + (1 - sunlitFraction) * shadedRadiance\",\n"
+             << "  \"aggregation\": \"sunlit_fraction * sunlit_value + (1 - sunlit_fraction) * shaded_value; quantity and units are defined per field\",\n"
              << "  \"recordFloats\": " << 4 + bandCount << ",\n"
              << "  \"positionOffsets\": [0,1,2],\n"
              << "  \"fields\": [";
@@ -374,9 +398,7 @@ void Voxelrt::outputRadiationProcess(std::shared_ptr<VoxelrtIO>& modelio) {
         if (band != 0) metadata << ',';
         const float wavelength = band < static_cast<int>(modelio->waves.size())
             ? modelio->waves[band] : static_cast<float>(band + 1);
-        metadata << "{\"id\":\"radiosity_" << wavelength
-                 << "\",\"label\":\"平均辐射度 " << wavelength
-                 << " nm [W m⁻² sr⁻¹ μm⁻¹]\",\"offset\":" << 3 + band << '}';
+        writeVoxelrtProcessField(metadata, wavelength, 3 + band);
     }
     if (bandCount != 0) metadata << ',';
     metadata << "{\"id\":\"sunlit_fraction\",\"label\":\"光照比例 [-]\",\"offset\":"

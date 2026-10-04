@@ -2,7 +2,8 @@ import { createServer } from 'node:http'
 import { execFile, spawn } from 'node:child_process'
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads'
 import { createInterface } from 'node:readline'
-import { appendFileSync, closeSync, copyFileSync, cpSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs'
+import { appendFileSync, closeSync, copyFileSync, cpSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
 import { inflateSync } from 'node:zlib'
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -15,6 +16,9 @@ const GUI_OUTPUT_DIR = join(RESOURCE_ROOT, 'gui')
 const apiOnly = process.argv.includes('--api-only')
 const modes = new Set(PROJECT_MODES)
 const MODEL_ROOT = join(PROJECT_ROOT, 'models')
+const DEFAULT_HISTREAM_PROXY_MANIFEST = 'C:/work/stream3d/outputs/stream3d-full-volume-radiometric-aoyun-20260928/histream_proxy_deployment.json'
+const DEFAULT_HISTREAM_PROXY_RUNNER = 'C:/work/stream3d/scripts/histream_proxy_runner.py'
+const DEFAULT_HISTREAM_PROXY_PYTHON = 'C:/work/miniconda/python.exe'
 const MAX_FACET_TRIANGLES = 1_000_000
 const defaultSceneAsset = join(RESOURCE_ROOT, 'assets', 'obj-library', 'building', 'house_a.obj')
 const histreamCandidates = [
@@ -29,12 +33,79 @@ const resultImageMime = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'i
 let child = null
 let childExecutable = ''
 let resettingProcesses = false
+let histreamProxyRequestInFlight = false
 let projectFile = ''
 let projectDir = ''
 const clients = new Set()
 
 function executable() {
   return histreamCandidates.find(existsSync) || histreamCandidates[0]
+}
+
+function fileIdentity(path) {
+  const resolved = resolve(normalizeHostPath(path))
+  if (!existsSync(resolved) || !statSync(resolved).isFile()) return null
+  const hash = createHash('sha256')
+  const descriptor = openSync(resolved, 'r')
+  const buffer = Buffer.allocUnsafe(1024 * 1024)
+  try {
+    let count
+    while ((count = readSync(descriptor, buffer, 0, buffer.length, null)) > 0) hash.update(buffer.subarray(0, count))
+  } finally { closeSync(descriptor) }
+  return { path: resolved, bytes: statSync(resolved).size, sha256: hash.digest('hex') }
+}
+
+function writeRunManifest(run, patch = {}) {
+  Object.assign(run.manifest, patch, { updatedAt: new Date().toISOString() })
+  const path = join(run.outputDir, 'run-manifest.json')
+  writeFileSync(path + '.tmp', JSON.stringify(run.manifest, null, 2) + '\n', 'utf8')
+  renameSync(path + '.tmp', path)
+}
+
+function runProductPaths(directory) {
+  const files = []
+  for (const subdirectory of [directory, join(directory, 'process'), join(directory, '.facet_steps')]) {
+    if (!existsSync(subdirectory)) continue
+    for (const entry of readdirSync(subdirectory, { withFileTypes: true })) {
+      if (entry.isFile() && !['run-manifest.json', 'run-manifest.json.tmp', 'source-project.json'].includes(entry.name)) files.push(join(subdirectory, entry.name))
+    }
+  }
+  return files.map(path => relative(directory, path).replaceAll('\\', '/')).sort()
+}
+
+function createIsolatedRun(input, project, mode, engine) {
+  const baseDir = dirname(input)
+  const root = resolve(baseDir, normalizeHostPath(project.configuration.outDir || 'output'))
+  const runId = new Date().toISOString().replace(/[:.]/g, '-') + '-' + randomUUID().slice(0, 8)
+  const outputDir = join(root, 'runs', runId)
+  const configuredMeteo = String(project.configuration.meteo?.path || '')
+  const meteoPath = !configuredMeteo || ['defined/meteo.txt', 'HiStream 内置气象数据'].includes(configuredMeteo)
+    ? join(dirname(engine), 'defined', 'meteo.txt') : projectAssetPath(configuredMeteo, baseDir)
+  const meteo = fileIdentity(meteoPath)
+  if (isEnergyBalanceMode(mode) && !meteo) throw new Error('找不到本轮气象驱动：' + meteoPath)
+  const sensor = project.configuration.sensor
+  const perspective = ['perspective', 'central', 'center'].includes(String(sensor.projection))
+  const nodes = isEnergyBalanceMode(mode)
+    ? Array.from({ length: project.configuration.meteo.end - project.configuration.meteo.start }, (_, index) => project.configuration.meteo.start + index) : []
+  const run = { runId, outputDir, manifest: {
+    kind: 'streamsim-run', schemaVersion: 1, runId, mode, status: 'preparing', startedAt: new Date().toISOString(),
+    sourceInput: fileIdentity(input), engine: fileIdentity(engine), meteorology: meteo,
+    requested: { nodes, nodeCount: isEnergyBalanceMode(mode) ? nodes.length : 1,
+      viewAngles: perspective ? [[sensor.vza, sensor.vaa]] : sensorViewAngles(sensor, project.configuration.light.azimuth),
+      image: Boolean(sensor.image), process: processOutputEnabled(JSON.stringify(project), mode) },
+    completed: { nodes: [], nodeCount: 0, products: [] }
+  } }
+  const buildManifestPath = join(dirname(engine), 'build-manifest.json')
+  if (existsSync(buildManifestPath)) {
+    try {
+      const build = JSON.parse(readFileSync(buildManifestPath, 'utf8'))
+      run.manifest.build = { ...fileIdentity(buildManifestPath), applicationVersion: build.applicationVersion, sourceTreeSha256: build.sourceTreeSha256 }
+    } catch { run.manifest.build = { ...fileIdentity(buildManifestPath), unreadable: true } }
+  }
+  mkdirSync(outputDir, { recursive: true })
+  copyFileSync(input, join(outputDir, 'source-project.json'))
+  writeRunManifest(run)
+  return { ...run, meteoPath }
 }
 
 function processExists(pid) {
@@ -86,6 +157,192 @@ async function resetSimulationProcesses() {
 function json(response, status, value) {
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' })
   response.end(JSON.stringify(value))
+}
+
+function pathWithin(root, candidate) {
+  const base = resolve(root)
+  const target = resolve(candidate)
+  const rel = relative(base, target)
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) && !isAbsolute(rel))
+}
+
+function realPathWithin(root, candidate, allowMissing = false) {
+  let realRoot
+  try { realRoot = realpathSync(root) } catch { return false }
+  let realTarget
+  try { realTarget = realpathSync(candidate) }
+  catch {
+    if (!allowMissing || !pathWithin(realRoot, candidate)) return false
+    let ancestor = resolve(candidate)
+    while (!existsSync(ancestor)) {
+      const parent = dirname(ancestor)
+      if (parent === ancestor) return false
+      ancestor = parent
+    }
+    try { return pathWithin(realRoot, realpathSync(ancestor)) } catch { return false }
+  }
+  return pathWithin(realRoot, realTarget)
+}
+
+function sameResolvedPath(left, right) {
+  if (!existsSync(left) || !existsSync(right)) return false
+  try {
+    const a = resolve(realpathSync(left)).replaceAll('\\', '/')
+    const b = resolve(realpathSync(right)).replaceAll('\\', '/')
+    return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b
+  } catch { return false }
+}
+
+function sha256File(path) {
+  return createHash('sha256').update(readFileSync(path)).digest('hex')
+}
+
+function histreamProxyDeployment() {
+  const manifestPath = resolve(normalizeHostPath(
+    process.env.STREAMSIM_HISTREAM_PROXY_MANIFEST || DEFAULT_HISTREAM_PROXY_MANIFEST))
+  if (!existsSync(manifestPath)) {
+    return { manifestPath, deployment: null, reason: 'histream-proxy bundle is not installed; run the full-volume training --phase bundle command.' }
+  }
+  let deployment
+  try { deployment = JSON.parse(readFileSync(manifestPath, 'utf8')) }
+  catch (error) { return { manifestPath, deployment: null, reason: `Cannot read histream-proxy deployment manifest: ${error.message}` } }
+  if (deployment.format !== 'stream3d-histream-proxy-deployment-v1' || deployment.backend !== 'histream-proxy'
+      || deployment.native_engine_invoked !== false) {
+    return { manifestPath, deployment: null, reason: 'Unsupported or unsafe histream-proxy deployment manifest.' }
+  }
+  const artifactRoot = resolve(normalizeHostPath(deployment.artifact_root || ''))
+  const artifactPaths = [deployment.model_path, deployment.volume_schema_path,
+    deployment.volume_join_audit_path, deployment.training_report_path, deployment.result_root,
+    ...Object.values(deployment.volume_paths || {})]
+  if (!artifactRoot || artifactPaths.some((item) => !item || !pathWithin(artifactRoot, normalizeHostPath(item)))) {
+    return { manifestPath, deployment: null, reason: 'Proxy model/volume paths escape the declared artifact root.' }
+  }
+  const paths = {
+    manifest: manifestPath,
+    runner: resolve(normalizeHostPath(deployment.runner_path || '')),
+    python: resolve(normalizeHostPath(deployment.python_executable || '')),
+    capture: resolve(normalizeHostPath(deployment.capture_root || '')),
+    model: resolve(normalizeHostPath(deployment.model_path || '')),
+    artifactRoot,
+    resultRoot: resolve(normalizeHostPath(deployment.result_root || '')),
+  }
+  const trustedRunner = resolve(normalizeHostPath(process.env.STREAMSIM_HISTREAM_PROXY_RUNNER || DEFAULT_HISTREAM_PROXY_RUNNER))
+  const trustedPython = resolve(normalizeHostPath(process.env.STREAMSIM_HISTREAM_PROXY_PYTHON || DEFAULT_HISTREAM_PROXY_PYTHON))
+  const pathIssues = []
+  const pathIdentity = (value) => {
+    const normalized = resolve(normalizeHostPath(value)).replaceAll('\\', '/')
+    return process.platform === 'win32' ? normalized.toLowerCase() : normalized
+  }
+  if (!sameResolvedPath(paths.runner, trustedRunner)) pathIssues.push('Manifest runner path is outside the configured histream-proxy runner allowlist.')
+  if (!sameResolvedPath(paths.python, trustedPython)) pathIssues.push('Manifest Python path is outside the configured histream-proxy Python allowlist.')
+  const expectedStateKeys = ['DOY173_12-00', 'DOY173_13-00', 'DOY173_14-00', 'DOY173_15-00']
+  if (JSON.stringify(Object.keys(deployment.volume_paths || {}).sort()) !== JSON.stringify(expectedStateKeys.slice().sort())
+      || JSON.stringify(Object.keys(deployment.volume_sha256 || {}).sort()) !== JSON.stringify(expectedStateKeys.slice().sort())) {
+    pathIssues.push('Deployment must pin exactly the four supported thermal-state volume files.')
+  }
+  const sourceRoot = resolve(normalizeHostPath(deployment.source_root || ''))
+  const expectedSourcePaths = [
+    join(sourceRoot, 'project.json'),
+    join(sourceRoot, 'output', 'process', 'voxel_scene_links.bin'),
+    join(sourceRoot, 'output', 'process', 'material_sensor_spectra.csv'),
+    join(sourceRoot, 'meteorology', 'meteo_beijing_2019.txt'),
+    join(sourceRoot, 'thermal_solver.log'),
+  ]
+  for (const key of expectedStateKeys) {
+    const thermal = `voxelthermal_T=${key}.bin`
+    const geometry = `voxelrt_T=${key}.bin`
+    expectedSourcePaths.push(join(sourceRoot, 'output', 'process', thermal),
+      join(sourceRoot, 'output', 'process', geometry), join(sourceRoot, 'output', 'process', geometry.replace(/\.bin$/i, '.json')))
+  }
+  const actualSourcePaths = Object.keys(deployment.required_source_inputs_sha256 || {})
+  if (new Set(actualSourcePaths.map(pathIdentity)).size !== expectedSourcePaths.length
+      || expectedSourcePaths.some((item) => !actualSourcePaths.some((candidate) => pathIdentity(candidate) === pathIdentity(item)))) {
+    pathIssues.push('Deployment source-input SHA list must exactly cover all 17 canonical project/material/thermal/geometry/meteo files.')
+  }
+  const expectedCapturePaths = [join(paths.capture, 'manifest.json')]
+  try {
+    const captureManifest = JSON.parse(readFileSync(expectedCapturePaths[0], 'utf8'))
+    if (captureManifest.sourceRoot && pathIdentity(captureManifest.sourceRoot) !== pathIdentity(sourceRoot)) {
+      pathIssues.push('Capture source root differs from the deployment source root.')
+    }
+    for (const episode of captureManifest.episodes || []) {
+      if (!episode.path || episode.path.includes('..') || isAbsolute(normalizeHostPath(episode.path))) throw new Error('invalid episode path')
+      const framePath = join(paths.capture, episode.path, 'frames.jsonl')
+      if (!pathWithin(paths.capture, framePath)) throw new Error('episode path escapes capture root')
+      expectedCapturePaths.push(framePath)
+    }
+    if (pathIdentity(deployment.capture_manifest_path || '') !== pathIdentity(expectedCapturePaths[0])) {
+      pathIssues.push('Capture manifest path does not match the fixed capture root.')
+    }
+  } catch (error) { pathIssues.push(`Cannot validate capture hash list: ${error.message}`) }
+  const actualCapturePaths = Object.keys(deployment.required_capture_inputs_sha256 || {})
+  if (new Set(actualCapturePaths.map(pathIdentity)).size !== expectedCapturePaths.length
+      || expectedCapturePaths.some((item) => !actualCapturePaths.some((candidate) => pathIdentity(candidate) === pathIdentity(item)))) {
+    pathIssues.push('Deployment capture-input SHA list must exactly cover capture manifest and every episode frame file.')
+  }
+  const containedArtifactFiles = [paths.model,
+    resolve(normalizeHostPath(deployment.volume_schema_path || '')),
+    resolve(normalizeHostPath(deployment.volume_join_audit_path || '')),
+    resolve(normalizeHostPath(deployment.training_report_path || '')),
+    ...Object.values(deployment.volume_paths || {}).map((item) => resolve(normalizeHostPath(item)))]
+  if (containedArtifactFiles.some((item) => !realPathWithin(paths.artifactRoot, item))) {
+    pathIssues.push('A model or dense volume resolves outside the artifact root.')
+  }
+  if (!realPathWithin(paths.artifactRoot, paths.resultRoot, true)) {
+    pathIssues.push('Proxy result directory resolves outside the artifact root.')
+  }
+  const required = [paths.runner, paths.python, paths.capture, paths.model,
+    resolve(normalizeHostPath(deployment.volume_schema_path || '')),
+    resolve(normalizeHostPath(deployment.volume_join_audit_path || '')),
+    resolve(normalizeHostPath(deployment.training_report_path || '')),
+    ...Object.values(deployment.volume_paths || {}).map((item) => resolve(normalizeHostPath(item))),
+    ...Object.keys(deployment.required_source_inputs_sha256 || {}).map((item) => resolve(normalizeHostPath(item))),
+    ...Object.keys(deployment.required_capture_inputs_sha256 || {}).map((item) => resolve(normalizeHostPath(item)))]
+  const missing = required.filter((item) => !existsSync(item))
+  const hashIssues = []
+  const hashChecks = [
+    [paths.runner, deployment.runner_sha256, 'runner'],
+    [paths.model, deployment.model_sha256, 'model'],
+    [resolve(normalizeHostPath(deployment.volume_schema_path || '')), deployment.volume_schema_sha256, 'volume schema'],
+    [resolve(normalizeHostPath(deployment.volume_join_audit_path || '')), deployment.volume_join_audit_sha256, 'volume join audit'],
+    [resolve(normalizeHostPath(deployment.training_report_path || '')), deployment.training_report_sha256, 'training report'],
+    ...Object.entries(deployment.volume_paths || {}).map(([key, path]) => [resolve(normalizeHostPath(path)), deployment.volume_sha256?.[key], `volume ${key}`]),
+    ...Object.entries(deployment.required_source_inputs_sha256 || {}).map(([path, hash]) => [resolve(normalizeHostPath(path)), hash, `source ${basename(path)}`]),
+    ...Object.entries(deployment.required_capture_inputs_sha256 || {}).map(([path, hash]) => [resolve(normalizeHostPath(path)), hash, `capture ${basename(path)}`]),
+  ]
+  for (const [path, expected, label] of hashChecks) {
+    if (!expected) { hashIssues.push(`Missing pinned SHA256: ${label}`); continue }
+    if (!existsSync(path)) continue
+    try {
+      if (sha256File(path) !== String(expected).toLowerCase()) hashIssues.push(`SHA256 mismatch: ${label}`)
+    } catch (error) { hashIssues.push(`Cannot verify ${label}: ${error.message}`) }
+  }
+  const issues = [...pathIssues, ...hashIssues]
+  const reason = missing.length ? `Missing proxy runtime inputs: ${missing.join(', ')}`
+    : issues.length ? issues.join(' ') : null
+  return { manifestPath, deployment, paths, ready: missing.length === 0 && issues.length === 0,
+    reason, missing, issues }
+}
+
+function histreamProxyHealth(includeFrames = false) {
+  const active = histreamProxyDeployment()
+  if (!active.deployment) return {
+    backend: 'histream-proxy', ready: false, manifestPath: windowsPath(active.manifestPath),
+    reason: active.reason, nativeEngineInvoked: false,
+  }
+  const d = active.deployment
+  const info = {
+    backend: 'histream-proxy', ready: active.ready, manifestPath: windowsPath(active.manifestPath),
+    runnerPath: windowsPath(active.paths.runner), pythonExecutable: windowsPath(active.paths.python),
+    captureRoot: windowsPath(active.paths.capture), artifactRoot: windowsPath(active.paths.artifactRoot),
+    captureId: d.capture_id, captureScope: d.capture_scope, captureDate: d.capture_date,
+    sourceProjectSha256: d.source_project_sha256, nativeEngineSha256: d.native_engine_sha256,
+    shape: d.output_shape, bandNames: d.output_band_names, bandUnits: d.output_band_units,
+    frameCount: d.supported_frames?.length || 0,
+    portability: d.portability, reason: active.reason, nativeEngineInvoked: false,
+  }
+  if (includeFrames && active.ready) info.supportedFrames = d.supported_frames
+  return info
 }
 
 function emit(payload) {
@@ -1603,7 +1860,7 @@ function csvCell(value) {
   return `"${String(value ?? '').replaceAll('"', '""')}"`
 }
 
-function appendRasterStatistics(path, width, height, bands, values, bandNames = []) {
+function writeRasterStatistics(path, width, height, bands, values, bandNames = []) {
   const name = basename(path)
   const isTimeSeries = name.startsWith('T=')
   const mode = name.includes('_f.') ? (isTimeSeries ? 'FacetEB' : 'FacetRT')
@@ -1629,8 +1886,12 @@ function appendRasterStatistics(path, width, height, bands, values, bandNames = 
       count ? minimum : '', count ? maximum : '', count ? mean : '', count ? Math.sqrt(moment / count) : ''
     ].join(','))
   }
-  if (!existsSync(statisticsPath)) appendFileSync(statisticsPath, 'file,mode,time,vza,vaa,band_index,band_name,count,min,max,mean,stddev\n', 'utf8')
-  appendFileSync(statisticsPath, rows.join('\n') + '\n', 'utf8')
+  // Re-exporting a TIFF replaces its band rows instead of duplicating the
+  // same observation in the statistics table.
+  const prefix = csvCell(name) + ','
+  const existing = existsSync(statisticsPath) ? readFileSync(statisticsPath, 'utf8').trimEnd().split(/\r?\n/).slice(1) : []
+  writeFileSync(statisticsPath, 'file,mode,time,vza,vaa,band_index,band_name,count,min,max,mean,stddev\n' +
+    [...existing.filter(line => line && !line.startsWith(prefix)), ...rows].join('\n') + '\n', 'utf8')
   return statisticsPath
 }
 
@@ -1716,7 +1977,7 @@ function writeFloatTiff(path, width, height, bands, values, bandNames = []) {
     }
   } finally { closeSync(fd) }
   renameSync(temporaryPath, path)
-  appendRasterStatistics(path, width, height, bands, values, bandNames)
+  writeRasterStatistics(path, width, height, bands, values, bandNames)
   return path
 }
 
@@ -1859,9 +2120,20 @@ function listResults(value) {
   if (!existsSync(directory) || !statSync(directory).isDirectory()) throw new Error('找不到模拟结果目录：' + directory)
   const processDirectory = join(directory, 'process')
   const directories = [directory, ...(existsSync(processDirectory) && statSync(processDirectory).isDirectory() ? [processDirectory] : [])]
+  let runMetadata = {}
+  try { runMetadata = JSON.parse(readFileSync(join(directory, 'run-manifest.json'), 'utf8')) } catch {}
+  let nativeFiles = null
+  if (!runMetadata.runId) {
+    try {
+      const native = JSON.parse(readFileSync(join(directory, 'faceteb_run.json'), 'utf8'))
+      nativeFiles = new Set(native.products)
+      runMetadata.status = native.status
+    } catch {}
+  }
   const files = directories.flatMap((currentDirectory) => readdirSync(currentDirectory, { withFileTypes: true })
     .filter((entry) => entry.isFile())
     .filter((entry) => ['.tif', '.tiff', '.json', '.csv'].includes(extname(entry.name).toLowerCase()))
+    .filter((entry) => !nativeFiles || nativeFiles.has(relative(directory, join(currentDirectory, entry.name)).replaceAll('\\', '/')))
     .map((entry) => {
       const path = join(currentDirectory, entry.name)
       const info = statSync(path)
@@ -1896,7 +2168,8 @@ function listResults(value) {
         : kind === 'process'
           ? (process.processType === 'photovoltaic' ? '光伏热电耦合' : (processModelLabels[processModel] || processModel)) + ' · ' + String(process.time || '静态')
           : entry.name
-      return { name: displayName, path, size: info.size, modifiedAt: info.mtime.toISOString(), kind, resultType, ...observation, processTime: process.time, processType: process.processType, processModel, node: process.node }
+      return { name: displayName, path, size: info.size, modifiedAt: info.mtime.toISOString(), kind, resultType, ...observation, processTime: process.time, processType: process.processType, processModel, node: process.node,
+        runId: runMetadata.runId || '', runStatus: runMetadata.status || '', converged: process.converged }
     }))
     .filter((entry) => entry.kind !== 'file')
     .sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt))
@@ -1907,12 +2180,17 @@ function listResults(value) {
   // time series exists, listing it as another "final time" is redundant.
   const latestFacet = files.find((entry) => entry.kind === 'facet' && !(
     hasFacetTimeSeries && basename(entry.path).toLowerCase() === 'faceteb.json'))
+  const runsDirectory = join(directory, 'runs')
+  const nested = existsSync(runsDirectory) ? readdirSync(runsDirectory, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && !entry.isSymbolicLink())
+    .flatMap(entry => listResults(join(runsDirectory, entry.name)).files) : []
   return {
     directory: windowsPath(directory),
     files: [
       ...files.filter((entry) => entry.kind === 'tiff'),
       ...files.filter((entry) => entry.kind === 'text'),
       ...files.filter((entry) => entry.kind === 'process'),
+      ...nested,
       ...(latestFacet ? [latestFacet] : [])
     ].sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt))
       .map((entry) => ({ ...entry, path: windowsPath(entry.path) }))
@@ -2560,6 +2838,102 @@ function readEnvi(path, requestedBand = 0) {
 }
 
 async function api(request, response, url) {
+  if (request.method === 'GET' && url.pathname === '/api/histream-proxy/info') {
+    return json(response, 200, histreamProxyHealth(true))
+  }
+  if (request.method === 'GET' && url.pathname === '/api/histream-proxy/result') {
+    try {
+      const active = histreamProxyDeployment()
+      if (!active.deployment || !active.ready) throw new Error(active.reason || 'histream-proxy is not ready')
+      const filename = String(url.searchParams.get('file') || '')
+      if (!/^[A-Za-z0-9_.-]+_frame-\d{4}\.npz$/.test(filename) || filename !== basename(filename))
+        throw new Error('Invalid proxy result identifier')
+      const resultRoot = resolve(normalizeHostPath(active.deployment.result_root || ''))
+      if (!pathWithin(active.paths.artifactRoot, resultRoot)
+          || !realPathWithin(active.paths.artifactRoot, resultRoot)) throw new Error('Proxy result directory escapes artifact root')
+      const resultPath = resolve(resultRoot, filename)
+      if (!pathWithin(resultRoot, resultPath) || !existsSync(resultPath) || !statSync(resultPath).isFile()
+          || !realPathWithin(resultRoot, resultPath))
+        throw new Error(`Proxy numerical result was not found: ${filename}`)
+      const safeResultPath = realpathSync(resultPath)
+      response.writeHead(200, { 'Content-Type': 'application/octet-stream',
+        'Content-Disposition': `attachment; filename="${filename}"`,
+        'Content-Length': statSync(safeResultPath).size, 'Cache-Control': 'no-store' })
+      createReadStream(safeResultPath).pipe(response)
+      return true
+    } catch (error) {
+      return json(response, 400, { error: error.message, backend: 'histream-proxy', nativeEngineInvoked: false })
+    }
+  }
+  if (request.method === 'POST' && url.pathname === '/api/histream-proxy/run') {
+    try {
+      const data = await body(request)
+      if (['inputPath', 'projectPath', 'mode', 'executable'].some((key) => data[key] !== undefined)) {
+        return json(response, 400, { error: 'histream-proxy does not accept ordinary StreamSim project.json or engine CLI inputs; select a frame from the fixed Aoyun capture.',
+          backend: 'histream-proxy', supportedCaptureOnly: true, nativeEngineInvoked: false })
+      }
+      const active = histreamProxyDeployment()
+      if (!active.deployment || !active.ready) {
+        return json(response, 503, { error: active.reason || 'histream-proxy bundle is not ready',
+          backend: 'histream-proxy', manifestPath: windowsPath(active.manifestPath), nativeEngineInvoked: false })
+      }
+      const deployment = active.deployment
+      const episodeId = String(data.episodeId || '')
+      const frameIndex = Number(data.frameIndex)
+      if (data.captureId !== deployment.capture_id || !episodeId || !Number.isInteger(frameIndex)) {
+        return json(response, 400, { error: 'Select an allowlisted captureId, episodeId and integer frameIndex.',
+          backend: 'histream-proxy', captureId: deployment.capture_id,
+          captureScope: deployment.capture_scope, nativeEngineInvoked: false })
+      }
+      const supported = deployment.supported_frames.some((item) =>
+        item.episode_id === episodeId && item.frame_index === frameIndex)
+      if (!supported) return json(response, 400, { error: 'Requested frame is outside the trained capture allowlist.',
+        backend: 'histream-proxy', captureId: deployment.capture_id,
+        captureScope: deployment.capture_scope, nativeEngineInvoked: false })
+      if (histreamProxyRequestInFlight) return json(response, 409, { error: 'Another histream-proxy frame is being rendered.',
+        backend: 'histream-proxy', nativeEngineInvoked: false })
+      histreamProxyRequestInFlight = true
+      const python = active.paths.python
+      const runner = active.paths.runner
+      const manifest = active.manifestPath
+      return await new Promise((resolveProxy) => {
+        execFile(python, [runner, '--deployment-manifest', manifest,
+          '--episode-id', episodeId, '--frame-index', String(frameIndex)], {
+          cwd: dirname(runner), windowsHide: true, encoding: 'utf8',
+          timeout: 120000, maxBuffer: 8 * 1024 * 1024,
+          env: { ...process.env, PYTHONUTF8: '1' },
+        }, (error, stdout, stderr) => {
+          histreamProxyRequestInFlight = false
+          if (error) {
+            const detail = String(stderr || error.message || '').trim()
+            json(response, 502, { error: `histream-proxy runner failed: ${detail}`,
+              backend: 'histream-proxy', noFallback: true, nativeEngineInvoked: false })
+            resolveProxy(true)
+            return
+          }
+          try {
+            const result = JSON.parse(String(stdout || '').trim())
+            if (result.status !== 'ok' || result.backend !== 'histream-proxy' || result.native_engine_invoked !== false) {
+              throw new Error('Proxy runner returned an invalid or unsafe response')
+            }
+            result.downloadUrl = `/api/histream-proxy/result?file=${encodeURIComponent(result.download_id)}.npz`
+            result.activeManifestPath = windowsPath(manifest)
+            result.runnerPath = windowsPath(runner)
+            result.pythonExecutable = windowsPath(python)
+            result.fixedCaptureOnly = true
+            json(response, 200, result)
+          } catch (parseError) {
+            json(response, 502, { error: `Cannot parse histream-proxy output: ${parseError.message}`,
+              backend: 'histream-proxy', noFallback: true, nativeEngineInvoked: false })
+          }
+          resolveProxy(true)
+        })
+      })
+    } catch (error) {
+      histreamProxyRequestInFlight = false
+      return json(response, 400, { error: error.message, backend: 'histream-proxy', nativeEngineInvoked: false })
+    }
+  }
   if (request.method === 'GET' && url.pathname === '/api/defaults') {
     const path = executable()
     return json(response, 200, { executable: windowsPath(path), executableExists: existsSync(path), radiosityExecutable: windowsPath(path), radiosityExecutableExists: existsSync(path), projectFile: windowsPath(projectFile), platform: process.platform, versions: { node: process.versions.node, three: '0.185.1' } })
@@ -2772,6 +3146,7 @@ async function api(request, response, url) {
   }
   if (request.method === 'POST' && url.pathname === '/api/run') {
     let runtimeScene = null
+    let run = null
     try {
       const data = await body(request)
       if (resettingProcesses) throw new Error('模拟环境正在重置，请稍后再运行')
@@ -2781,19 +3156,44 @@ async function api(request, response, url) {
       projectFile = input
       projectDir = dirname(input)
       const stored = readProject(input)
-      const project = stored.project ? migrateProject(input, stored.project) : null
+      // Running must not migrate or rewrite the canonical source project.
+      // Normalize path storage only in this invocation's in-memory copy.
+      const project = stored.project ? normalizeStoredProjectPaths(stored.project, projectDir) : null
       if (!project) throw new Error('无法读取工程配置')
-      runtimeScene = prepareRuntimeSceneProject(input, project, {
+      const engine = normalizeHostPath(data.executable || executable())
+      if (!existsSync(engine)) throw new Error(`找不到 HiStream：${windowsPath(engine)}`)
+      run = createIsolatedRun(input, project, data.mode, engine)
+      const runProject = structuredClone(project)
+      runProject.configuration.outDir = run.outputDir
+      if (run.manifest.meteorology) runProject.configuration.meteo.path = run.meteoPath
+      runtimeScene = prepareRuntimeSceneProject(input, runProject, {
         resolveAssetPath: (value) => projectAssetPath(value, projectDir)
       })
-      const runInput = runtimeScene.inputPath
+      // Preserve generated placements and clipped OBJ files with the input;
+      // cleanup removes only the temporary staging directory.
+      const inputDirectory = join(run.outputDir, 'input')
+      const stagingDirectory = dirname(runtimeScene.inputPath)
+      if (!basename(stagingDirectory).startsWith('.streamsim-runtime-') || pathWithin(stagingDirectory, inputDirectory)) {
+        throw new Error('运行输入暂存目录无效或复制目标位于暂存目录内')
+      }
+      cpSync(stagingDirectory, inputDirectory, { recursive: true })
+      const runInput = join(inputDirectory, 'project.json')
+      if (run.manifest.meteorology) {
+        const frozenMeteo = join(inputDirectory, 'meteo.txt')
+        copyFileSync(run.meteoPath, frozenMeteo)
+        const frozenProject = JSON.parse(readFileSync(runInput, 'utf8'))
+        frozenProject.configuration.meteo.path = frozenMeteo
+        writeFileSync(runInput, stringifyProject(frozenProject), 'utf8')
+        run.manifest.meteorology.snapshot = fileIdentity(frozenMeteo)
+      }
+      writeRunManifest(run, { runtimeInput: fileIdentity(runInput), inputDirectory })
       emit({
         type: 'stdout',
         text: `实例边界筛选：原始 ${runtimeScene.total.toLocaleString('zh-CN')} 个，保留 ${runtimeScene.kept.toLocaleString('zh-CN')} 个，完整包围盒在域外跳过 ${runtimeScene.excluded.toLocaleString('zh-CN')} 个；跨界对象仅计算域内部分${runtimeScene.clippedObjects ? `；预裁切 ${runtimeScene.clippedObjects} 个单实例 OBJ，三角面 ${runtimeScene.sourceTriangles.toLocaleString('zh-CN')} → ${runtimeScene.retainedTriangles.toLocaleString('zh-CN')}` : ''}${runtimeScene.invalid ? `，忽略无效记录 ${runtimeScene.invalid.toLocaleString('zh-CN')} 条` : ''}`
       })
       const facetMode = data.mode === 'eFacetRT' || data.mode === 'eFacetEB'
       if (facetMode) {
-        const estimate = assertFacetScale(runtimeScene.project, projectDir, data.mode)
+        const estimate = assertFacetScale(runtimeScene.project, inputDirectory, data.mode)
         emit({ type: 'stdout', text: `面元规模预检：约 ${estimate.total.toLocaleString('zh-CN')} 个三角面` })
       }
       const projectSource = readFileSync(input, "utf8")
@@ -2807,11 +3207,9 @@ async function api(request, response, url) {
       const keepThreeDimensionalResults = processOutputEnabled(projectSource, data.mode)
         || (data.mode === 'eFacetEB' && project.configuration.materials.some(material =>
           material.energyModel === 'photovoltaic' && referencedMaterials.has(material.name)))
-      let engine, args, radiosityJsonPath = ''
-      engine = normalizeHostPath(data.executable || executable())
-      if (!existsSync(engine)) throw new Error(`找不到 HiStream：${windowsPath(engine)}`)
+      let args, radiosityJsonPath = ''
       if (facetMode) {
-        const outputDirectory = join(projectDir, 'output')
+        const outputDirectory = run.outputDir
         mkdirSync(outputDirectory, { recursive: true })
         const resultName = data.mode === "eFacetRT" ? "facetrt.json" : "faceteb.json"
         radiosityJsonPath = join(outputDirectory, keepThreeDimensionalResults ? resultName : ".streamsim-transient-" + data.mode + ".json")
@@ -2828,15 +3226,23 @@ async function api(request, response, url) {
         stdio: [streamFacetSteps ? 'pipe' : 'ignore', 'pipe', 'pipe'] })
       childExecutable = engine
       const running = child
-      emit({ type: 'started', pid: running.pid, command: `"${windowsPath(engine)}" ${args.map((item) => `"${windowsPath(item)}"`).join(' ')}` })
+      writeRunManifest(run, { status: 'running', pid: running.pid, command: [engine, ...args] })
+      emit({ type: 'started', pid: running.pid, runId: run.runId, outputDir: windowsPath(run.outputDir), command: `"${windowsPath(engine)}" ${args.map((item) => `"${windowsPath(item)}"`).join(' ')}` })
       running.stdout.on('data', (chunk) => emit({ type: 'stdout', text: chunk.toString() }))
       running.stderr.on('data', (chunk) => emit({ type: 'stderr', text: chunk.toString() }))
       let streamedSteps = 0, stepOutputError = null, stepPending = false
+      const nodeDiagnostics = new Map()
       if (streamFacetSteps) {
         // readline handles split/coalesced stdout chunks and CRLF safely.
         const lines = createInterface({ input: running.stdout, crlfDelay: Infinity })
         running.stdin.on('error', () => { /* Engine may be stopped during output. */ })
         lines.on('line', async (line) => {
+          if (line.startsWith('FACET_CONVERGENCE\t')) {
+            const [, node, converged, iterations, temperatureDelta, energyResidual, energyResidualTemperatureEquivalent] = line.split('\t')
+            nodeDiagnostics.set(Number(node), { node: Number(node), converged: converged === '1', iterations: Number(iterations),
+              temperatureDelta: Number(temperatureDelta), energyResidual: Number(energyResidual), energyResidualTemperatureEquivalent: Number(energyResidualTemperatureEquivalent) })
+            return
+          }
           if (!line.startsWith('FACET_STEP\t') || running.streamsimReset || running.streamsimStopped) return
           try {
             const match = /^FACET_STEP\t(\d+)\t(DOY\d+_\d{2}-\d{2})\t([\d.eE+-]+)$/.exec(line)
@@ -2845,10 +3251,13 @@ async function api(request, response, url) {
             if (!Number.isFinite(step.julianTime)) throw new Error('面元节点时间无效')
             stepPending = true
             emit({ type: 'stdout', text: `节点 ${step.node + 1} 已计算，正在逐方向保存图像：${step.token}` })
-            const result = await exportFacetStep(running, radiosityJsonPath, input, step)
+            const result = await exportFacetStep(running, radiosityJsonPath, runInput, step)
             if (running.streamsimReset || running.streamsimStopped || running.exitCode !== null) return
             streamedSteps += 1
             stepPending = false
+            run.manifest.completed.nodes.push({ ...step, ...nodeDiagnostics.get(step.node) })
+            run.manifest.completed.nodeCount = run.manifest.completed.nodes.length
+            writeRunManifest(run, { completed: { ...run.manifest.completed, products: runProductPaths(run.outputDir) } })
             emit({ type: 'stdout', text: `节点 ${step.node + 1} 已保存 ${result.tifPaths.length} 个 TIFF，输出缓存已释放：${step.token}` })
             running.stdin.write(`FACET_ACK\t${step.node}\n`)
           } catch (error) {
@@ -2861,20 +3270,22 @@ async function api(request, response, url) {
       }
       running.on('error', (error) => {
         runtimeScene?.cleanup()
+        writeRunManifest(run, { status: 'failed', finishedAt: new Date().toISOString(), error: error.message })
         if (!running.streamsimReset) emit({ type: 'error', text: error.message })
       })
       running.on('close', (code, signal) => {
         if (running.facetWorker) void running.facetWorker.terminate()
         if (running.streamsimReset) {
+          writeRunManifest(run, { status: 'stopped', finishedAt: new Date().toISOString(), completed: { ...run.manifest.completed, products: runProductPaths(run.outputDir) } })
           runtimeScene?.cleanup()
           if (child === running) child = null
           if (!child) childExecutable = ''
           return
         }
         let finalCode = stepOutputError ? 1 : code
-        if (code === 0 && radiosityJsonPath && !streamedSteps && !stepOutputError) {
+        if ([0, 2].includes(code) && radiosityJsonPath && !streamedSteps && !stepOutputError) {
           try {
-            const tif = writeRadiosityTiff(radiosityJsonPath, input, data.mode)
+            const tif = writeRadiosityTiff(radiosityJsonPath, runInput, data.mode)
             if (tif.tifPaths.length) {
               const timing = isEnergyBalanceMode(data.mode) ? ' 个逐时间 TIFF' : ' 个 TIFF'
               emit({ type: 'stdout', text: '已生成 ' + tif.tifPaths.length + timing + '（' + tif.width + ' × ' + tif.height + '，' + tif.bands + ' 波段）' })
@@ -2888,13 +3299,27 @@ async function api(request, response, url) {
           }
         }
         if (streamedSteps && code === 0 && !keepThreeDimensionalResults && existsSync(radiosityJsonPath)) unlinkSync(radiosityJsonPath)
-        emit({ type: 'closed', code: finalCode, signal, elapsed: Date.now() - startedAt })
+        if ([0, 2].includes(finalCode) && !radiosityJsonPath) {
+          try { convertEnviResults(run.outputDir, data.mode) }
+          catch (error) { finalCode = 1; stepOutputError = error }
+        }
+        let nativeRun = {}
+        try { nativeRun = JSON.parse(readFileSync(join(run.outputDir, 'faceteb_run.json'), 'utf8')) } catch {}
+        if (nativeRun.completed && [0, 2].includes(finalCode)) run.manifest.completed.nodes = nativeRun.completed
+        if (nativeRun.completed) run.manifest.computedNodes = nativeRun.completed
+        if (!nativeRun.completed && finalCode === 0 && !streamFacetSteps) run.manifest.completed.nodes = run.manifest.requested.nodes.map(node => ({ node, completionSource: 'engine-exit' }))
+        run.manifest.completed.nodeCount = run.manifest.completed.nodes.length || (finalCode === 0 && !isEnergyBalanceMode(data.mode) ? 1 : 0)
+        const status = running.streamsimStopped ? 'stopped' : finalCode === 2 ? 'non_converged' : finalCode === 0 ? 'completed' : 'failed'
+        writeRunManifest(run, { status, finishedAt: new Date().toISOString(), exitCode: finalCode, signal,
+          ...(stepOutputError ? { error: stepOutputError.message } : {}), completed: { ...run.manifest.completed, products: runProductPaths(run.outputDir) } })
+        emit({ type: 'closed', code: finalCode, signal, status, runId: run.runId, outputDir: windowsPath(run.outputDir), elapsed: Date.now() - startedAt })
         runtimeScene?.cleanup()
         if (child === running) { child = null; childExecutable = '' }
       })
-      return json(response, 200, { pid: running.pid, inputPath: windowsPath(input) })
+      return json(response, 200, { pid: running.pid, inputPath: windowsPath(input), runId: run.runId, outputDir: windowsPath(run.outputDir) })
     } catch (error) {
       runtimeScene?.cleanup()
+      if (run) writeRunManifest(run, { status: 'failed', finishedAt: new Date().toISOString(), error: error.message })
       return json(response, 400, { error: error.message })
     }
   }

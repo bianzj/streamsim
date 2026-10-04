@@ -162,6 +162,12 @@ find_program(HISTREAM_GLSLC
         HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/Bin32"
         REQUIRED)
 
+# Rebuild every affected SPIR-V module when a shared include changes. Runtime
+# copies must never pair a new C++/GLSL layout with an old compiled shader.
+file(GLOB_RECURSE HISTREAM_SHARED_SHADER_DEPENDENCIES CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/shader/*.glsl"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shader/*.h")
+
 set(HISTREAM_RAYTRACING_SHADER_FILES
         offline.rgen
         closestHit.rchit
@@ -182,6 +188,7 @@ foreach (RAYTRACING_SHADER_FILE IN LISTS HISTREAM_RAYTRACING_SHADER_FILES)
                     -o "${RAYTRACING_SHADER_OUTPUT}"
             DEPENDS
                     "${CMAKE_CURRENT_SOURCE_DIR}/shader/raytracing/${RAYTRACING_SHADER_FILE}"
+                    ${HISTREAM_SHARED_SHADER_DEPENDENCIES}
                     "${CMAKE_CURRENT_SOURCE_DIR}/shader/global.glsl"
                     "${CMAKE_CURRENT_SOURCE_DIR}/shader/functions.glsl"
                     "${CMAKE_CURRENT_SOURCE_DIR}/shader/bsdf.glsl"
@@ -218,6 +225,7 @@ if (HISTREAM_ENABLE_FACET)
                             "${FACET_SHADER_SOURCE_DIR}/${FACET_SHADER_FILE}"
                             -o "${FACET_SHADER_OUTPUT}"
                     DEPENDS "${FACET_SHADER_SOURCE_DIR}/${FACET_SHADER_FILE}"
+                            ${HISTREAM_SHARED_SHADER_DEPENDENCIES}
                     VERBATIM)
             list(APPEND FACET_SHADER_OUTPUTS "${FACET_SHADER_OUTPUT}")
         endforeach()
@@ -244,8 +252,11 @@ foreach (VOXELEB_SHADER_SOURCE IN LISTS HISTREAM_VOXELEB_SHADER_FILES)
                     "${VOXELEB_SHADER_SOURCE}"
                     -o "${VOXELEB_SHADER_OUTPUT}"
             DEPENDS "${VOXELEB_SHADER_SOURCE}"
+                    ${HISTREAM_SHARED_SHADER_DEPENDENCIES}
+                    "${CMAKE_CURRENT_SOURCE_DIR}/shader/shade_state_voxel.glsl"
                     "${CMAKE_CURRENT_SOURCE_DIR}/shader/parameters.h"
                     "${CMAKE_CURRENT_SOURCE_DIR}/shader/bindingLayout.h"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/shader/settings.h"
                     "${CMAKE_CURRENT_SOURCE_DIR}/shader/global.glsl"
                     "${CMAKE_CURRENT_SOURCE_DIR}/shader/functions.glsl"
                     "${CMAKE_CURRENT_SOURCE_DIR}/shader/voxeleb/fluid_common.glsl"
@@ -274,6 +285,8 @@ foreach (VOXELRT_SHADER_SOURCE IN LISTS HISTREAM_VOXELRT_SHADER_FILES)
                     "${VOXELRT_SHADER_SOURCE}"
                     -o "${VOXELRT_SHADER_OUTPUT}"
             DEPENDS "${VOXELRT_SHADER_SOURCE}"
+                    ${HISTREAM_SHARED_SHADER_DEPENDENCIES}
+                    "${CMAKE_CURRENT_SOURCE_DIR}/shader/shade_state_voxel.glsl"
                     "${CMAKE_CURRENT_SOURCE_DIR}/shader/parameters.h"
                     "${CMAKE_CURRENT_SOURCE_DIR}/shader/functions.glsl"
             VERBATIM)
@@ -336,7 +349,7 @@ endforeach (RELEASELIB)
 
 # Deploy runtime resources next to histream.exe so XML-driven projects use the same
 # shader and predefined-data layout as the built-in configurations.
-add_custom_command(TARGET ${PROJNAME} POST_BUILD
+add_custom_target(histream_runtime_resources ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${CMAKE_CURRENT_SOURCE_DIR}/shader"
             "$<TARGET_FILE_DIR:${PROJNAME}>/shader"
@@ -362,6 +375,7 @@ add_custom_command(TARGET ${PROJNAME} POST_BUILD
             "$<IF:$<CONFIG:Debug>,${VCPKG_INSTALLED_DIR}/x64-windows/debug/bin,${VCPKG_INSTALLED_DIR}/x64-windows/bin>"
             "$<TARGET_FILE_DIR:${PROJNAME}>"
     COMMENT "Deploying HiStream shader and defined runtime resources"
+    DEPENDS ${PROJNAME}
 )
 
 _finalize_target(${PROJNAME})

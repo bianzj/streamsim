@@ -38,7 +38,9 @@ ShadeState GetShadeState(in PtPayload hstate)
 
   // Normal
   vec3 geom_normal  = normalize(cross(pos1 - pos0, pos2 - pos0));
-  vec3 wgeom_normal = normalize(vec3(geom_normal * hstate.objectToWorld));
+  // Normals transform by inverse transpose, including rotated/nonuniformly
+  // scaled instances. Multiplication by objectToWorld as a row was incorrect.
+  vec3 wgeom_normal = normalize(transpose(mat3(hstate.worldToObject)) * geom_normal);
 
   //vec3 wgeom_tangent, wgeom_binormal;
   vec3 geom_tangent, geom_binormal;

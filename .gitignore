@@ -20,3 +20,9 @@ validation/**/output/
 validation/**/log_nvprosample.txt
 *.pdb
 *.orig
+/tmp/
+/output/
+/screenshot/
+**/__pycache__/
+assets/examples/**/output/
+**/log_nvprosample.txt

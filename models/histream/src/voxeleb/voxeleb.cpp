@@ -11,6 +11,7 @@
 #include <sstream>
 #include <vector>
 #include <gdal_priv.h>
+#include "src/base/projectjson.h"
 #include "voxeleb.h"
 #include "src/base/atmosphere_lut.h"
 
@@ -190,15 +191,21 @@ bool  Voxeleb::uploadMeteo(std::shared_ptr<FileIO> &fileio, std::shared_ptr<Voxe
 
 
    // Utils::readascfileinout(meteofile,0,1,)
-    modelio->startTimeNode = fileio->m_pVoxelebXml->meteoxml.startTimeNode;
-    modelio->endTimeNode = fileio->m_pVoxelebXml->meteoxml.endTimeNode;
+   modelio->startTimeNode = fileio->m_pVoxelebXml->meteoxml.startTimeNode;
+   modelio->endTimeNode = fileio->m_pVoxelebXml->meteoxml.endTimeNode;
    fileio->readMeteo(modelio->m_defined,modelio->n_node,modelio->meteos,modelio->atomconds);
+   m_stableMeteos = modelio->meteos;
    return true;
 }
 
-bool  Voxeleb::updateMeteo(std::shared_ptr<VoxelebIO> &modelio, int knode){
+bool Voxeleb::updateMeteo(std::shared_ptr<VoxelebIO> &modelio, int knode){
 
-    modelio->meteo = modelio->meteos[knode];
+    if (knode < 0 || knode >= static_cast<int>(m_stableMeteos.size())) {
+        throw std::out_of_range("VoxelEB meteorology node " + std::to_string(knode) +
+                                " is outside the loaded series (" +
+                                std::to_string(m_stableMeteos.size()) + ")");
+    }
+    modelio->meteo = m_stableMeteos[knode];
 
     nvvk::CommandPool cmdBufGet(modelio->m_device, modelio->m_queueIndex);
     vk::CommandBuffer cmdBuf = cmdBufGet.createCommandBuffer();
@@ -273,6 +280,9 @@ bool Voxeleb::create(std::shared_ptr<VoxelebIO> &modelio) {
 }
 
 bool Voxeleb::run(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<FileIO> &fileio) {
+    if (const char* observer = std::getenv("STREAMSIM_OBSERVER_MANIFEST")) {
+        return runObserver(modelio, fileio, observer);
+    }
 
 
 // for(int knode = 72; knode < 75;knode = knode + 1) {
@@ -302,7 +312,7 @@ bool Voxeleb::run(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<FileIO> &
     // for(int knode = 0; knode < 144;knode = knode + 1) {
         modelio->k_node = knode;
 
-        updateMeteo(modelio,knode);
+        updateMeteo(modelio, knode);
 
         // Energy balance must use the solar position of the current meteo node.
         if (!modelio->angles.empty()) {
@@ -472,6 +482,8 @@ void Voxeleb::output(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<FileIO
     const float sensorHeight = kpos >= 0 && kpos < static_cast<int>(modelio->uavposes.size())
         ? modelio->uavposes[kpos].z : fileio->m_pVoxelebXml->sensorxml.position.z;
     std::vector<float> outputData(totalElements, 0.0f);
+    const bool observerCapture = std::getenv("STREAMSIM_OBSERVER_MANIFEST") != nullptr;
+    std::vector<unsigned char> surfaceMask(observerCapture ? imageElements : 0, 0);
     Eigen::VectorXd cx;
     Eigen::VectorXd cy;
     if (!perspective) m_pGeometry->orthcorrect(modelio, angle.vza, angle.vaa, cx, cy);
@@ -491,16 +503,27 @@ void Voxeleb::output(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<FileIO
                 i, j, width, height,
                 fileio->m_pVoxelebXml->sensorxml.sensorFov,
                 angle.vza, angle.vaa, skyZenith);
+            // A dark optical sample can be a real surface (especially at night).
+            // A thermal hit rules out sky even if its optical radiance is zero.
+            bool thermalSurfaceHit = false;
+            for (int band = 0; band < nWave; ++band) {
+                const float signal = sourceData[static_cast<size_t>(band) * imageElements + source];
+                if (!isOpticalWavelength(modelio->waves[band]) && std::isfinite(signal) && signal > 0.0f)
+                    thermalSurfaceHit = true;
+            }
+            if (observerCapture) surfaceMask[destination] = thermalSurfaceHit ? 1 : 0;
             for (int band = 0; band < nWave; ++band) {
                 const size_t bandOffset = static_cast<size_t>(band) * imageElements;
                 const float sourceValue = sourceData[bandOffset + source];
                 float value = sourceValue;
-                if ((!std::isfinite(sourceValue) || sourceValue == 0.0f) && isSkyPixel) {
+                if ((!std::isfinite(sourceValue) || sourceValue == 0.0f) && isSkyPixel && !thermalSurfaceHit) {
                     value = atmosphereSkyOutputValue(
                         fileio->m_pVoxelebXml->atmospherexml,
                         modelio->waves[band], sensorHeight, skyZenith,
                         modelio->isTemperature,
                         fileio->m_pVoxelebXml->lightxml.skyTemperature);
+                    if (isOpticalWavelength(modelio->waves[band]) && modelio->meteo.Rin <= 0.5f)
+                        value = 0.0f;
                 } else {
                     value = atmosphereCorrectRadiance(
                         sourceValue, fileio->m_pVoxelebXml->atmospherexml,
@@ -513,6 +536,14 @@ void Voxeleb::output(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<FileIO
         }
     }
 
+    if (observerCapture) {
+        const auto path = std::filesystem::path(modelio->projectDir) /
+            ("surface_mask_P=" + std::to_string(kpos) + ".bin");
+        std::ofstream mask(path, std::ios::binary | std::ios::trunc);
+        mask.write(reinterpret_cast<const char*>(surfaceMask.data()),
+                   static_cast<std::streamsize>(surfaceMask.size()));
+        if (!mask) throw std::runtime_error("Cannot save observer surface-hit mask");
+    }
     const float time = modelio->meteo.t;
     fileio->writeTIFData(
         modelio->projectDir, outputData.data(), width, height, nWave, angle, time,
@@ -695,6 +726,47 @@ void Voxeleb::outputVoxel(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<F
     const std::filesystem::path directory = std::filesystem::path(modelio->projectDir) / "process";
     std::filesystem::create_directories(directory);
     const float scale = std::max(0.0001f, modelio->stepsize_surface);
+    // Preserve separate sunlit/shaded states for later mobile-camera rendering.
+    const std::string thermalFile = "voxelthermal_T=" + time.str() + ".bin";
+    std::vector<float> thermalState(voxelCount * 3);
+    for (size_t voxel = 0; voxel < voxelCount; ++voxel) {
+        thermalState[voxel * 3] = temperatures[voxel].sunlit;
+        thermalState[voxel * 3 + 1] = temperatures[voxel].shaded;
+        thermalState[voxel * 3 + 2] = std::clamp(directions[voxel].solar, 0.0f, 1.0f);
+    }
+    std::ofstream thermalBinary(directory / thermalFile, std::ios::binary | std::ios::trunc);
+    thermalBinary.write(reinterpret_cast<const char*>(thermalState.data()),
+                        static_cast<std::streamsize>(thermalState.size() * sizeof(float)));
+    thermalBinary.close();
+    if (!thermalBinary) throw std::runtime_error("Cannot save voxel thermal state");
+
+    if (modelio->k_node == modelio->startTimeNode) {
+        // Stable row order matches every hourly process and thermal-state file.
+        std::vector<int32_t> links(voxelCount * 6);
+        for (size_t voxel = 0; voxel < voxelCount; ++voxel) {
+            const auto& link = modelio->m_voxelio->voxellinks.at(voxel);
+            const auto& instance = modelio->m_instanceio->instanceLinks.at(link.instanceId);
+            const auto& mesh = modelio->m_meshio->meshLinks.at(instance.meshId);
+            const int32_t row[] = {link.instanceId, static_cast<int32_t>(instance.meshId),
+                mesh.spectralId, mesh.canopyId, mesh.type, link.faceId};
+            std::copy_n(row, 6, links.data() + voxel * 6);
+        }
+        std::ofstream linkBinary(directory / "voxel_scene_links.bin", std::ios::binary | std::ios::trunc);
+        linkBinary.write(reinterpret_cast<const char*>(links.data()),
+                         static_cast<std::streamsize>(links.size() * sizeof(int32_t)));
+        linkBinary.close();
+        if (!linkBinary) throw std::runtime_error("Cannot save voxel scene links");
+        std::ofstream spectra(directory / "material_sensor_spectra.csv", std::ios::trunc);
+        spectra << std::setprecision(9) << "spectral_id,wavelength_nm,reflectance,transmittance\n";
+        const auto& optical = modelio->m_meshio->spectrals;
+        const size_t bands = modelio->waves.size();
+        for (size_t value = 0; bands > 0 && value < optical.size(); ++value) {
+            spectra << value / bands << ',' << modelio->waves[value % bands] << ','
+                    << optical[value].reflectance << ',' << optical[value].transmittance << '\n';
+        }
+        spectra.close();
+        if (!spectra) throw std::runtime_error("Cannot save material spectra");
+    }
     const auto writeProcess = [&](const std::string& type) {
         // Radiation in VoxelEB is a time sequence of VoxelRT fields;
         // energy fluxes retain the VoxelEB model name.
@@ -779,6 +851,10 @@ void Voxeleb::outputVoxel(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<F
                  << componentOffset + 2 << ",\n"
                  << "  \"componentOffset\": " << componentOffset << ",\n"
                  << "  \"positionOffsets\": [0,1,2],\n"
+                 << "  \"thermalState\": {\"dataFile\":\"" << thermalFile
+                 << "\",\"recordFloats\":3,\"fields\":[\"sunlitTemperatureK\",\"shadedTemperatureK\",\"sunlitFraction\"]},\n"
+                 << "  \"sceneLinks\": {\"dataFile\":\"voxel_scene_links.bin\",\"dataType\":\"int32-little-endian\",\"recordInts\":6,"
+                    "\"fields\":[\"instanceId\",\"meshId\",\"spectralId\",\"canopyId\",\"type\",\"faceId\"]},\n"
                  << "  \"fields\": ";
         if (type == "radiation") {
             metadata << "[{\"id\":\"shortwaveRadiation\",\"label\":\"短波辐射 [W m⁻²]\",\"offset\":3},"
@@ -1057,3 +1133,4 @@ bool Voxeleb::uploadAero(std::shared_ptr<FileIO> &fileio, std::shared_ptr<Voxele
 
 
 }
+#include "observer_capture.inl"

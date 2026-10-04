@@ -356,6 +356,55 @@ int mappedId(const MapType& values, const std::vector<std::string>& names,
     return found == values.end() ? 0 : found->second;
 }
 
+// A primitive building always creates wall and roof meshes. A single schema
+// binding applies to both; the optional second binding overrides the roof.
+void preparePrimitiveBuilding(PrimEntity& entity)
+{
+    if (entity.meshNames.empty() || entity.meshNames.size() > 2)
+        throw std::runtime_error("Primitive building requires one binding or a wall/roof pair: " + entity.primitiveName);
+    const auto expand = [&entity](std::vector<std::string>& names, const char* field) {
+        if (names.empty() || names.size() > 2)
+            throw std::runtime_error(std::string("Invalid primitive building ") + field + ": " + entity.primitiveName);
+        if (names.size() == 1) names.push_back(names.front());
+    };
+    expand(entity.meshNames, "mesh bindings");
+    expand(entity.spectralNames, "spectral bindings");
+    expand(entity.canopyNames, "canopy bindings");
+    expand(entity.propNames, "material bindings");
+
+    if (entity.isdisFromFile) {
+        std::ifstream file(entity.distributefile);
+        if (!file) throw std::runtime_error("Cannot open building position file: " + entity.distributefile);
+        entity.primDistributions.clear();
+        entity.scales.clear();
+        entity.rotations.clear();
+        std::string line;
+        while (std::getline(file, line)) {
+            const size_t comment = std::min(line.find('#'), line.find("//"));
+            if (comment != std::string::npos) line.erase(comment);
+            std::istringstream row(line);
+            row >> std::ws;
+            if (row.eof()) continue;
+            std::vector<float> values;
+            float value;
+            while (row >> value) values.push_back(value);
+            if (!row.eof() || values.size() < 3 || values.size() > 5 ||
+                !std::all_of(values.begin(), values.end(), [](float v) { return std::isfinite(v); }))
+                throw std::runtime_error("Invalid building position row: " + entity.distributefile);
+            const float scale = values.size() > 3 ? values[3] : 1.0f;
+            const float rotation = values.size() > 4 ? values[4] : 0.0f;
+            if (!(scale > 0.0f)) throw std::runtime_error("Building instance scale must be positive: " + entity.distributefile);
+            entity.primDistributions.emplace_back(values[0], values[1], values[2]);
+            entity.scales.push_back(scale);
+            entity.rotations.push_back(rotation);
+        }
+        if (entity.primDistributions.empty())
+            throw std::runtime_error("Building position file contains no instances: " + entity.distributefile);
+    }
+    entity.scales.resize(entity.primDistributions.size(), 1.0f);
+    entity.rotations.resize(entity.primDistributions.size(), 0.0f);
+}
+
 struct RotatedHexContribution {
     std::array<float, 3> projectedArea{{0.0f, 0.0f, 0.0f}};
     std::array<std::vector<std::uint64_t>, 3> coverMask;
@@ -928,7 +977,9 @@ bool createObjFilledVoxels(Scene* scene, PrimEntity& entity,
         const std::vector<glm::ivec3> activeXYZ = voxelizeObjSurface(
             sourceMesh, modelio->stepsize_surface,
             entity.voxelFillThreshold, rejectedVoxelCount);
-        propertyMeshes[meshIndex] = designer.createTriVoxels(activeXYZ);
+        const Type propertyType = meshIndex < entity.types.size() ? entity.types[meshIndex] : entity.type;
+        const bool opaque = propertyType == Type::BUILDING || propertyType == Type::SOIL || propertyType == Type::WATER;
+        propertyMeshes[meshIndex] = designer.createTriVoxels(activeXYZ, opaque);
         totalActive += activeXYZ.size();
         std::cout << "OBJ mesh voxelization: " << entity.objFile
                   << " mesh=" << (separateMeshes ? entity.meshNames[meshIndex] : "all")
@@ -1849,7 +1900,7 @@ bool Scene::createPrimObj_Crowns(PrimEntity & voxelEntity,nanovdb::GridBuilder<i
 }
 
 bool Scene::createPrimObj_Building(PrimEntity & voxelEntity,nanovdb::GridBuilder<int32_t> &nanoBuilder, std::shared_ptr<VoxelebIO> &modelio, const Background& background) {
-
+    preparePrimitiveBuilding(voxelEntity);
 
     auto acc = nanoBuilder.getAccessor();
     auto &meshio = modelio->m_meshio;
@@ -1880,20 +1931,16 @@ bool Scene::createPrimObj_Building(PrimEntity & voxelEntity,nanovdb::GridBuilder
     PrimMesh currentVoxelModel1 = XYZ2XZY(currentVoxelModelXYZ1, 1); // (1,1,0) => (1,0,1) with  height = 0
     currentVoxelModel1.meshId = n_modelmesh;
     meshio->primMeshes.emplace_back(currentVoxelModel1); //xzy
-    std::string meshName1 = voxelEntity.meshNames[0];
-    std::string spectralName1 = voxelEntity.spectralNames[0];
-    std::string canopyName1 = voxelEntity.canopyNames[0];
-    std::string propName1 = voxelEntity.propNames[0];
-    MeshLink meshlink1;
-    meshlink1.spectralId = meshio->spectralNames.find(spectralName1)->second;
-    meshlink1.thermalId = 0;
-    meshlink1.canopyId = meshio->canopyNames.find(canopyName1)->second;
+    MeshLink meshlink1{};
+    meshlink1.spectralId = mappedId(meshio->spectralNames, voxelEntity.spectralNames, 0);
+    meshlink1.thermalId = mappedId(meshio->thermalNames, voxelEntity.thermalNames, 0);
+    meshlink1.canopyId = mappedId(meshio->canopyNames, voxelEntity.canopyNames, 0);
     if (type == Type::VEGETATION) {
         // meshlink1.leafbioId = meshio->leafbioNames.find(propName)->second;
-        meshlink1.bioId = meshio->leafbioNames.find(propName1)->second;
+        meshlink1.bioId = mappedId(meshio->leafbioNames, voxelEntity.propNames, 0);
     } else if (type == Type::SOIL || type == Type::BUILDING) {
         //  meshlink1.soilsetId = meshio->soilsetNames.find(propName)->second;
-        meshlink1.bioId = meshio->soilsetNames.find(propName1)->second;
+        meshlink1.bioId = mappedId(meshio->soilsetNames, voxelEntity.propNames, 0);
     }
     //  meshlink1.aeroId = meshio->aeroNames.find(aeroName)->second;
     meshlink1.type = (int) type;
@@ -1914,20 +1961,16 @@ bool Scene::createPrimObj_Building(PrimEntity & voxelEntity,nanovdb::GridBuilder
     /// ------------------------------------
     /// voxel model/mesh
     ///-------------------------------------
-    std::string meshName2 = voxelEntity.meshNames[1];
-    std::string spectralName2 = voxelEntity.spectralNames[1];
-    std::string canopyName2 = voxelEntity.canopyNames[1];
-    std::string propName2 = voxelEntity.propNames[1];
-    MeshLink meshlink2;
-    meshlink2.spectralId = meshio->spectralNames.find(spectralName2)->second;
-    meshlink2.thermalId = 0;
-    meshlink2.canopyId = meshio->canopyNames.find(canopyName2)->second;
+    MeshLink meshlink2{};
+    meshlink2.spectralId = mappedId(meshio->spectralNames, voxelEntity.spectralNames, 1);
+    meshlink2.thermalId = mappedId(meshio->thermalNames, voxelEntity.thermalNames, 1);
+    meshlink2.canopyId = mappedId(meshio->canopyNames, voxelEntity.canopyNames, 1);
     if (type == Type::VEGETATION) {
         // meshlink1.leafbioId = meshio->leafbioNames.find(propName)->second;
-        meshlink2.bioId = meshio->leafbioNames.find(propName2)->second;
+        meshlink2.bioId = mappedId(meshio->leafbioNames, voxelEntity.propNames, 1);
     } else if (type == Type::SOIL || type == Type::BUILDING) {
         //  meshlink1.soilsetId = meshio->soilsetNames.find(propName)->second;
-        meshlink2.bioId = meshio->soilsetNames.find(propName2)->second;
+        meshlink2.bioId = mappedId(meshio->soilsetNames, voxelEntity.propNames, 1);
     }
     //  meshlink1.aeroId = meshio->aeroNames.find(aeroName)->second;
     meshlink2.type = (int) type;
@@ -2035,29 +2078,18 @@ bool Scene::createPrimObj_Building(PrimEntity & voxelEntity,nanovdb::GridBuilder
 
             }
 
-            if (isValid == 0) {
-                continue;
-            }
-
-
-            if (voxelEntity.meshNames.size() == 2) {
-                n_instance = n_instance + 2;
-            } else {
-                n_instance++;
-            }
+            n_instance += 2;
 
         }
 
 
-        if (voxelEntity.meshNames.size() == 2) {
-            n_modelmesh = n_modelmesh + 2;
-        } else {
-            n_modelmesh++;
-        }
+
         //std::string info = "voxel entity " + std::to_string(kVoxelModel) + " done.\n";
         //LOGI(info.c_str());
         // float tt = acc.getValue(nanovdb::Coord(24, 0, 24));
     }
+    // All placements share the wall and roof meshes created once above.
+    n_modelmesh += 2;
     return true;
 }
 
@@ -2592,7 +2624,7 @@ bool Scene::createPrimObj_Crowns(PrimEntity & voxelEntity,nanovdb::GridBuilder<i
 }
 
 bool Scene::createPrimObj_Building(PrimEntity & voxelEntity,nanovdb::GridBuilder<int32_t> &nanoBuilder, std::shared_ptr<VoxelrtIO> &modelio, const Background& background) {
-
+    preparePrimitiveBuilding(voxelEntity);
 
     auto acc = nanoBuilder.getAccessor();
     auto &meshio = modelio->m_meshio;
@@ -2623,21 +2655,10 @@ bool Scene::createPrimObj_Building(PrimEntity & voxelEntity,nanovdb::GridBuilder
     PrimMesh currentVoxelModel1 = XYZ2XZY(currentVoxelModelXYZ1, 1); // (1,1,0) => (1,0,1) with  height = 0
     currentVoxelModel1.meshId = n_modelmesh;
     meshio->primMeshes.emplace_back(currentVoxelModel1); //xzy
-    std::string meshName1 = voxelEntity.meshNames[0];
-    std::string spectralName1 = voxelEntity.spectralNames[0];
-    std::string canopyName1 = voxelEntity.canopyNames[0];
-//    std::string propName1 = voxelEntity.propNames[0];
-    MeshLink meshlink1;
-    meshlink1.spectralId = meshio->spectralNames.find(spectralName1)->second;
-    meshlink1.thermalId = 0;
-    meshlink1.canopyId = meshio->canopyNames.find(canopyName1)->second;
-//    if (type == Type::VEGETATION) {
-//        // meshlink1.leafbioId = meshio->leafbioNames.find(propName)->second;
-//        meshlink1.bioId = meshio->leafbioNames.find(propName1)->second;
-//    } else if (type == Type::SOIL || type == Type::BUILDING) {
-//        //  meshlink1.soilsetId = meshio->soilsetNames.find(propName)->second;
-//        meshlink1.bioId = meshio->soilsetNames.find(propName1)->second;
-//    }
+    MeshLink meshlink1{};
+    meshlink1.spectralId = mappedId(meshio->spectralNames, voxelEntity.spectralNames, 0);
+    meshlink1.thermalId = mappedId(meshio->thermalNames, voxelEntity.thermalNames, 0);
+    meshlink1.canopyId = mappedId(meshio->canopyNames, voxelEntity.canopyNames, 0);
     //  meshlink1.aeroId = meshio->aeroNames.find(aeroName)->second;
     meshlink1.type = (int) type;
     meshio->meshLinks.emplace_back(meshlink1);
@@ -2657,21 +2678,10 @@ bool Scene::createPrimObj_Building(PrimEntity & voxelEntity,nanovdb::GridBuilder
     /// ------------------------------------
     /// voxel model/mesh
     ///-------------------------------------
-    std::string meshName2 = voxelEntity.meshNames[1];
-    std::string spectralName2 = voxelEntity.spectralNames[1];
-    std::string canopyName2 = voxelEntity.canopyNames[1];
-//    std::string propName2 = voxelEntity.propNames[1];
-    MeshLink meshlink2;
-    meshlink2.spectralId = meshio->spectralNames.find(spectralName2)->second;
-    meshlink2.thermalId = 0;
-    meshlink2.canopyId = meshio->canopyNames.find(canopyName2)->second;
-//    if (type == Type::VEGETATION) {
-//        // meshlink1.leafbioId = meshio->leafbioNames.find(propName)->second;
-//        meshlink2.bioId = meshio->leafbioNames.find(propName2)->second;
-//    } else if (type == Type::SOIL || type == Type::BUILDING) {
-//        //  meshlink1.soilsetId = meshio->soilsetNames.find(propName)->second;
-//        meshlink2.bioId = meshio->soilsetNames.find(propName2)->second;
-//    }
+    MeshLink meshlink2{};
+    meshlink2.spectralId = mappedId(meshio->spectralNames, voxelEntity.spectralNames, 1);
+    meshlink2.thermalId = mappedId(meshio->thermalNames, voxelEntity.thermalNames, 1);
+    meshlink2.canopyId = mappedId(meshio->canopyNames, voxelEntity.canopyNames, 1);
     //  meshlink1.aeroId = meshio->aeroNames.find(aeroName)->second;
     meshlink2.type = (int) type;
     meshio->meshLinks.emplace_back(meshlink2);
@@ -2778,29 +2788,18 @@ bool Scene::createPrimObj_Building(PrimEntity & voxelEntity,nanovdb::GridBuilder
 
             }
 
-            if (isValid == 0) {
-                continue;
-            }
-
-
-            if (voxelEntity.meshNames.size() == 2) {
-                n_instance = n_instance + 2;
-            } else {
-                n_instance++;
-            }
+            n_instance += 2;
 
         }
 
 
-        if (voxelEntity.meshNames.size() == 2) {
-            n_modelmesh = n_modelmesh + 2;
-        } else {
-            n_modelmesh++;
-        }
+
         //std::string info = "voxel entity " + std::to_string(kVoxelModel) + " done.\n";
         //LOGI(info.c_str());
         // float tt = acc.getValue(nanovdb::Coord(24, 0, 24));
     }
+    // All placements share the wall and roof meshes created once above.
+    n_modelmesh += 2;
     return true;
 }
 

@@ -473,6 +473,22 @@ int SurfFlatten(ivec3 voxelId, ivec3 voxelRes)
 };
 
 #if defined(VOXELRT) || defined(VOXELLST)
+// OBJ cells have one state (faceId=0). Legacy generated buildings have five
+// contiguous states (faceId=1..5). Never offset a one-state cell into its neighbour.
+int ResolveVoxelSurfaceState(int base, vec3 normal)
+{
+    if(base < 0 || base >= setting.voxelCount) return base;
+    if(voxelLinks[base].faceId == 0) return base;
+    vec3 magnitude = abs(normal);
+    int offset = magnitude.y >= max(magnitude.x, magnitude.z) ? 4
+        : magnitude.x >= magnitude.z ? (normal.x >= 0.0 ? 3 : 2)
+        : (normal.z >= 0.0 ? 0 : 1);
+    int candidate = base + offset;
+    if(candidate >= setting.voxelCount || voxelLinks[candidate].faceId != offset + 1
+        || any(notEqual(voxelLinks[candidate].voxelId, voxelLinks[base].voxelId))) return base;
+    return candidate;
+}
+
 // OBJ 异质性参数优先于二维 LAD 和冠层默认密度；hexId=-1 时保持原算法。
 float ResolveTurbidDensity(int bufferId, uint canopyId, ivec3 voxelId, ivec3 voxelRes)
 {
@@ -1007,100 +1023,89 @@ float calReCor(float lai)
 }
 
 
-void Soilheatflux(in float Tprofile[TLASTNUM],in float Mprofile[TLASTNUM], float Tsi,
-                  float lowerBoundaryTemperature, inout float G,
-                  inout float T[TLASTNUM], float dtime)
+// Material SMC accepts a volumetric fraction or a percentage.  The pore-space
+// limit belongs to this material, rather than the global meteorological state.
+float soilMoistureFraction(float moisture, float saturatedWater)
 {
-	/*
-	;      integer::bdry    != 1, given temperature as lower B.C.
-		;                        != 2, given heat flux as lower B.C.
-		;      integer nlvl         !number of computational levels
-		;      integer nnod         !number of computational node
-		;      real    dtime      !computational time step(s)
-		;      real    zlvl(nlvl) !Computational levels
-		;      real    znod(nnod) !Computational level for soil moisture
-		;      real    Tsoil(nnod)  !soil temperature(K)
-		;      real    Wsoil(nnod) !Soil moisture(m3 / m3)
-		;      real    lamda(nlvl) !Volumetric heat capacity(J / m3.K)
-		;      real    csdry(nnod)  !heat capacity of dry soil
-		;      real    Tsfc         !Soil surface temperature
-		;      real    lbc          !Soil lower B.C.
-		;                           !bdry = 1, bottom temperature
-		;                           !bdry = 2, bottom heat flux
-		*/
-	//这个是土壤的深度；
-    float depth[]={0,0.02,0.04,0.10,0.20,0.40,0.60,1};
-    float wsat = 0.45;  //土壤的饱和含水量
-    float csdry = (0.076+0.748*(1-wsat)*2.65)*1.0E6;
-    float lambda=0.8;
-    int nnod=8;
-    float Tsfc=Tsi; //表面温度；
-    // The 1 m node is a prescribed deep-soil boundary.  Keeping the previous
-    // value here allowed separate sunlit/shaded columns to retain a permanent
-    // shadow imprint at depth.
-    float lbc=lowerBoundaryTemperature;
-    float Tsoil[8];  //上一时刻，土壤的温度廓线；
-    for(int i=0;i<8;i++) Tsoil[i]=Tprofile[i];
-    Tsoil[nnod-1]=lbc;
+    float fraction = moisture > 1.0 ? moisture * 0.01 : moisture;
+    return clamp(fraction, 0.0, clamp(saturatedWater, 0.0, 1.0));
+}
 
-    float TA[8],TB[8],TC[8],TD[8],TP[8],TQ[8];
-    for(int i=0;i<8;i++)
+// Implicit, conservative finite-volume conduction on a nonuniform nodal grid.
+// Temperatures are Celsius; G is positive downward [W m-2].  cs [J kg-1 K-1]
+// and rhos [kg m-3] give dry volumetric capacity; pore water adds its capacity.
+void Soilheatflux(in float Tprofile[TLASTNUM], in float Mprofile[TLASTNUM], float Tsi,
+                  float lowerBoundaryTemperature, inout float G,
+                  inout float T[TLASTNUM], float dtime,
+                  float cs, float rhos, float lambdas, float saturatedWater)
+{
+    float depth[] = {0.0, 0.02, 0.04, 0.10, 0.20, 0.40, 0.60, 1.0};
+    float timestep = max(dtime, 1.0);
+    float conductivity = max(lambdas, 0.0);
+    float dryCapacity = max(cs, 0.0) * max(rhos, 0.0);
+    float capacity[TLASTNUM];
+    float TA[TLASTNUM], TB[TLASTNUM], TC[TLASTNUM], TD[TLASTNUM];
+    for(int i = 0; i < TLASTNUM; ++i)
     {
-		TP[i]=lambda;  //热传导系数；
-		TQ[i] = 4.195*Mprofile[i]*1.0E6+csdry; //热容情况；
+        capacity[i] = max(dryCapacity + 4.195e6 *
+            soilMoistureFraction(Mprofile[i], saturatedWater), 1.0);
     }
-    for(int k=0;k<nnod;k++)
+    for(int k = 0; k < TLASTNUM; ++k)
     {
-        if(k==0)
+        if(k == 0 || k == TLASTNUM - 1)
         {
             TA[k] = 1.0;
-            TB[k] = 0;
-            TC[k] = 0;
-            TD[k] = Tsfc;
-        }
-        else if(k >=1 && k < nnod-1)
-        {
-			//这里有个0.5,文章里边有，但是程序里边没有；
-            TB[k] = TP[k]*dtime/(depth[k+1]-depth[k]);
-            TC[k] = TP[k-1]*dtime/(depth[k]-depth[k-1]);
-            TA[k] =  TQ[k]*(depth[k+1]-depth[k-1])+TB[k]+TC[k];
-            TD[k] =  TQ[k]*(depth[k+1]-depth[k-1])*Tsoil[k];
-			//TA[k] = 0.5*TQ[k] * (depth[k + 1] - depth[k - 1]) + TB[k] + TC[k];
-			//TD[k] = 0.5*TQ[k] * (depth[k + 1] - depth[k - 1])*Tsoil[k];
+            TB[k] = 0.0;
+            TC[k] = 0.0;
+            TD[k] = k == 0 ? Tsi : lowerBoundaryTemperature;
         }
         else
         {
-            TA[k] = 1;
-            TB[k] = 0.0;
-            TC[k] = 0.0;
-            TD[k] = lbc;
+            float volumeWidth = 0.5 * (depth[k + 1] - depth[k - 1]);
+            float storageRate = capacity[k] * volumeWidth / timestep;
+            TB[k] = conductivity / (depth[k + 1] - depth[k]);
+            TC[k] = conductivity / (depth[k] - depth[k - 1]);
+            TA[k] = storageRate + TB[k] + TC[k];
+            TD[k] = storageRate * Tprofile[k];
         }
     }
 
-    float P[8],Q[8],tema=0;
-    P[0] = TB[0]/TA[0];
-    Q[0] = TD[0]/TA[0];
-    for(int i=1;i<=nnod-1;i++)
+    float P[TLASTNUM], Q[TLASTNUM];
+    P[0] = TB[0] / TA[0];
+    Q[0] = TD[0] / TA[0];
+    for(int i = 1; i < TLASTNUM; ++i)
     {
-        tema = TA[i] - TC[i]*P[i-1];
-        P[i] = TB[i] /tema;
-        Q[i] = (TD[i]+TC[i]*Q[i-1])/tema;
+        float denominator = TA[i] - TC[i] * P[i - 1];
+        P[i] = TB[i] / denominator;
+        Q[i] = (TD[i] + TC[i] * Q[i - 1]) / denominator;
     }
-    T[nnod-1] = Q[nnod-1];
-    for(int i=nnod-2;i>=0;i--)
+    T[TLASTNUM - 1] = Q[TLASTNUM - 1];
+    for(int i = TLASTNUM - 2; i >= 0; --i)
     {
-        T[i] = P[i]*T[i+1]+Q[i];
-    }
-
-    //calculate the soil heat flux
-    float TG=0;
-	//计算温度通量；
-    for(int lyr=0;lyr<=nnod-2;lyr++)
-    {
-        TG=TG+(TQ[lyr]*T[lyr]-TQ[lyr]*Tsoil[lyr])*(depth[lyr+1]-depth[lyr])/dtime;
+        T[i] = P[i] * T[i + 1] + Q[i];
     }
 
-    (G)=TG;
+    // Surface half-cell storage plus conduction into the first interior cell.
+    // Telescoping the interior balances gives the identical quantity as total
+    // column storage plus conduction through the prescribed 1 m boundary.
+    float surfaceStorage = capacity[0] * 0.5 * (depth[1] - depth[0]) *
+        (T[0] - Tprofile[0]) / timestep;
+    G = surfaceStorage + conductivity * (T[0] - T[1]) /
+        (depth[1] - depth[0]);
+}
+
+// The conduction system is linear in surface temperature.  A unit response
+// uses exactly the same capacities, grid and timestep as the flux evaluation.
+float soilHeatFluxSurfaceDerivative(in float Mprofile[TLASTNUM], float dtime,
+                                   float cs, float rhos, float lambdas,
+                                   float saturatedWater)
+{
+    float previous[TLASTNUM], response[TLASTNUM];
+    for(int i = 0; i < TLASTNUM; ++i) previous[i] = 0.0;
+    float derivative = 0.0;
+    Soilheatflux(previous, Mprofile, 1.0, 0.0, derivative, response, dtime,
+                 cs, rhos, lambdas, saturatedWater);
+    return derivative;
 }
 
 

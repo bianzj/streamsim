@@ -11,6 +11,7 @@ import './styles.css'
 const $ = (selector) => document.querySelector(selector)
 const $$ = (selector) => [...document.querySelectorAll(selector)]
 const api = webApi
+const histreamProxyState = { info: null, result: null }
 
 const PHYSICAL_TEXTURE_PRESETS = [
   ['assets/texture-library/concrete_variance.jpg', '混凝土 · Concrete034'],
@@ -4202,8 +4203,11 @@ async function runSimulation() {
   if (state.running || (state.xmlDirty && !(await saveXml()))) return
   try {
     state.startedAt = Date.now(); state.progress = 1; state.progressStage = '正在启动计算引擎'; state.outputDir = state.config?.outDir || state.outputDir
+    setRunning(true)
     const response = await api.run({ mode: state.mode, executable: state.executable, inputPath: state.inputPath })
-    state.pid = response.pid; setRunning(true)
+    if (response.outputDir) state.outputDir = response.outputDir
+    state.runId = response.runId || ''
+    if (state.running) state.pid = response.pid
   } catch (error) {
     addLog(error.message, 'error'); toast('无法启动模拟', error.message, 'error')
     state.progress = 0; state.progressStage = '启动失败'; setRunning(false); renderRunProgress(Date.now() - state.startedAt)
@@ -4280,6 +4284,8 @@ function normalizedEngineLog(text) {
 
 function handleSimulationEvent(event) {
   if (event.type === 'started') {
+    if (event.outputDir) state.outputDir = event.outputDir
+    state.runId = event.runId || state.runId || ''
     if (!state.startedAt) state.startedAt = Date.now()
     state.progress = 1
     state.progressStage = '正在启动计算引擎'
@@ -4295,14 +4301,12 @@ function handleSimulationEvent(event) {
   }
   else if (event.type === 'stderr' || event.type === 'error') addLog(event.text, 'error')
   else if (event.type === 'closed') {
+    if (event.outputDir) state.outputDir = event.outputDir
     const success = event.code === 0
     state.progress = success ? 100 : state.progress
-    state.progressStage = success ? '模拟完成' : '模拟异常结束'
+    state.progressStage = success ? '模拟完成' : event.status === 'non_converged' ? '模拟未收敛，结果已保留' : '模拟异常结束'
     addLog(success ? `模拟完成，耗时 ${(event.elapsed / 1000).toFixed(2)} 秒` : `模拟已结束，退出码 ${event.code}${event.signal ? `，信号 ${event.signal}` : ''}`, success ? 'success' : 'error')
-    if (!success) toast('模拟结束', '退出码：' + event.code, 'error'); setRunning(false); renderRunProgress(event.elapsed)
-    if (success) {
-      state.outputDir = state.config?.outDir || state.outputDir
-    }
+    if (!success) toast('模拟结束', event.status === 'non_converged' ? '部分节点未达到收敛容差，结果已保留' : '退出码：' + event.code, 'error'); setRunning(false); renderRunProgress(event.elapsed)
   }
 }
 
@@ -5939,6 +5943,108 @@ function hideReferenceDialog() {
   $('#referenceDialog').hidden = true
 }
 
+function hideHistreamProxyDialog() {
+  $('#histreamProxyDialog').hidden = true
+}
+
+function selectedHistreamProxyFrame() {
+  const value = $('#histreamProxyFrameSelect').value
+  if (!value) throw new Error('请选择训练捕获帧')
+  const [episodeId, frameIndex] = JSON.parse(value)
+  if (!episodeId || !Number.isInteger(frameIndex)) throw new Error('捕获帧选项无效')
+  return { episodeId, frameIndex }
+}
+
+function showHistreamProxyBand() {
+  const result = histreamProxyState.result
+  if (!result) return
+  const band = $('#histreamProxyBandSelect').value
+  const preview = result.previews?.[band]
+  if (!preview) return
+  const index = result.band_names.indexOf(band)
+  const units = result.band_units[index] || ''
+  const image = $('#histreamProxyPreview')
+  image.src = preview
+  image.alt = `${band} ${units} preview for ${result.episode_id} frame ${result.frame_index}`
+  image.hidden = false
+  $('#histreamProxyPreviewTitle').textContent = `${band} · ${units} · ${result.shape[1]} × ${result.shape[0]}`
+}
+
+async function openHistreamProxyDialog() {
+  const dialog = $('#histreamProxyDialog')
+  dialog.hidden = false
+  $('#closeHistreamProxyBtn').focus()
+  $('#histreamProxyScope').textContent = '正在检查 histream-proxy 部署清单…'
+  $('#histreamProxyStatus').textContent = '正在读取固定场景和模型状态。'
+  $('#histreamProxyFrameSelect').disabled = true
+  $('#runHistreamProxyBtn').disabled = true
+  $('#downloadHistreamProxyBtn').hidden = true
+  $('#histreamProxyPreview').hidden = true
+  $('#histreamProxyPreview').removeAttribute('src')
+  $('#histreamProxyRuntime').textContent = ''
+  histreamProxyState.info = null
+  histreamProxyState.result = null
+  try {
+    const info = await api.histreamProxyInfo()
+    histreamProxyState.info = info
+    if (!info.ready) {
+      $('#histreamProxyScope').textContent = `代理尚未就绪：${info.reason || '部署清单或运行文件缺失。'}`
+      $('#histreamProxyStatus').textContent = '未启动任何模拟引擎。请先完成训练导出和代理部署。'
+      return
+    }
+    const frames = Array.isArray(info.supportedFrames) ? info.supportedFrames : []
+    const select = $('#histreamProxyFrameSelect')
+    select.replaceChildren()
+    for (const frame of frames) {
+      const option = document.createElement('option')
+      option.value = JSON.stringify([frame.episode_id, Number(frame.frame_index)])
+      option.textContent = `${frame.episode_id} · 帧 ${frame.frame_index} · ${frame.hour_bjt}:00 · ${frame.platform} · ${frame.split}`
+      select.append(option)
+    }
+    select.disabled = frames.length === 0
+    $('#runHistreamProxyBtn').disabled = frames.length === 0
+    $('#histreamProxyScope').textContent = `${info.captureScope}。模型输入为训练时生成的完整三维体及观测几何；当前普通 project.json 不参与推理。共 ${frames.length} 个已登记帧，输出 ${info.shape?.join(' × ')}，波段：${info.bandNames?.join(' / ')}。`
+    $('#histreamProxyStatus').textContent = frames.length ? '就绪。选择登记帧后生成数值影像。' : '部署清单没有可用帧。'
+    $('#histreamProxyRuntime').textContent = `backend=${info.backend} · Python=${info.pythonExecutable} · runner=${info.runnerPath} · nativeEngineInvoked=${info.nativeEngineInvoked}`
+  } catch (error) {
+    $('#histreamProxyScope').textContent = `无法读取代理部署：${error.message}`
+    $('#histreamProxyStatus').textContent = '代理检查失败；标准引擎状态未改变。'
+  }
+}
+
+async function runHistreamProxyFrame() {
+  const button = $('#runHistreamProxyBtn')
+  const select = $('#histreamProxyFrameSelect')
+  button.disabled = true
+  $('#histreamProxyStatus').textContent = '正在遍历完整三维体并合成波段…'
+  $('#downloadHistreamProxyBtn').hidden = true
+  try {
+    const frame = selectedHistreamProxyFrame()
+    const result = await api.runHistreamProxy({
+      captureId: histreamProxyState.info?.captureId,
+      episodeId: frame.episodeId,
+      frameIndex: frame.frameIndex
+    })
+    if (result.status !== 'ok' || result.backend !== 'histream-proxy' || result.native_engine_invoked !== false) {
+      throw new Error('代理返回的状态或后端标识无效')
+    }
+    histreamProxyState.result = result
+    showHistreamProxyBand()
+    const download = $('#downloadHistreamProxyBtn')
+    download.href = result.downloadUrl
+    download.download = `${result.download_id}.npz`
+    download.hidden = false
+    $('#histreamProxyStatus').textContent = `完成：${result.episode_id} 帧 ${result.frame_index} · ${result.shape.join(' × ')} · 命中 ${result.hit_pixels.toLocaleString()} 像素 · 未调用 histream.exe。`
+    $('#histreamProxyRuntime').textContent = `split=${result.split} · route=${result.route_id} · thermal=${result.thermal_state} · solar=${result.solar_source || 'engine SPA'} · nativeEngineInvoked=${result.native_engine_invoked}`
+  } catch (error) {
+    $('#histreamProxyStatus').textContent = `预测失败：${error.message}`
+    $('#histreamProxyPreview').hidden = true
+    toast('histream-proxy 失败', error.message, 'error')
+  } finally {
+    button.disabled = !histreamProxyState.info?.ready || !select.value
+  }
+}
+
 function showReferenceImage(button) {
   const image = button.querySelector('img')
   if (!image) return
@@ -6087,6 +6193,11 @@ $('#saveAsForm').addEventListener('submit', saveProjectAs)
 $('#referenceBtn').addEventListener('click', showReferenceDialog)
 $('#closeReferenceBtn').addEventListener('click', hideReferenceDialog)
 $('#referenceDialog').addEventListener('click', (event) => { if (event.target === $('#referenceDialog')) hideReferenceDialog() })
+$('#openHistreamProxyBtn').addEventListener('click', openHistreamProxyDialog)
+$('#closeHistreamProxyBtn').addEventListener('click', hideHistreamProxyDialog)
+$('#histreamProxyDialog').addEventListener('click', (event) => { if (event.target === $('#histreamProxyDialog')) hideHistreamProxyDialog() })
+$('#runHistreamProxyBtn').addEventListener('click', runHistreamProxyFrame)
+$('#histreamProxyBandSelect').addEventListener('change', showHistreamProxyBand)
 $$('.reference-shot').forEach((button) => button.addEventListener('click', () => showReferenceImage(button)))
 $('#closeReferenceImageBtn').addEventListener('click', hideReferenceImage)
 $('#referenceImageDialog').addEventListener('click', (event) => { if (event.target === $('#referenceImageDialog')) hideReferenceImage() })
@@ -6196,7 +6307,7 @@ $('#xmlBtn').addEventListener('click', () => { $('#xmlDrawer').hidden = false })
 $('#xmlDrawer').addEventListener('click', (event) => { if (event.target === $('#xmlDrawer')) $('#xmlDrawer').hidden = true })
 $('#xmlEditor').addEventListener('input', () => { state.xmlText = $('#xmlEditor').value; state.xmlDirty = true; $('#unsavedMark').hidden = false; $('#xmlStatus').textContent = '有未保存的修改' })
 $('#applyXmlBtn').addEventListener('click', async () => { try { const project = parseProjectJson(state.xmlText); const mode = project.mode; state.project = project; state.config = ensureMaterialPresets(project.configuration); selectMode(mode); if (await saveXml()) { refreshFromState(); loadActualScene(state.config); renderInspector(); $('#xmlDrawer').hidden = true } } catch (error) { toast('JSON 格式错误', error.message, 'error') } })
-window.addEventListener('keydown', (event) => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); saveXml() } if (event.key === 'F5') { event.preventDefault(); runSimulation() } if (event.key === 'Escape') { if (!$('#referenceImageDialog').hidden) hideReferenceImage(); else if (!$('#referenceDialog').hidden) hideReferenceDialog(); else if (!$('#resultDialog').hidden) hideResults(); else if (!$('#objectAttributeDialog').hidden) hideObjectAttributeDialog(); else if (!$('#objectDialog').hidden) hideObjectDialog(); else if (!$('#materialDialog').hidden) hideMaterialDialog(true); else if (!$('#geometryDialog').hidden) hideGeometryDialog(); else if (!$('#presetDialog').hidden) hidePresetDialog(); else if (!$('#projectDialog').hidden) hideProjectDialog(); else if (!$('#xmlDrawer').hidden) $('#xmlDrawer').hidden = true } })
+window.addEventListener('keydown', (event) => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); saveXml() } if (event.key === 'F5') { event.preventDefault(); runSimulation() } if (event.key === 'Escape') { if (!$('#histreamProxyDialog').hidden) hideHistreamProxyDialog(); else if (!$('#referenceImageDialog').hidden) hideReferenceImage(); else if (!$('#referenceDialog').hidden) hideReferenceDialog(); else if (!$('#resultDialog').hidden) hideResults(); else if (!$('#objectAttributeDialog').hidden) hideObjectAttributeDialog(); else if (!$('#objectDialog').hidden) hideObjectDialog(); else if (!$('#materialDialog').hidden) hideMaterialDialog(true); else if (!$('#geometryDialog').hidden) hideGeometryDialog(); else if (!$('#presetDialog').hidden) hidePresetDialog(); else if (!$('#projectDialog').hidden) hideProjectDialog(); else if (!$('#xmlDrawer').hidden) $('#xmlDrawer').hidden = true } })
 setInterval(() => { if (state.running) renderRunProgress() }, 250)
 
 async function init() {

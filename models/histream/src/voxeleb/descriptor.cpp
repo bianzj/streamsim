@@ -37,7 +37,6 @@ bool Descriptor::createDescriptor(std::shared_ptr<VoxelebIO> &modelio){
     bindings.addBinding(VoxelebbindingInd::light, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, flags);
     bindings.addBinding(VoxelebbindingInd::atomcond, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, flags);
     bindings.addBinding(VoxelebbindingInd::dir, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, flags);
-    bindings.addBinding(VoxelebbindingInd::rads, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, flags);
     bindings.addBinding(VoxelebbindingInd::netRad, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, flags);
     bindings.addBinding(VoxelebbindingInd::pnet, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, flags);
 
@@ -132,8 +131,6 @@ bool Descriptor::createDescriptor(std::shared_ptr<VoxelebIO> &modelio){
 
     VkDescriptorBufferInfo dbiDir{voxelio->m_pDirBuffer->buffer, 0, VK_WHOLE_SIZE};
     updates.emplace_back(bindings.makeWrite(m_descSet, VoxelebbindingInd::dir, &dbiDir));
-    VkDescriptorBufferInfo dbiRads{voxelio->m_pRadsBuffer->buffer, 0, VK_WHOLE_SIZE};
-    updates.emplace_back(bindings.makeWrite(m_descSet, VoxelebbindingInd::rads, &dbiRads));
     VkDescriptorBufferInfo dbiNetRad{voxelio->m_pNetRadBuffer->buffer, 0, VK_WHOLE_SIZE};
     updates.emplace_back(bindings.makeWrite(m_descSet, VoxelebbindingInd::netRad, &dbiNetRad));
     VkDescriptorBufferInfo dbiPnet{voxelio->m_pPnetBuffer->buffer, 0, VK_WHOLE_SIZE};

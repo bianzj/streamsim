@@ -245,7 +245,7 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
             /// Solar 
             /////////////////////////////
             if(!isParticipatingMedium(canopies[canopyId])) {
-              radiance += (alpha_toSolar * gamma * Esun/cosSolar * alpha_toVoxel *(1-alpha_voxel));
+              radiance += (alpha_toSolar * gamma * Esun/max(cosSolar, 0.001) * alpha_toVoxel *(1-alpha_voxel));
             }
             //////////////////////////////
             /// Save back
@@ -263,11 +263,7 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
           /////////////////////////////
         
 
-          if(sstate.typeId == TYPE_BUILDING)
-          {
-            int faceId = getFaceIdSimple(sstate.position,semiRange,alignVoxelId);
-            alignVoxelId = alignVoxelId + faceId;
-          }
+          alignBufferId = ResolveVoxelSurfaceState(alignBufferId, sstate.normal);
 
 
           instanceId = voxelLinks[alignBufferId].instanceId;
@@ -430,8 +426,10 @@ void main()
         for(int kiter=0;kiter< 5;kiter++)
         {
             voxel_raytracing_diffuse(voxelPos0, bufferId0, nanoVDBLink, kiter,kband_center,Esun,Esky);
-            groupMemoryBarrier();  
-            barrier();
+            // The scattering loop reads only bufferId0's previous iteration.
+            // Order this invocation's SSBO accesses without waiting for tail
+            // or invalid lanes that have already returned.
+            memoryBarrierBuffer();
 
             for(uint iangle=0;iangle < DIFFUSE_ANGLE_NUM;iangle++)
             {

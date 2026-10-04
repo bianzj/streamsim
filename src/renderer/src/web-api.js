@@ -61,6 +61,8 @@ export const webApi = {
   deleteResults: (path, kind = 'image') => post('/api/results/delete-all', { path, kind }),
   readResult: (path, band = 0) => post('/api/results/read', { path, band }),
   compareResults: (firstPath, secondPath, band = 0, maxScatterPoints = 4000) => post('/api/results/change', { firstPath, secondPath, band, maxScatterPoints }),
+  histreamProxyInfo: () => request('/api/histream-proxy/info'),
+  runHistreamProxy: (data) => post('/api/histream-proxy/run', data),
   run: (data) => post('/api/run', data),
   stop: () => post('/api/stop'),
   reset: () => post('/api/reset'),

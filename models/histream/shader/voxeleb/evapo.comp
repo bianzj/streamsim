@@ -216,10 +216,13 @@ void main()
                     if(issunlit == 0) ToldProfile[kdepth] = voxelTlasts[TlastId+kdepth].shaded;
                     else ToldProfile[kdepth] = voxelTlasts[TlastId+kdepth].sunlit;
                     TnewProfile[kdepth] = 0;
-                    Mprofile[kdepth] = ubom.meteo.sm;
+                    Mprofile[kdepth] = soilMoistureFraction(
+                        soilSets[bioId].SMC, soilSets[bioId].SatWater);
                 }
                 Soilheatflux(ToldProfile, Mprofile, Tc - 273.15,
-                             soilSets[bioId].Tsoil, Gst, TnewProfile, dtime);
+                             soilSets[bioId].Tsoil, Gst, TnewProfile, dtime,
+                             soilSets[bioId].cs, soilSets[bioId].rhos,
+                             soilSets[bioId].lambdas, soilSets[bioId].SatWater);
             }
         }// if soil
 
