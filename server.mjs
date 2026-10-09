@@ -36,6 +36,7 @@ let resettingProcesses = false
 let histreamProxyRequestInFlight = false
 let projectFile = ''
 let projectDir = ''
+let projectFileChooser = null
 const clients = new Set()
 
 function executable() {
@@ -59,7 +60,9 @@ function writeRunManifest(run, patch = {}) {
   Object.assign(run.manifest, patch, { updatedAt: new Date().toISOString() })
   const path = join(run.outputDir, 'run-manifest.json')
   writeFileSync(path + '.tmp', JSON.stringify(run.manifest, null, 2) + '\n', 'utf8')
-  renameSync(path + '.tmp', path)
+  // Native runs can enter Chinese project folders through an ASCII junction.
+  // Resolve both sides before atomic publication; Windows may reject alias rename.
+  renameSync(realpathSync(path + '.tmp'), join(realpathSync(dirname(path)), basename(path)))
 }
 
 function runProductPaths(directory) {
@@ -1755,7 +1758,13 @@ function openProject(value) {
   }
 }
 
+export function setProjectFileChooser(chooser) {
+  if (chooser !== null && typeof chooser !== 'function') throw new TypeError('Project file chooser must be a function or null')
+  projectFileChooser = chooser
+}
+
 function chooseProjectFile() {
+  if (projectFileChooser) return projectFileChooser(projectFile)
   if (process.platform !== 'win32' && !existsSync('/mnt/c/WINDOWS/System32/WindowsPowerShell/v1.0/powershell.exe')) throw new Error('找不到 Windows 文件选择器')
   return new Promise((resolveChoice, reject) => {
     const script = [
@@ -1976,7 +1985,7 @@ function writeFloatTiff(path, width, height, bands, values, bandNames = []) {
       first += count
     }
   } finally { closeSync(fd) }
-  renameSync(temporaryPath, path)
+  renameSync(realpathSync(temporaryPath), join(realpathSync(dirname(path)), basename(path)))
   writeRasterStatistics(path, width, height, bands, values, bandNames)
   return path
 }

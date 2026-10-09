@@ -349,7 +349,18 @@ endforeach (RELEASELIB)
 
 # Deploy runtime resources next to histream.exe so XML-driven projects use the same
 # shader and predefined-data layout as the built-in configurations.
+set(HISTREAM_OBSOLETE_FLUID_CLEANUP)
+foreach(OBSOLETE_FLUID IN ITEMS fluid_advect fluid_divergence
+        fluid_pressure_ab fluid_pressure_ba fluid_project)
+    list(APPEND HISTREAM_OBSOLETE_FLUID_CLEANUP
+        COMMAND ${CMAKE_COMMAND} -E rm -f
+            "${CMAKE_CURRENT_BINARY_DIR}/shader/voxeleb/${OBSOLETE_FLUID}.comp"
+            "${CMAKE_CURRENT_BINARY_DIR}/shader/voxeleb/${OBSOLETE_FLUID}.comp.spv"
+            "$<TARGET_FILE_DIR:${PROJNAME}>/shader/voxeleb/${OBSOLETE_FLUID}.comp"
+            "$<TARGET_FILE_DIR:${PROJNAME}>/shader/voxeleb/${OBSOLETE_FLUID}.comp.spv")
+endforeach()
 add_custom_target(histream_runtime_resources ALL
+    ${HISTREAM_OBSOLETE_FLUID_CLEANUP}
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${CMAKE_CURRENT_SOURCE_DIR}/shader"
             "$<TARGET_FILE_DIR:${PROJNAME}>/shader"

@@ -94,7 +94,7 @@ VoxelebIO(){
     std::vector<AeroCond>  aeroconds;
 
     // setting infor
-    int n_pipeline = 14;
+    int n_pipeline = 15;
     int n_wave;
     int n_angle;
     int n_node;
@@ -115,6 +115,14 @@ VoxelebIO(){
     int periodicNeighborCount{0};
     bool skyboxEnabled{false};
     int vegetationTemperatureMethod{0};
+    int shortwaveScatteringOrders{1};
+    bool newShortwaveScattering{false};
+    // Final count is the number of conditional sunlit/shaded surface states
+    // above the existing energy-residual threshold, not a voxel count.
+    int energyIterations{0};
+    uint32_t energyFinalUnconvergedStateCount{0};
+    bool energyFinalized{false};
+    std::shared_ptr<nvvk::Buffer> m_pScatteringStats;
     FluidXml fluid;
     glm::ivec3 fluidGridSize{1, 1, 1};
     uint64_t fluidCellCount{1};

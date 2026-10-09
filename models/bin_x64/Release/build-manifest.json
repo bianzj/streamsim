@@ -1,19 +1,19 @@
 {
   "kind": "streamsim-build",
   "schemaVersion": 1,
-  "applicationVersion": "1.1.1",
-  "createdAt": "2026-10-04T03:25:23.936Z",
-  "commit": "c71eb6bf21e0ecc96b2237077c5f4d4ec4a3fb65",
+  "applicationVersion": "1.1.2",
+  "createdAt": "2026-10-09T13:22:14.404Z",
+  "commit": "7cf3bfb934c7b1d2f418ce51c12e2888fda82841",
   "dirty": true,
-  "sourceTreeSha256": "2e728fc6180828cb392c99032e76688ddf6726d34300a9c54ea2599c4b6457ca",
+  "sourceTreeSha256": "d3e67179389d3bdde884ff1607175f4abf7c3083279c6c771ed083a26cd6176b",
   "engine": {
     "path": "histream.exe",
-    "sha256": "c6869f12e9ecc08a0b71420728f9232f628db65481c46c504c6a56fb0fe10036"
+    "sha256": "f87ebc7b8027d77d58d6e6bf76d7d7e2c067382c00681ae9c3620de4cc08eb7e"
   },
   "sources": [
     {
       "path": "models/histream/CMakeLists.txt",
-      "sha256": "14f41f9df3da54c4adbe89c2b42875f7aba45c547330120c4d3208b90a2098bb"
+      "sha256": "1856ace2e0f5e1874912a2e3235b5aaa814ddef484fcce6e781fa077c22694b1"
     },
     {
       "path": "models/histream/src/base/accelstruct.cpp",
@@ -52,6 +52,10 @@
       "sha256": "4ba2ad4328741d628575f9949bff47e4e159ea6749bdda93c1438e5f06f23a62"
     },
     {
+      "path": "models/histream/src/base/energy_output.h",
+      "sha256": "d3cafd661fba06b8af37df8a86ff483eb43ce97b8ccf095b2383a8c71b6557aa"
+    },
+    {
       "path": "models/histream/src/base/engine.cpp",
       "sha256": "e538617ce5e0eed577442214cbeb6653aadf8cde37490e6830aa54deb898c21e"
     },
@@ -61,7 +65,7 @@
     },
     {
       "path": "models/histream/src/base/fileio.cpp",
-      "sha256": "66ca20a0412ea7c22a0f950a9efb1f78f99c1d4ba3afd2e6ea40a48874a64ceb"
+      "sha256": "a5f0cf1f2651db8718a46bcce020fc068a9ae6145cb762ac074bd1a490bf636a"
     },
     {
       "path": "models/histream/src/base/fileio.h",
@@ -69,7 +73,7 @@
     },
     {
       "path": "models/histream/src/base/fileio_json.cpp",
-      "sha256": "d53f03410ddd194cbbe0c7af732aeafda2d623dc12070cc7e40ddf9517861568"
+      "sha256": "8762ca5c67c702f9d99dbf39399e30ef727a5eead489f2e76ee59f2a206f27e6"
     },
     {
       "path": "models/histream/src/base/geometry.cpp",
@@ -156,6 +160,10 @@
       "sha256": "b762f91a37dfaa671f67bc8df85cc119f2c91b0e0c6265dec32d9b51f2e86970"
     },
     {
+      "path": "models/histream/src/base/radiation_spectrum.h",
+      "sha256": "756463d17c7c9db9d42976814574974d10b668838368769ae5bf21699403aa18"
+    },
+    {
       "path": "models/histream/src/base/scene.cpp",
       "sha256": "218c32a99ffece6ce012cb0fc9d94dd1345b6230ae84c3c8ec4488a9ed66f048"
     },
@@ -165,11 +173,11 @@
     },
     {
       "path": "models/histream/src/base/structs.h",
-      "sha256": "cb05b5f20594b1d2ed2c9953a8a2672299cc5e37f178169aa4106d8d27a26e01"
+      "sha256": "0f6bec2a2d571f1b494aa4433c497006ec4b2e9f867f8c6ce59a213d1d59df5d"
     },
     {
       "path": "models/histream/src/base/structs_cg.h",
-      "sha256": "e46b9587fda27056bae00eb68580940d6acae91176de6b10c060d8a060b17661"
+      "sha256": "3e93d5d36fdd892b6347ccfbb8f5d1e2a4a0f3a26a8dc99def70cfe3695ca766"
     },
     {
       "path": "models/histream/src/base/surfio.cpp",
@@ -181,7 +189,7 @@
     },
     {
       "path": "models/histream/src/base/utils.cpp",
-      "sha256": "5761c4b8ce203469a70d8850c339a7714d056850874728ca5b812051860de666"
+      "sha256": "1c0df4cbb3db2cb9078714c74c67625eb53b2b394909f9fb36db34f241d96fe6"
     },
     {
       "path": "models/histream/src/base/utils.h",
@@ -197,7 +205,7 @@
     },
     {
       "path": "models/histream/src/base/virtualscreen.cpp",
-      "sha256": "f42b9a60f73fee99448128952394b1ee23299a489dbf297d47b9bf94b4e98e08"
+      "sha256": "3e86b5ad4df2abd8b34accd7f37d1a901e621eed2b4f1ae1a1245528723a4b46"
     },
     {
       "path": "models/histream/src/base/virtualscreen.h",
@@ -533,7 +541,7 @@
     },
     {
       "path": "models/histream/src/voxeleb/buffer.cpp",
-      "sha256": "b84294d83d79db44f11ebaacc975e8b2bf48a7a0cc0f5d5e046a69fe4ecfdf9a"
+      "sha256": "e7ddd8568ba2809b7f12b3b9badf7e3afbf8b1eb4e64dc933ee3e85d459fecd4"
     },
     {
       "path": "models/histream/src/voxeleb/buffer.h",
@@ -541,7 +549,7 @@
     },
     {
       "path": "models/histream/src/voxeleb/command.cpp",
-      "sha256": "e83a6bf11e77be2350bd57506e56440af0cff2fb9517cad8f3cf0c7541a0a470"
+      "sha256": "63c931e436bdfabc43f9f988c23eb32449df56a8b9057336fe2cd1562f572280"
     },
     {
       "path": "models/histream/src/voxeleb/command.h",
@@ -561,7 +569,7 @@
     },
     {
       "path": "models/histream/src/voxeleb/pipeline.cpp",
-      "sha256": "a04a2a0f277865a8d412c9016c72e1fc3858537f6abc9349b3677315cf3af58c"
+      "sha256": "d0839792ad7717c7d9c5dc6576310b1364d12e6d76264a68936f59d7568a3f18"
     },
     {
       "path": "models/histream/src/voxeleb/pipeline.h",
@@ -569,7 +577,7 @@
     },
     {
       "path": "models/histream/src/voxeleb/voxeleb.cpp",
-      "sha256": "5df255de9b91811e9eb1cbeb2a99d6e0ce81fad79457b4f05e009d82103a144b"
+      "sha256": "464dd016c1ac98429eb242d01b2a727018e38a6a504ec909f5ab7123f7bf9fe8"
     },
     {
       "path": "models/histream/src/voxeleb/voxeleb.h",
@@ -581,7 +589,7 @@
     },
     {
       "path": "models/histream/src/voxeleb/voxelebio.h",
-      "sha256": "9d9d7c7193caf41b64ee759675e18c1bb6e884fa3c36729b4b5b155891adb735"
+      "sha256": "04365959fa12f7247e58fc5276b227da3510eebd7a7262ae2f85af18a4fd21bd"
     },
     {
       "path": "models/histream/src/voxelrt/buffer.cpp",
@@ -785,11 +793,11 @@
     },
     {
       "path": "models/histream/shader/functions.glsl",
-      "sha256": "264a905ecc0266dc1f0cb4651d757f7579d1cfe38eb42ff6eeae3e69121de63e"
+      "sha256": "0efb17bee777b6bf3cb206cb80188429a777c318c29ad37abb58ba3d14670917"
     },
     {
       "path": "models/histream/shader/global.glsl",
-      "sha256": "039b9584946915d6f3e5bae5a11a597a95953e0955f6edd9be150a5682770136"
+      "sha256": "0c9dba8983db9aa359d206720946a4ba1a9aa65eaa9569baf5f3c8c8322a2272"
     },
     {
       "path": "models/histream/shader/nanovdb_info.glsl",
@@ -809,7 +817,7 @@
     },
     {
       "path": "models/histream/shader/settings.h",
-      "sha256": "29f2af6a41f050f50534deffa620224c52b5a72ac397d0f196b87e982485c9d5"
+      "sha256": "86ea81b27ec4ddaefa2dbe49030d0924551358281c4fe6c9c240e54b50c95e7f"
     },
     {
       "path": "models/histream/shader/shade_state.glsl",
@@ -833,19 +841,19 @@
     },
     {
       "path": "models/histream/shader/voxeleb/biochemical.comp",
-      "sha256": "ad015bd6731bf98d21ba926facc0ef7d198b46ab705197b025db06c44e485de7"
+      "sha256": "3523eb991197ec53ea4612c4c684fe1bbd16aec2e0274f9b9416db6196fb10f4"
     },
     {
       "path": "models/histream/shader/voxeleb/biochemical_m12.comp",
-      "sha256": "ea9cb64da309d5cdd969779cb7f02aadd204064d8eb691c9048c4704cbe65840"
+      "sha256": "27590cc9ce18679c823715dab97deff332b459bd4ed8c30522e9248aeeb5605f"
     },
     {
       "path": "models/histream/shader/voxeleb/budget.comp",
-      "sha256": "0d3c80c05495f28c05ee9b42b47356aefe132c1de2f83edbb4e5e5b98b1eef49"
+      "sha256": "030428acb2ec44f94f63aa6466c8de37f13360d26a723583209794cf77d578e8"
     },
     {
       "path": "models/histream/shader/voxeleb/evapo.comp",
-      "sha256": "a634ce4c033ca333eddef40f4b35b211bdea9408c9fdc3ef04b350fa2e5e0795"
+      "sha256": "095605207a5d796021c25f73c4b2a0f0ae28b5ed30a5f622c50a384d2f3c539f"
     },
     {
       "path": "models/histream/shader/voxeleb/fluid_common.glsl",
@@ -857,11 +865,15 @@
     },
     {
       "path": "models/histream/shader/voxeleb/fluid_lbm.comp",
-      "sha256": "6e7267b14572717edfa26f4e126f261612531b466a16bdb8bccea09793ddcf7e"
+      "sha256": "7114b8910cc3dbccefbff4b71c551fbb2439fa7eaa3f76e42b3032e7576ce6a0"
     },
     {
       "path": "models/histream/shader/voxeleb/fluid_lbm_commit.comp",
-      "sha256": "c5043ca09e9c6269724cfa9f3c45e74a19f731ca1c0ae349764b701ff840bead"
+      "sha256": "68a644f5d18a02d313caccc20be66e5584ae1744ddbea8dfea1e48d3e947c8d3"
+    },
+    {
+      "path": "models/histream/shader/voxeleb/scatter_stats.glsl",
+      "sha256": "bded083ad00f0efb2206af16252618161922deed3d1c890e4831e88a382048fa"
     },
     {
       "path": "models/histream/shader/voxeleb/updateL.comp",
@@ -873,11 +885,11 @@
     },
     {
       "path": "models/histream/shader/voxeleb/voxelrad_diffuse_TIR_single.comp",
-      "sha256": "29d828d9acfae36c45fbbd6f4cab0a6656aa329059dea51ca0b4e6efc470a2a6"
+      "sha256": "967960ee31578e6eb80dc067dcf6206670d67c71bd0d9966e57ae66be8ac6ae3"
     },
     {
       "path": "models/histream/shader/voxeleb/voxelrad_diffuse_VNIR_single.comp",
-      "sha256": "2217f0435a886a3b38c247aed35901d3c406c13e5d7b80c4df6ab1c6e33fb8df"
+      "sha256": "d19853d0257c862bd597cff96fc6416998c40ec6f6c047159345b92d0e194e41"
     },
     {
       "path": "models/histream/shader/voxeleb/voxelrad_direct_TIR.comp",
@@ -885,11 +897,15 @@
     },
     {
       "path": "models/histream/shader/voxeleb/voxelrad_direct_VNIR.comp",
-      "sha256": "21bb2cf891533dc5696edb63f12317704c35eaf64300dbe0292d5982f82ebc6e"
+      "sha256": "67e358e4435bdda4e178c96738c2819fda3d6a2c1295edb315b18592d2f6c877"
     },
     {
       "path": "models/histream/shader/voxeleb/voxelrad_image.comp",
       "sha256": "934695b4642b5da8eab0f0f35e17105973851e63cff882b3180471d52af6b465"
+    },
+    {
+      "path": "models/histream/shader/voxeleb/voxelrad_scattering_VNIR.comp",
+      "sha256": "ef4aa09a343929ff5083442d4c03c452bc776f69a43e8eef9cbc9b66c42cc82f"
     },
     {
       "path": "models/histream/shader/voxeleb/voxelrad_solar.comp",
@@ -921,7 +937,7 @@
     },
     {
       "path": "server.mjs",
-      "sha256": "2b52cb32c90f39603c49a75597119c80b748ad3dd90f2e66115f69fb1925ee32"
+      "sha256": "b9dd38d4c47a911ef1c9d18ff5939a378cca3f69fab32514b2bf5aec37d0d42c"
     },
     {
       "path": "tools/runtime-scene.mjs",
@@ -929,15 +945,15 @@
     },
     {
       "path": "src/renderer/src/project-schema.js",
-      "sha256": "219d580a6c8c655e9d3f80cc1608d21c55ea3e4580dabcbc6c8963c3418ec372"
+      "sha256": "6707ef0a7ed171a3eea6540db7f72c4ba2cd4aef2ae5c4334fabdf1f3bc0e1d7"
     },
     {
       "path": "src/renderer/src/main.js",
-      "sha256": "f2edb9821a4eca7149c41ded4530c89349a009c0ee00e230a34f1e851fef2409"
+      "sha256": "7218d685aa1d1c98d5285ec1c5ef6e84a9402dab4a875d981f30ce954bee4375"
     },
     {
       "path": "package.json",
-      "sha256": "82daa37ff3b9a3e4de4a9ffff33c098378b45b21a7d39bc76048784c6394df82"
+      "sha256": "96ded11fee2fd7a38771c495b06ef8443b5e306d882f001888ec260bb67312dd"
     }
   ],
   "shaderBinaries": [
@@ -1011,83 +1027,67 @@
     },
     {
       "path": "shader/voxeleb/aeresist.comp.spv",
-      "sha256": "b1f894a763e61dd029445816c436c7f1cc3d68f40a273960aaad51e867e85377"
+      "sha256": "c0862cda26e7a5f496785bd3143cf03837c98c69858e816cea91e239f5cadb22"
     },
     {
       "path": "shader/voxeleb/biochemical.comp.spv",
-      "sha256": "155bcfd4562a61fc480cd71d1b0d57b9a1eb457b46c9e9cbd66e9cd8236f0113"
+      "sha256": "783cbf6259e296a19cfd5ac191ac8d18fcd95f942a920812bba747fd84849231"
     },
     {
       "path": "shader/voxeleb/biochemical_m12.comp.spv",
-      "sha256": "523655d39f5c2b5a6397eb6f57439f2747482029cb45b075bd4b5a1a9ce6b853"
+      "sha256": "fc522cdd9d1cccbd2931963ff3e023d5ea9523f88055581d6d490621657e23e7"
     },
     {
       "path": "shader/voxeleb/budget.comp.spv",
-      "sha256": "1cd3d999a4d22b553dc2ff7921d2e5e03810c87018b4f9bf78258564c05316cb"
+      "sha256": "5ec19d8ce69735a2e3e1bd4c4ac0143908df6d5e826d8cca902a2eb50a050a44"
     },
     {
       "path": "shader/voxeleb/evapo.comp.spv",
-      "sha256": "54c41d1b65abdf8d864fe1a11afb88673e84fbfa68a07c2ac1d62df541ae1b3a"
-    },
-    {
-      "path": "shader/voxeleb/fluid_advect.comp.spv",
-      "sha256": "6dce75a60b28c103d61e71424a7bb47508af239f1a767266fad224d80a159b57"
-    },
-    {
-      "path": "shader/voxeleb/fluid_divergence.comp.spv",
-      "sha256": "3c30646f29e32304c948401fbd97665d1477fbf67e2d9cd83887234481ba88cd"
+      "sha256": "acfca504b7ce7f420fee3b683274bd0d41b91905ee4e8bdd666f4e645bc63068"
     },
     {
       "path": "shader/voxeleb/fluid_lbm.comp.spv",
-      "sha256": "2d4c8749a46124d818fa53b2442ac4fcd6231e330a625b902f94da60db8b6bbb"
+      "sha256": "7d63a8ec65ebe45e59af448cc2c81bb83eeb06c815a29d8f2cf0b489576a2d8e"
     },
     {
       "path": "shader/voxeleb/fluid_lbm_commit.comp.spv",
-      "sha256": "5f84a0ffed3d2580f177efb2d3e7d2438590e2d9f49c2c799df4938c4302e247"
-    },
-    {
-      "path": "shader/voxeleb/fluid_pressure_ab.comp.spv",
-      "sha256": "91cfb30c5724d24c21c6c24ec6716383cdc95e8c7bb65120675b971e14f83816"
-    },
-    {
-      "path": "shader/voxeleb/fluid_pressure_ba.comp.spv",
-      "sha256": "ada554c9910fc7bcbab60adc070b9dc7bd10cff321f35b9c931054684d8ec889"
-    },
-    {
-      "path": "shader/voxeleb/fluid_project.comp.spv",
-      "sha256": "ba35a108207ede89f4d96af193edb7439813c6e05ca3f74d3a43ad2cfab106ee"
+      "sha256": "d2fb894d1b49176cda6823af632d7ea41c7a9cc4eae939264145ec41b3223840"
     },
     {
       "path": "shader/voxeleb/updateL.comp.spv",
-      "sha256": "7cbda04abfa79c56e1edf9c4cdefd878f485a530b559a05fa360d9bee3f525cd"
+      "sha256": "58f8569bdd90d9a685c1883416cb393dbeddc17932ad9d04fdab88fb4d0b9e33"
     },
     {
       "path": "shader/voxeleb/updateTp.comp.spv",
-      "sha256": "e8f75642c25d9be45f5a008edd83fac334a66608c21689f807bd11680652bff3"
+      "sha256": "e1418bfc7484f6e0c7bc0d2e102740044619674ce750a9058eaa0c69d268f297"
     },
     {
       "path": "shader/voxeleb/voxelrad_diffuse_TIR_single.comp.spv",
-      "sha256": "7594618d48f1c0d81d49b2671e211fb5a301b0bee175934e1854c9b5870d2037"
+      "sha256": "9e6293ef7c2ba7181613fe7fb19837a8d0a37a84a762b4786a3b62a54f716d1b"
     },
     {
       "path": "shader/voxeleb/voxelrad_diffuse_VNIR_single.comp.spv",
-      "sha256": "3012ad7c1b5aa8ca663dd485e08bc1a3a12360df3f8fb495f399d2eba98a67ad"
+      "sha256": "087593ea606133d16702bec2ec4dcd8a73717ec667f45918e36d8d9f9935c68c"
     },
     {
       "path": "shader/voxeleb/voxelrad_direct_TIR.comp.spv",
-      "sha256": "2bfba8ff0f7c9164dde8835b9a2345fd67f3f10c848806ee5cf6b1d708e3403f"
+      "sha256": "1dc0e28fcfd8e9db3dea67286cfc3c5f77445d690171dd40faf6aa0c61f3d3ce"
     },
     {
       "path": "shader/voxeleb/voxelrad_direct_VNIR.comp.spv",
-      "sha256": "82cbed26004e7aa13aa1d75afda3babbbff77e35bf6bc64ef68b8b2605a1014d"
+      "sha256": "73bb6cb709649d585d687f70d8a7f5ebc78d5b6e9e2665e068f20ff0e5791d0c"
     },
     {
       "path": "shader/voxeleb/voxelrad_image.comp.spv",
-      "sha256": "128d1b6a622e6744b73e939c78a905c86f0d67ebcfccd007335fe7ddbef6b856"
+      "sha256": "d60b171d263fa9ff819efce654d5fb2c05aed76c09b362207e0d9a18b4f132ab"
+    },
+    {
+      "path": "shader/voxeleb/voxelrad_scattering_VNIR.comp.spv",
+      "sha256": "3b7970ff57def539f6bd66dea21a163fd2fb4914d5650b24d272d7098bdcc753"
     },
     {
       "path": "shader/voxeleb/voxelrad_solar.comp.spv",
-      "sha256": "e456cc40d32ff88e740f49015a8122588f23332a021a8397af78f5e6659ca423"
+      "sha256": "8ab6bce2cb0d08cf8dee5415f8b48e8950f3a2d320eae0f3399b19397b784816"
     },
     {
       "path": "shader/voxelrt/voxelrad_diffuse_single.comp.spv",

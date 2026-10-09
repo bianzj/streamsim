@@ -380,6 +380,8 @@ export function createDefaultProject(options = {}) {
         skyboxEnabled: false,
         radiationSolver: 'traditional',
         spectralAccelerationWidth: 100,
+        shortwaveScatteringOrders: 1,
+        radiationMaxSteps: 64,
         couplingIterations: 20, temperatureTolerance: 0.05, temperatureRelaxation: 0.5,
         soilTemperatureMethod: 2,
         vegetationTemperatureMethod: 0
@@ -628,6 +630,12 @@ export function normalizeProject(value = {}) {
         spectralAccelerationWidth: Math.max(1, Math.min(1000, number(
           configuration.control?.spectralAccelerationWidth, 100
         ))),
+        shortwaveScatteringOrders: Math.max(1, Math.min(3, Math.round(number(
+          configuration.control?.shortwaveScatteringOrders, 1
+        )))),
+        radiationMaxSteps: Math.max(1, Math.min(4096, Math.round(number(
+          configuration.control?.radiationMaxSteps, 64
+        )))),
         soilTemperatureMethod: Math.max(0, Math.min(2, Math.round(number(
           configuration.control?.soilTemperatureMethod,
           configuration.materials?.find((item) => item.type === 'Soil')?.params?.method ?? 2
@@ -901,6 +909,8 @@ export function projectToXml(value, paths = {}) {
     <temperatureTolerance>${number(c.control.temperatureTolerance, 0.05)}</temperatureTolerance>
     <temperatureRelaxation>${number(c.control.temperatureRelaxation, 0.5)}</temperatureRelaxation>
     <soilTemperatureMethod>${Math.max(0, Math.min(2, Math.round(number(c.control.soilTemperatureMethod, 2))))}</soilTemperatureMethod>
+    <shortwaveScatteringOrders>${c.control.shortwaveScatteringOrders}</shortwaveScatteringOrders>
+    <radiationMaxSteps>${c.control.radiationMaxSteps}</radiationMaxSteps>
     <vegetationTemperatureMethod>${Math.max(0, Math.min(1, Math.round(number(c.control.vegetationTemperatureMethod, 0))))}</vegetationTemperatureMethod>
     <isDEM>${c.scene.terrain ? 1 : 0}</isDEM>
     <isImage>${c.sensor.image ? 1 : 0}</isImage>

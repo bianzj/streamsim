@@ -80,7 +80,22 @@ float finiteNonnegative(float value)
 #define CP   1004        // specific heat of dry air
 #define KAPPA 0.4        // Von Karman constant
 #define GEARTH  9.81     // gravity acceleration
-#define AHC 119.7117122  //
+#define AHC 119.7117122  // N_A h c in J nm per micromole photons (legacy constant)
+
+// The radiative solver has already integrated each band over wavelength.
+// W m^-2 * wavelength_nm / AHC -> umol photons m^-2 s^-1.
+float absorbedParPhotonFlux(float absorbedBandWm2, float wavelengthNm)
+{
+    return absorbedBandWm2 * wavelengthNm / AHC;
+}
+
+// Fixed VNIR grid starts at 400 nm with 1 nm spacing. Never group
+// the inclusive 700 nm PAR sample with wavelengths outside PAR.
+int shortwaveGroupEnd(int firstBand, int width, int bandCount)
+{
+    int lastBand = min(firstBand + clamp(width, 1, bandCount), bandCount);
+    return firstBand < 301 ? min(lastBand, 301) : lastBand;
+}
 #define MAIR 28.96       // molecular mass of dry air
 #define MH20 18          // molecular mass of water
 #define MCO2 44          // Molecular mass of carbon dioxide

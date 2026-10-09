@@ -57,7 +57,19 @@ async function createWindow() {
   process.env.HISTREAM_ROOT = join(root, 'engine')
   process.env.PATH = `${join(root, 'engine')};${process.env.PATH || ''}`
 
-  const { server } = await import('../server.mjs')
+  const { server, setProjectFileChooser } = await import('../server.mjs')
+  // Resolve the owner when a request arrives: the server starts before the
+  // BrowserWindow exists, and the window can also close while it is serving.
+  setProjectFileChooser(async (currentProjectFile) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return null
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      title: '打开 StreamSim 工程',
+      defaultPath: currentProjectFile || 'project.json',
+      filters: [{ name: 'StreamSim 工程 JSON', extensions: ['json'] }],
+      properties: ['openFile']
+    })
+    return canceled ? null : filePaths[0] || null
+  })
   const url = await startDesktopServer(server)
   await waitForServer(url)
 

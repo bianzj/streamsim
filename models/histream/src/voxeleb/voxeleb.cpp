@@ -14,6 +14,7 @@
 #include "src/base/projectjson.h"
 #include "voxeleb.h"
 #include "src/base/atmosphere_lut.h"
+#include "src/base/energy_output.h"
 
 namespace {
 
@@ -158,6 +159,12 @@ bool Voxeleb::uploadSetting(std::shared_ptr<FileIO> &fileio, std::shared_ptr<Vox
     modelio->setting.n_jump = fileio->m_pVoxelebXml->settingxml.spectralAccelerationWidth;
     modelio->vegetationTemperatureMethod =
         fileio->m_pVoxelebXml->settingxml.vegetationTemperatureMethod;
+    modelio->shortwaveScatteringOrders =
+        fileio->m_pVoxelebXml->settingxml.shortwaveScatteringOrders;
+    const char* newScattering = std::getenv("STREAMSIM_NEW_SCATTERING");
+    modelio->newShortwaveScattering = modelio->shortwaveScatteringOrders > 1 ||
+        (newScattering && std::string(newScattering) == "1");
+    modelio->setting.maxStep = fileio->m_pVoxelebXml->settingxml.radiationMaxSteps;
     modelio->fluid = fileio->m_pVoxelebXml->fluidxml;
 
     return true;
@@ -326,7 +333,7 @@ bool Voxeleb::run(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<FileIO> &
             m_pCommand->runFluid(modelio, modelio->fluidSubsteps);
         }
 
-        m_pCommand->runEB(modelio);
+        if (!m_pCommand->runEB(modelio)) return false;
 
         if (std::getenv("STREAMSIM_TEMPERATURE_DIAGNOSTICS") != nullptr &&
             modelio->m_voxelio->m_pTempeBuffer) {
@@ -376,9 +383,8 @@ bool Voxeleb::run(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<FileIO> &
         std::cout << "PROGRESS\t" << progress << "\t能量平衡时间节点 "
                   << completed << "/" << total << " T="
                   << std::to_string(modelio->meteo.t) << std::endl;
-        if (modelio->isRadiationProcess || modelio->isEnergyProcess) {
-            outputVoxel(modelio,fileio);
-        }
+        // Validate the completed GPU state even when process export is disabled.
+        outputVoxel(modelio,fileio);
     //
     //    if (knode == 73)
         // if (1)
@@ -640,19 +646,25 @@ void Voxeleb::outputTxt(std::shared_ptr<VoxelebIO>& modelio, std::shared_ptr<Fil
 }
 void Voxeleb::outputVoxel(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<FileIO> &fileio) {
     (void)fileio;
-    if (!modelio || modelio->n_voxel <= 0 || !modelio->m_voxelio ||
+    if (!modelio || modelio->n_voxel <= 0) return;
+    if (!modelio->m_voxelio ||
         !modelio->m_voxelio->m_pDirBuffer || !modelio->m_voxelio->m_pNetRadBuffer ||
         !modelio->m_voxelio->m_pFluxBuffer ||
         !modelio->m_voxelio->m_pTempeBuffer ||
-        (!modelio->isRadiationProcess && !modelio->isEnergyProcess)) {
-        return;
+        !modelio->m_voxelio->m_pPnetBuffer || !modelio->m_voxelio->m_pRssBuffer) {
+        throw std::runtime_error("Missing VoxelEB buffers required for state validation");
     }
 
     const size_t voxelCount = static_cast<size_t>(modelio->n_voxel);
+    if (modelio->m_voxelio->voxellinks.size() < voxelCount) {
+        throw std::runtime_error("VoxelEB link count does not match the GPU state");
+    }
     std::vector<VoxelDir> directions(voxelCount);
     std::vector<VoxelNetRad> netRadiation(voxelCount);
     std::vector<VoxelHeatflux> heatFlux(voxelCount);
     std::vector<VoxelTempe> temperatures(voxelCount);
+    std::vector<VoxelPnet> photonFlux(voxelCount);
+    std::vector<VoxelRss> surfaceResistance(voxelCount);
     const auto download = [&](const nvvk::Buffer& source, void* destination, VkDeviceSize size) {
         nvvk::Buffer staging = modelio->m_pAlloc->createBuffer(
             size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
@@ -667,6 +679,8 @@ void Voxeleb::outputVoxel(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<F
     download(*modelio->m_voxelio->m_pNetRadBuffer, netRadiation.data(), voxelCount * sizeof(VoxelNetRad));
     download(*modelio->m_voxelio->m_pFluxBuffer, heatFlux.data(), voxelCount * sizeof(VoxelHeatflux));
     download(*modelio->m_voxelio->m_pTempeBuffer, temperatures.data(), voxelCount * sizeof(VoxelTempe));
+    download(*modelio->m_voxelio->m_pPnetBuffer, photonFlux.data(), voxelCount * sizeof(VoxelPnet));
+    download(*modelio->m_voxelio->m_pRssBuffer, surfaceResistance.data(), voxelCount * sizeof(VoxelRss));
 
     const auto componentForVoxel = [&](size_t voxel) -> float {
         if (!modelio->m_instanceio || !modelio->m_meshio || voxel >= modelio->m_voxelio->voxellinks.size()) return 0;
@@ -699,6 +713,52 @@ void Voxeleb::outputVoxel(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<F
             meshLink.bioId < static_cast<int>(modelio->m_meshio->soilsets.size()) &&
             modelio->m_meshio->soilsets[meshLink.bioId].method == 2;
     };
+    const auto isParticipatingVoxel = [&](size_t voxel) {
+        if (componentForVoxel(voxel) != 2) return false;
+        const auto& link = modelio->m_voxelio->voxellinks[voxel];
+        const auto& instance = modelio->m_instanceio->instanceLinks[link.instanceId];
+        const int canopy = modelio->m_meshio->meshLinks[instance.meshId].canopyId;
+        if (canopy < 0 || canopy >= static_cast<int>(modelio->m_meshio->canopies.size())) return false;
+        const int structure = modelio->m_meshio->canopies[canopy].structureType;
+        return structure == 2 || structure == 3;
+    };
+    std::vector<streamsim::energy_output::Balance> energyBalance(voxelCount);
+    for (size_t voxel = 0; voxel < voxelCount; ++voxel) {
+        using namespace streamsim::energy_output;
+        const float component = componentForVoxel(voxel);
+        if (component == 0 || !modelio->m_voxelio->voxellinks[voxel].isValid) continue;
+        const auto& link = modelio->m_voxelio->voxellinks[voxel];
+        const auto& instance = modelio->m_instanceio->instanceLinks.at(link.instanceId);
+        const auto& mesh = modelio->m_meshio->meshLinks.at(instance.meshId);
+        // budget.comp reads the fixed 2002-band material table, not the
+        // sensor-specific spectra. Its final band is the 10500 nm emissivity.
+        const size_t thermalBand = static_cast<size_t>(mesh.spectralId) * (N1 + 1) + N1;
+        if (mesh.spectralId < 0 || thermalBand >= modelio->m_meshio->fixedSpectrals.size()) {
+            throw std::runtime_error("Missing VoxelEB thermal energy spectrum");
+        }
+        const auto& thermal = modelio->m_meshio->fixedSpectrals[thermalBand];
+        const auto& radiation = netRadiation[voxel];
+        const auto& flux = heatFlux[voxel];
+        Input input;
+        input.directShortwave = radiation.directVrad;
+        input.diffuseShortwave = radiation.diffuseVrad;
+        input.directLongwave = radiation.directTrad;
+        input.diffuseLongwave = radiation.diffuseTrad;
+        input.sunlitTemperature = temperatures[voxel].sunlit;
+        input.shadedTemperature = temperatures[voxel].shaded;
+        input.sunlitFraction = directions[voxel].solar;
+        input.thermalReflectance = thermal.reflectance;
+        input.thermalTransmittance = thermal.transmittance;
+        input.sensibleSunlit = flux.Hsunlit;
+        input.sensibleShaded = flux.Hshaded;
+        input.latentSunlit = flux.LEsunlit;
+        input.latentShaded = flux.LEshaded;
+        input.storageSunlit = flux.Gsunlit;
+        input.storageShaded = flux.Gshaded;
+        input.exchange = isParticipatingVoxel(voxel) ? Exchange::prescribedMedium
+            : component == 2 ? Exchange::twoSidedLeaf : Exchange::singleSurface;
+        energyBalance[voxel] = calculate(input);
+    }
     bool hasSoilProfile = false;
     if (modelio->isEnergyProcess && modelio->m_voxelio->m_pTLASTBuffer) {
         for (size_t voxel = 0; voxel < voxelCount && !hasSoilProfile; ++voxel) {
@@ -722,6 +782,178 @@ void Voxeleb::outputVoxel(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<F
     std::ostringstream time;
     time << "DOY" << day << '_' << std::setw(2) << std::setfill('0') << totalMinutes / 60
          << '-' << std::setw(2) << std::setfill('0') << totalMinutes % 60;
+
+    // A separate diagnostic contract keeps existing process-record offsets stable.
+    const std::filesystem::path diagnosticDirectory =
+        std::filesystem::path(modelio->projectDir) / "diagnostics";
+    std::filesystem::create_directories(diagnosticDirectory);
+    const std::string diagnosticStem = "physiology_node=" + std::to_string(modelio->k_node) + "_T=" + time.str();
+    constexpr size_t metricCount = 10;
+    const char* metricNames[metricCount] = {"directPar", "diffusePar", "rssSunlit", "rssShaded",
+        "gppSunlit", "gppShaded", "netAssimilationSunlit", "netAssimilationShaded",
+        "latentHeatSunlit", "latentHeatShaded"};
+    const char* metricUnits[metricCount] = {"umol photons m-2 leaf s-1", "umol photons m-2 leaf s-1",
+        "s m-1", "s m-1", "umol CO2 m-2 leaf s-1", "umol CO2 m-2 leaf s-1",
+        "umol CO2 m-2 leaf s-1", "umol CO2 m-2 leaf s-1", "W m-2", "W m-2"};
+    double sums[metricCount]{};
+    float minima[metricCount], maxima[metricCount];
+    size_t counts[metricCount]{}, invalidCounts[metricCount]{};
+    std::fill_n(minima, metricCount, std::numeric_limits<float>::max());
+    std::fill_n(maxima, metricCount, std::numeric_limits<float>::lowest());
+    size_t invalidVoxelCount = 0, vegetationCount = 0;
+    std::ofstream diagnosticBinary;
+    if (modelio->isEnergyProcess) {
+        diagnosticBinary.open(diagnosticDirectory / (diagnosticStem + ".bin"), std::ios::binary | std::ios::trunc);
+        if (!diagnosticBinary) throw std::runtime_error("Cannot write physiology diagnostic binary");
+    }
+    for (size_t voxel = 0; voxel < voxelCount; ++voxel) {
+        const auto& flux = heatFlux[voxel];
+        float values[metricCount] = {photonFlux[voxel].directPnet, photonFlux[voxel].diffusePnet,
+            surfaceResistance[voxel].sunlit, surfaceResistance[voxel].shaded,
+            flux.GPPsunlit, flux.GPPshaded, flux.NPPsunlit, flux.NPPshaded,
+            flux.LEsunlit, flux.LEshaded};
+        const bool medium = isParticipatingVoxel(voxel);
+        if (medium) {
+            // Fire/fog have no leaf physiology and never initialize leaf rss.
+            std::fill_n(values + 2, 6, std::numeric_limits<float>::quiet_NaN());
+        }
+        if (diagnosticBinary.is_open()) {
+            diagnosticBinary.write(reinterpret_cast<const char*>(values), sizeof(values));
+        }
+        if (!modelio->m_voxelio->voxellinks[voxel].isValid || componentForVoxel(voxel) == 0) continue;
+        bool invalid = !std::isfinite(temperatures[voxel].sunlit) || !std::isfinite(temperatures[voxel].shaded)
+            || !std::isfinite(flux.Hsunlit) || !std::isfinite(flux.Hshaded)
+            || !std::isfinite(flux.Gsunlit) || !std::isfinite(flux.Gshaded)
+            || !std::isfinite(directions[voxel].solar) || directions[voxel].solar < 0.0f || directions[voxel].solar > 1.0f
+            || !std::isfinite(netRadiation[voxel].directVrad) || !std::isfinite(netRadiation[voxel].diffuseVrad)
+            || !std::isfinite(netRadiation[voxel].directTrad) || !std::isfinite(netRadiation[voxel].diffuseTrad)
+            || (energyBalance[voxel].closureApplicable &&
+                (!std::isfinite(energyBalance[voxel].netRadiation) ||
+                 !std::isfinite(energyBalance[voxel].energyResidual)));
+        const bool vegetation = componentForVoxel(voxel) == 2 && !medium;
+        if (vegetation) ++vegetationCount;
+        for (size_t metric = 0; metric < metricCount; ++metric) {
+            if (medium && metric >= 2 && metric < 8) continue;
+            const bool valid = std::isfinite(values[metric]) &&
+                (metric >= 6 || values[metric] >= 0.0f);
+            invalid = invalid || !valid;
+            if (!vegetation) continue;
+            if (!valid) { ++invalidCounts[metric]; continue; }
+            ++counts[metric];
+            sums[metric] += values[metric];
+            minima[metric] = std::min(minima[metric], values[metric]);
+            maxima[metric] = std::max(maxima[metric], values[metric]);
+        }
+        if (invalid) ++invalidVoxelCount;
+    }
+    if (diagnosticBinary.is_open()) {
+        diagnosticBinary.close();
+        if (!diagnosticBinary) throw std::runtime_error("Cannot save physiology diagnostic binary");
+    }
+    const auto diagnosticPath = diagnosticDirectory / (diagnosticStem + ".json");
+    std::ofstream diagnostic(diagnosticPath, std::ios::trunc);
+    diagnostic << std::setprecision(9)
+        << "{\n\"schemaVersion\":1,\"kind\":\"voxel-physiology-diagnostics\",\"node\":" << modelio->k_node
+        << ",\"julianTime\":" << modelio->meteo.t << ",\"voxelCount\":" << voxelCount
+        << ",\"vegetationCount\":" << vegetationCount << ",\"invalidVoxelCount\":" << invalidVoxelCount
+        << ",\"valid\":" << (invalidVoxelCount == 0 ? "true" : "false")
+        << ",\"noData\":\"NaN\",\"aggregation\":\"unweighted leaf-canopy voxel states; participating media excluded; not canopy-area totals\"";
+    if (modelio->isEnergyProcess) {
+        diagnostic << ",\"dataFile\":\"" << diagnosticStem << ".bin\",\"dataType\":\"float32-little-endian\""
+            << ",\"layout\":\"voxel-interleaved\",\"recordFloats\":" << metricCount;
+    }
+    diagnostic << ",\"fields\":[";
+    for (size_t metric = 0; metric < metricCount; ++metric) {
+        if (metric) diagnostic << ',';
+        diagnostic << "{\"id\":\"" << metricNames[metric] << "\",\"unit\":\"" << metricUnits[metric]
+            << "\",\"offset\":" << metric << ",\"finiteCount\":" << counts[metric]
+            << ",\"invalidCount\":" << invalidCounts[metric] << ",\"min\":";
+        if (counts[metric]) diagnostic << minima[metric]; else diagnostic << "null";
+        diagnostic << ",\"max\":";
+        if (counts[metric]) diagnostic << maxima[metric]; else diagnostic << "null";
+        diagnostic << ",\"mean\":";
+        if (counts[metric]) diagnostic << sums[metric] / counts[metric]; else diagnostic << "null";
+        diagnostic << '}';
+    }
+    diagnostic << "]\n}\n";
+    diagnostic.close();
+    if (!diagnostic) throw std::runtime_error("Cannot save physiology diagnostics");
+    if (invalidVoxelCount != 0) {
+        throw std::runtime_error("Non-finite or invalid VoxelEB state in " + std::to_string(invalidVoxelCount)
+            + " voxels; diagnostic: " + diagnosticPath.string());
+    }
+    // Keep process binary offsets unchanged and expose closure separately.
+    // Assess the refreshed final state even when process exports are disabled.
+    {
+        constexpr size_t balanceMetricCount = 6;
+        const char* balanceNames[balanceMetricCount] = {
+            "absorbedShortwave", "absorbedLongwave", "emittedLongwave",
+            "netRadiation", "heatFluxSum", "energyResidual"};
+        double balanceSums[balanceMetricCount]{};
+        double balanceMin[balanceMetricCount], balanceMax[balanceMetricCount];
+        std::fill_n(balanceMin, balanceMetricCount, std::numeric_limits<double>::max());
+        std::fill_n(balanceMax, balanceMetricCount, std::numeric_limits<double>::lowest());
+        size_t applicableCount = 0, prescribedMediumCount = 0;
+        for (size_t voxel = 0; voxel < voxelCount; ++voxel) {
+            if (!modelio->m_voxelio->voxellinks[voxel].isValid || componentForVoxel(voxel) == 0) continue;
+            const auto& balance = energyBalance[voxel];
+            if (!balance.closureApplicable) { ++prescribedMediumCount; continue; }
+            ++applicableCount;
+            const double values[balanceMetricCount] = {
+                balance.absorbedShortwave, balance.absorbedLongwave, balance.emittedLongwave,
+                balance.netRadiation, balance.heatFluxSum, balance.energyResidual};
+            for (size_t metric = 0; metric < balanceMetricCount; ++metric) {
+                balanceSums[metric] += values[metric];
+                balanceMin[metric] = std::min(balanceMin[metric], values[metric]);
+                balanceMax[metric] = std::max(balanceMax[metric], values[metric]);
+            }
+        }
+        const auto path = diagnosticDirectory / ("energy_balance_node=" +
+            std::to_string(modelio->k_node) + "_T=" + time.str() + ".json");
+        std::ofstream balanceDiagnostic(path, std::ios::trunc);
+        balanceDiagnostic << std::setprecision(12)
+            << "{\n\"schemaVersion\":1,\"kind\":\"voxel-energy-balance-diagnostics\",\"node\":"
+            << modelio->k_node << ",\"julianTime\":" << modelio->meteo.t
+            << ",\"applicableVoxelCount\":" << applicableCount
+            << ",\"prescribedMediumCount\":" << prescribedMediumCount
+            << ",\"closureApplicable\":" << (applicableCount > 0 ? "true" : "false")
+            << ",\"finalStateRefreshed\":" << (modelio->energyFinalized ? "true" : "false")
+            << ",\"temperatureIterations\":" << modelio->energyIterations
+            << ",\"budgetResidualToleranceWm2\":2"
+            << ",\"budgetStatesOutsideTolerance\":" << modelio->energyFinalUnconvergedStateCount
+            << ",\"budgetResidualWithinTolerance\":"
+            << (modelio->energyFinalized && modelio->energyFinalUnconvergedStateCount == 0 ? "true" : "false")
+            << ",\"budgetStateCountBasis\":\"sunlit/shaded conditional states; water uses the shared mixed-state residual; not voxel count\""
+            << ",\"aggregation\":\"unweighted applicable voxel flux densities; mixed leaf and surface area bases; not domain power or domain closure\""
+            << ",\"energyResidualDefinition\":\"netRadiation-heatFluxSum; no clipping or forced closure\""
+            << ",\"leafHeatFluxSum\":\"2*(H+LE); original H/LE fields remain per face; leaf G excluded\""
+            << ",\"solidHeatFluxSum\":\"H+LE+G; G is soil/building conduction or water storage\""
+            << ",\"prescribedMedium\":\"notApplicable; Rn process placeholder=0; excluded from statistics\""
+            << ",\"stateTiming\":\"LW, exchange and physiology refreshed at exported surface temperatures before history advances; residual does not establish full physiological or air-state convergence\""
+            << ",\"fields\":[";
+        for (size_t metric = 0; metric < balanceMetricCount; ++metric) {
+            if (metric) balanceDiagnostic << ',';
+            balanceDiagnostic << "{\"id\":\"" << balanceNames[metric]
+                << "\",\"unit\":\"W m-2\",\"count\":" << applicableCount << ",\"min\":";
+            if (applicableCount) balanceDiagnostic << balanceMin[metric]; else balanceDiagnostic << "null";
+            balanceDiagnostic << ",\"max\":";
+            if (applicableCount) balanceDiagnostic << balanceMax[metric]; else balanceDiagnostic << "null";
+            balanceDiagnostic << ",\"mean\":";
+            if (applicableCount) balanceDiagnostic << balanceSums[metric] / applicableCount;
+            else balanceDiagnostic << "null";
+            balanceDiagnostic << '}';
+        }
+        balanceDiagnostic << "]\n}\n";
+        balanceDiagnostic.close();
+        if (!balanceDiagnostic) throw std::runtime_error("Cannot save energy balance diagnostics");
+        std::cout << "ENERGY_BALANCE\tnode=" << modelio->k_node
+            << "\titerations=" << modelio->energyIterations
+            << "\tfinalStateRefreshed=" << modelio->energyFinalized
+            << "\tstatesOutsideTolerance=" << modelio->energyFinalUnconvergedStateCount
+            << "\tdiagnostics=" << path.string() << std::endl;
+    }
+
+    if (!modelio->isRadiationProcess && !modelio->isEnergyProcess) return;
 
     const std::filesystem::path directory = std::filesystem::path(modelio->projectDir) / "process";
     std::filesystem::create_directories(directory);
@@ -798,8 +1030,7 @@ void Voxeleb::outputVoxel(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<F
                             sunlit * netRadiation[voxel].directVrad;
                 values[1] = netRadiation[voxel].diffuseTrad +
                             sunlit * netRadiation[voxel].directTrad;
-                values[2] = sunlit * (heatFlux[voxel].Hsunlit + heatFlux[voxel].LEsunlit + heatFlux[voxel].Gsunlit) +
-                            shaded * (heatFlux[voxel].Hshaded + heatFlux[voxel].LEshaded + heatFlux[voxel].Gshaded);
+                values[2] = static_cast<float>(energyBalance[voxel].netRadiation);
             } else {
                 valueCount = 5;
                 values[0] = sunlit * heatFlux[voxel].LEsunlit + shaded * heatFlux[voxel].LEshaded;
@@ -850,6 +1081,11 @@ void Voxeleb::outputVoxel(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<F
                  << "  \"recordFloats\": "
                  << componentOffset + 2 << ",\n"
                  << "  \"componentOffset\": " << componentOffset << ",\n"
+                 << "  \"energyState\": {\"finalStateRefreshed\":"
+                 << (modelio->energyFinalized ? "true" : "false")
+                 << ",\"temperatureIterations\":" << modelio->energyIterations
+                 << ",\"budgetResidualToleranceWm2\":2,\"budgetStatesOutsideTolerance\":"
+                 << modelio->energyFinalUnconvergedStateCount << "},\n"
                  << "  \"positionOffsets\": [0,1,2],\n"
                  << "  \"thermalState\": {\"dataFile\":\"" << thermalFile
                  << "\",\"recordFloats\":3,\"fields\":[\"sunlitTemperatureK\",\"shadedTemperatureK\",\"sunlitFraction\"]},\n"
@@ -860,13 +1096,24 @@ void Voxeleb::outputVoxel(std::shared_ptr<VoxelebIO> &modelio, std::shared_ptr<F
             metadata << "[{\"id\":\"shortwaveRadiation\",\"label\":\"短波辐射 [W m⁻²]\",\"offset\":3},"
                         "{\"id\":\"longwaveRadiation\",\"label\":\"长波辐射 [W m⁻²]\",\"offset\":4},"
                         "{\"id\":\"netRadiation\",\"label\":\"净辐射 [W m⁻²]\",\"offset\":5},"
-                        "{\"id\":\"temperature\",\"label\":\"温度 [K]\",\"offset\":" << componentOffset + 1 << "}]\n}\n";
+                        "{\"id\":\"temperature\",\"label\":\"温度 [K]\",\"offset\":" << componentOffset + 1 << "}],\n"
+                     << "  \"radiationConvention\": {\n"
+                     << "    \"shortwaveAndLongwaveFields\": \"absorbed diffuse + sunlitFraction*absorbed direct; legacy per-face inputs\",\n"
+                     << "    \"netRadiation\": \"independent absorbed shortwave + absorbed longwave - thermal emission\",\n"
+                     << "    \"leafNetRadiation\": \"2*diffuse(SW+LW) + sunlitFraction*direct(SW+LW) - 2*emissivity*sigma*weighted(T^4); per leaf area\",\n"
+                     << "    \"solidNetRadiation\": \"diffuse(SW+LW) + sunlitFraction*direct(SW+LW) - emissivity*sigma*weighted(T^4); per surface area\",\n"
+                     << "    \"thermalSpectrum\": \"fixed 10500 nm material emissivity; sigma=5.6704e-8 W m-2 K-4\",\n"
+                     << "    \"prescribedMediumNetRadiation\": \"notApplicable; finite zero placeholder for fire/fog without a solved surface energy balance\",\n"
+                     << "    \"stateTiming\": \"LW and heat flux refreshed at exported temperatures before history advances\"\n"
+                     << "  },\n"
+                     << "  \"energyBalanceDiagnostic\": \"../diagnostics/energy_balance_node=" << modelio->k_node
+                     << "_T=" << time.str() << ".json\"\n}\n";
         } else {
             metadata << "[{\"id\":\"latentHeat\",\"label\":\"潜热 [W m⁻²]\",\"offset\":3},"
                         "{\"id\":\"sensibleHeat\",\"label\":\"显热 [W m⁻²]\",\"offset\":4},"
                         "{\"id\":\"surfaceHeatFlux\",\"label\":\"表面热通量 [W m⁻²]\",\"offset\":5},"
                         "{\"id\":\"gpp\",\"label\":\"GPP [μmol CO₂ m⁻²叶面积 s⁻¹]\",\"offset\":6},"
-                        "{\"id\":\"npp\",\"label\":\"NPP [μmol CO₂ m⁻²叶面积 s⁻¹]\",\"offset\":7},"
+                        "{\"id\":\"npp\",\"label\":\"叶片净同化 [μmol CO₂ m⁻²叶面积 s⁻¹]\",\"offset\":7},"
                         "{\"id\":\"temperature\",\"label\":\"温度 [K]\",\"offset\":" << componentOffset + 1 << "}]";
             if (writeSoilProfile) {
                 metadata << ",\n  \"soilProfile\": {\n"

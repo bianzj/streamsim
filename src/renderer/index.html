@@ -48,6 +48,7 @@
           <button class="button ghost language-toggle" id="languageToggle" type="button" title="Switch to English" aria-label="Switch to English"><span data-language-label>EN</span></button>
           <button class="button ghost" id="newProjectBtn"><svg><use href="#i-plus"/></svg>新建工程</button>
           <button class="button ghost" id="openXmlBtn"><svg><use href="#i-folder"/></svg>打开工程</button>
+          <button class="button ghost" id="openProjectPathBtn" type="button" data-i18n-ignore>路径打开</button>
           <button class="button ghost" id="saveXmlBtn"><svg><use href="#i-save"/></svg>保存</button>
           <button class="button ghost" id="saveAsBtn"><svg><use href="#i-save"/></svg>另存为</button>
           <button class="button ghost" id="openImageResultsTopBtn"><svg><use href="#i-layers"/></svg>图像结果</button>
@@ -234,6 +235,16 @@
         <footer><span id="xmlStatus">未加载文件</span><button class="button primary" id="applyXmlBtn" disabled>应用并保存</button></footer>
       </section>
     </div>
+    <div class="drawer-backdrop" id="projectOpenPathDialog" hidden>
+      <form class="project-dialog" id="projectOpenPathForm" role="dialog" aria-modal="true" aria-labelledby="projectOpenPathTitle" data-i18n-ignore>
+        <header><div><span class="eyebrow">Open Project</span><h2 id="projectOpenPathTitle">路径打开</h2></div><button class="button ghost" id="cancelProjectOpenPathBtn" type="button">取消</button></header>
+        <div class="project-form">
+          <label class="dialog-field dialog-field-wide"><span id="projectOpenPathLabel">本机 project.json 路径</span><input class="input path-input" id="projectOpenPathInput" name="path" type="text" required autocomplete="off" spellcheck="false"></label>
+        </div>
+        <footer><span>project.json</span><button class="button primary" id="submitProjectOpenPathBtn" type="submit">打开</button></footer>
+      </form>
+    </div>
+
     <div class="drawer-backdrop" id="projectDialog" hidden>
       <form class="project-dialog" id="projectForm">
         <header><div><span class="eyebrow">HiStream Project</span><h2>新建工程</h2></div><button class="button ghost" id="closeProjectBtn" type="button">取消</button></header>

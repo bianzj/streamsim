@@ -130,7 +130,7 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
 
         // add save the sky contribution
         // sky contribution: lightSet.Rli*waveSets[kband].diffuse*0.001
-        if(directioni0.y >= 0)
+        if(directioni0.y > 0.0)
         {
            float skyrad = alpha_toVoxel*Esky;
           uint index = bufferId0*DIFFUSE_ANGLE_NUM+iangle;
@@ -256,7 +256,16 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
           if(alpha_toVoxel < 0.01) break; 
         } // veg
       } // bufferId
-      if (alignBufferId >= 0)
+      bool mediumBoundary = false;
+      if (alignBufferId >= 0) {
+          uint alignedMesh = instanceLinks[voxelLinks[alignBufferId].instanceId].meshId;
+          mediumBoundary = meshLinks[alignedMesh].type == TYPE_VEGETATION &&
+              isParticipatingMedium(canopies[meshLinks[alignedMesh].canopyId]);
+      }
+      // A medium boundary continues into a volume. Its completed segment is
+      // evaluated above at the next crossing, with extinction/emissionScale.
+      // It must not emit as an opaque surface or terminate the ray here.
+      if (alignBufferId >= 0 && !mediumBoundary)
       {
           //////////////////////////////
           /// facet case
@@ -343,15 +352,9 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
       ray.origin = OffsetRay(ray.origin, dot(ray.direction, ffnormal) > 0 ? ffnormal : -ffnormal);
     } // step
 
-    if((kstep >= setting.maxStep) && (alpha_toVoxel > 0.05))
-    {
-        float skyrad = alpha_toVoxel*Esky;
-        //skyrad = 0.5;
-        uint index = bufferId0*DIFFUSE_ANGLE_NUM+iangle;
-        atomicAdd(voxelRads[index].induced,
-            skyrad,
-            gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
-    }
+    // A step limit is an unresolved path, not a connection to the sky.
+    // Keep the accumulated source terms; only an actual upward miss above
+    // may supply sky illumination. Opacity and geometric offsets are unchanged.
   } // angle
   return false;
 }

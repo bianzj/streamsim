@@ -4,6 +4,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { createHash } from 'node:crypto'
 import vm from 'node:vm'
+import { spawnSync } from 'node:child_process'
 import { createDefaultProject } from '../src/renderer/src/project-schema.js'
 
 process.env.STREAMSIM_SERVER_AUTOSTART = '0'
@@ -55,6 +56,30 @@ try {
   assert.notEqual(runs[0].runId, runs[1].runId)
   assert.notEqual(runs[0].outputDir, runs[1].outputDir)
   assert.equal(fs.readFileSync(path.join(root, 'output', 'historic.tif'), 'utf8'), 'history stays')
+  if (process.platform === 'win32') {
+    // Exercise the same ASCII junction -> Chinese folder used by Stream3D.
+    const canonical = path.join(root, '北京内城.stream3d'), alias = path.join(root, 'native-alias')
+    fs.mkdirSync(canonical)
+    for (const name of ['project.json', 'model.obj', 'positions.txt', 'eRaytracing'])
+      fs.copyFileSync(path.join(root, name), path.join(canonical, name))
+    const junction = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      'New-Item -ItemType Junction -Path $env:COMPAT_ALIAS -Value $env:COMPAT_TARGET -ErrorAction Stop | Out-Null'],
+      { env: { ...process.env, COMPAT_ALIAS: alias, COMPAT_TARGET: canonical }, windowsHide: true, encoding: 'utf8' })
+    assert.equal(junction.status, 0, junction.stderr)
+    const result = await post('/api/run', { inputPath: path.join(alias, 'project.json'), mode: 'eRaytracing', executable: process.execPath })
+    let manifest
+    for (let attempt = 0; attempt < 100; attempt++) {
+      manifest = JSON.parse(fs.readFileSync(path.join(result.outputDir, 'run-manifest.json')))
+      if (!['running', 'preparing'].includes(manifest.status)) break
+      await new Promise(resolve => setTimeout(resolve, 20))
+    }
+    assert.equal(manifest.status, 'completed', JSON.stringify(manifest))
+    assert.equal(manifest.exitCode, 0)
+    assert.ok(manifest.completed.products.some(file => file.endsWith('.tif')),
+      'Manifest and converted TIFF must both publish through the junction')
+    assert.equal(sha(path.join(canonical, 'project.json')), original)
+    console.log('Stream3D ASCII junction / Chinese project manifest and TIFF publication passed')
+  }
   const listed = await post('/api/results/list', { path: path.join(root, 'output') })
   for (const run of runs) assert.ok(listed.files.some(file => file.runId === run.runId && file.kind === 'tiff'))
   assert.ok(!listed.files.some(file => /source-project|input[\\/]|run-manifest/.test(file.path)))

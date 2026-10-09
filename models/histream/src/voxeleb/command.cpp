@@ -5,8 +5,21 @@
 #include "command.h"
 #include <cstdlib>
 #include <stdexcept>
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cmath>
+#include <cstring>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
 
 namespace {
+
+struct ScatteringAggregate {
+    uint64_t maxStepTruncations{0}, transmittanceStops{0}, tracedRays{0}, reserved{0};
+    double absorbedShortwave{0}, absorbedPar{0}, transmittanceResidual{0}, truncatedResidual{0};
+};
 
 void clearEnergyState(const std::shared_ptr<VoxelebIO>& modelio)
 {
@@ -22,16 +35,133 @@ uint32_t readEnergyState(const std::shared_ptr<VoxelebIO>& modelio,
 {
     nvvk::CommandPool commandPool(modelio->m_device, modelio->m_queueIndex);
     vk::CommandBuffer command = commandPool.createCommandBuffer();
+    VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
     VkBufferCopy copy{};
     copy.size = sizeof(EBState);
     vkCmdCopyBuffer(command, modelio->m_voxelio->m_pStateBuffer->buffer,
                     readback.buffer, 1, &copy);
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
     commandPool.submitAndWait(command);
 
     const void* mapped = modelio->m_pAlloc->map(readback);
     const uint32_t count = *static_cast<const uint32_t*>(mapped);
     modelio->m_pAlloc->unmap(readback);
     return count;
+}
+
+void resetScatteringStats(const std::shared_ptr<VoxelebIO>& modelio)
+{
+    nvvk::CommandPool pool(modelio->m_device, modelio->m_queueIndex);
+    VkCommandBuffer command = pool.createCommandBuffer();
+    vkCmdFillBuffer(command, modelio->m_pScatteringStats->buffer, 0,
+                    4 * sizeof(ScatteringOrderStats), 0);
+    VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+    pool.submitAndWait(command);
+}
+
+std::array<ScatteringOrderStats, 4> readScatteringStats(
+    const std::shared_ptr<VoxelebIO>& modelio)
+{
+    std::array<ScatteringOrderStats, 4> stats{};
+    const VkDeviceSize bytes = sizeof(stats);
+    nvvk::Buffer staging = modelio->m_pAlloc->createBuffer(bytes,
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    nvvk::CommandPool pool(modelio->m_device, modelio->m_queueIndex);
+    VkCommandBuffer command = pool.createCommandBuffer();
+    VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+    VkBufferCopy copy{};
+    copy.size = bytes;
+    vkCmdCopyBuffer(command, modelio->m_pScatteringStats->buffer, staging.buffer, 1, &copy);
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+    pool.submitAndWait(command);
+    const void* mapped = modelio->m_pAlloc->map(staging);
+    std::memcpy(stats.data(), mapped, static_cast<size_t>(bytes));
+    modelio->m_pAlloc->unmap(staging);
+    modelio->m_pAlloc->destroy(staging);
+    return stats;
+}
+
+void writeScatteringStats(const std::shared_ptr<VoxelebIO>& modelio,
+    const std::array<ScatteringAggregate, 4>& stats, double milliseconds,
+    const std::array<double, 3>& orderMilliseconds, bool legacy)
+{
+    const auto directory = std::filesystem::path(modelio->projectDir) / "diagnostics";
+    std::filesystem::create_directories(directory);
+    const auto file = directory / ("scattering_node=" + std::to_string(modelio->k_node) + ".json");
+    std::ofstream output(file);
+    if (!output) throw std::runtime_error("Cannot write scattering diagnostics: " + file.string());
+    const auto jsonNumber = [](double value) {
+        if (!std::isfinite(value)) return std::string("null");
+        std::ostringstream text;
+        text << std::setprecision(10) << value;
+        return text.str();
+    };
+    output << std::setprecision(10)
+        << "{\n  \"format\": \"streamsim-shortwave-scattering-v1\",\n"
+        << "  \"node\": " << modelio->k_node << ",\n"
+        << "  \"legacy\": " << (legacy ? "true" : "false") << ",\n"
+        << "  \"requestedOrders\": " << modelio->shortwaveScatteringOrders << ",\n"
+        << "  \"completedOrders\": " << (legacy ? 1 : modelio->shortwaveScatteringOrders) << ",\n"
+        << "  \"orderContributionEarlyStop\": false,\n"
+        << "  \"orderDefinition\": \"" << (legacy
+            ? "legacy sky order 0 plus solar order 1"
+            : "sky orders 0..K plus solar orders 1..K; direct solar absorption is separate") << "\",\n"
+        << "  \"voxelCount\": " << modelio->n_voxel << ",\n"
+        << "  \"directions\": 64,\n"
+        << "  \"maxRaySteps\": " << modelio->setting.maxStep << ",\n"
+        << "  \"transmittanceCutoff\": 0.01,\n"
+        << "  \"elapsedMs\": " << milliseconds << ",\n"
+        << "  \"statsAvailable\": " << (legacy ? "false" : "true") << ",\n"
+        << "  \"statsScope\": \"diffuse shortwave paths only; solar visibility is not counted\",\n"
+        << "  \"counterAggregation\": \"GPU counters reset per spectral group; CPU uint64 totals\",\n"
+        << "  \"residualAggregation\": \"sum of dimensionless ray throughputs at cutoff; not omitted energy\",\n"
+        << "  \"fluxAggregation\": \"sum of per-voxel flux densities; not total domain power\",\n"
+        << "  \"perOrder\": [\n";
+    bool valid = true;
+    for (int index = 0; index < 4; ++index) {
+        const auto& value = stats[index];
+        valid = valid && value.reserved == 0 && std::isfinite(value.absorbedShortwave) &&
+            std::isfinite(value.absorbedPar) && std::isfinite(value.transmittanceResidual) &&
+            std::isfinite(value.truncatedResidual);
+        output << "    {\"order\": " << (index == 3 ? 0 : index + 1)
+            << ", \"elapsedMs\": " << (index == 3 ? 0.0 : orderMilliseconds[index])
+            << ", \"maxStepTruncations\": " << value.maxStepTruncations
+            << ", \"transmittanceStops\": " << value.transmittanceStops
+            << ", \"tracedRays\": " << value.tracedRays
+            << ", \"invalidValues\": " << value.reserved
+            << ", \"absorbedShortwave\": " << jsonNumber(value.absorbedShortwave)
+            << ", \"absorbedPar\": " << jsonNumber(value.absorbedPar)
+            << ", \"transmittanceResidual\": " << jsonNumber(value.transmittanceResidual)
+            << ", \"truncatedResidual\": " << jsonNumber(value.truncatedResidual) << "}"
+            << (index == 3 ? "\n" : ",\n");
+    }
+    output << "  ],\n  \"valid\": " << (valid ? "true" : "false") << "\n}\n";
+    output.close();
+    std::cout << "SHORTWAVE_SCATTERING\tnode=" << modelio->k_node
+        << "\trequested=" << modelio->shortwaveScatteringOrders
+        << "\tcompleted=" << (legacy ? 1 : modelio->shortwaveScatteringOrders)
+        << "\tlegacy=" << (legacy ? 1 : 0) << "\telapsedMs=" << milliseconds
+        << "\tdiagnostics=" << file.string() << std::endl;
+    if (!valid) throw std::runtime_error("Invalid shortwave scattering state: " + file.string());
 }
 
 } // namespace
@@ -86,8 +216,67 @@ bool Command::runEB(std::shared_ptr<VoxelebIO> &modelio){
     submit(modelio, VoxelEBStage::directVNIR, voxelSize1D, std::nullopt, std::nullopt);
     waitFence(modelio);
 
-    submit(modelio, VoxelEBStage::diffuseVNIR, voxelSize1D, std::nullopt, std::nullopt);
-    waitFence(modelio);
+    const auto shortwaveBegin = std::chrono::steady_clock::now();
+    std::array<double, 3> orderMilliseconds{};
+    std::array<ScatteringAggregate, 4> scatteringStats{};
+    if (modelio->newShortwaveScattering) {
+        if (uint64_t(modelio->n_voxel) * 64 > UINT32_MAX) {
+            throw std::runtime_error("One spectral group exceeds the scattering diagnostic counter capacity");
+        }
+        setting.scatteringStage = 0;
+        submit(modelio, VoxelEBStage::scatteringVNIR, voxelSize1D, std::nullopt, std::nullopt);
+        waitFence(modelio);
+        // Each spectral group owns the entire directional field until all its
+        // orders finish. Reusing two fields keeps memory independent of K.
+        const int width = std::max(setting.n_jump, 1);
+        for (int first = 0; first < 2001;) {
+            resetScatteringStats(modelio);
+            int end = std::min(first + width, 2001);
+            // PAR includes 700 nm: indices 0..300 form one integration domain.
+            if (first < 301 && end > 301) end = 301;
+            setting.scatteringBandStart = first;
+            setting.scatteringBandEnd = end;
+            setting.scatteringStage = 1;
+            setting.scatteringOrder = 0;
+            submit(modelio, VoxelEBStage::scatteringVNIR, voxelSize1D, std::nullopt, std::nullopt);
+            waitFence(modelio);
+            for (int order = 1; order <= modelio->shortwaveScatteringOrders; ++order) {
+                const auto orderBegin = std::chrono::steady_clock::now();
+                setting.scatteringOrder = order;
+                setting.scatteringStage = 2;
+                submit(modelio, VoxelEBStage::scatteringVNIR, voxelSize1D, std::nullopt, std::nullopt);
+                waitFence(modelio);
+                setting.scatteringStage = 3;
+                submit(modelio, VoxelEBStage::scatteringVNIR, voxelSize1D, std::nullopt, std::nullopt);
+                waitFence(modelio);
+                orderMilliseconds[order - 1] += std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - orderBegin).count();
+            }
+            // Reset/read per group so 2001-band jobs cannot wrap uint32 GPU
+            // counters. The inexpensive 128-byte transfer feeds uint64 totals.
+            const auto groupStats = readScatteringStats(modelio);
+            for (size_t index = 0; index < scatteringStats.size(); ++index) {
+                auto& total = scatteringStats[index];
+                const auto& value = groupStats[index];
+                total.maxStepTruncations += value.maxStepTruncations;
+                total.transmittanceStops += value.transmittanceStops;
+                total.tracedRays += value.tracedRays;
+                total.reserved += value.reserved;
+                total.absorbedShortwave += value.absorbedShortwave;
+                total.absorbedPar += value.absorbedPar;
+                total.transmittanceResidual += value.transmittanceResidual;
+                total.truncatedResidual += value.truncatedResidual;
+            }
+            first = end;
+        }
+    } else {
+        submit(modelio, VoxelEBStage::diffuseVNIR, voxelSize1D, std::nullopt, std::nullopt);
+        waitFence(modelio);
+    }
+    const double shortwaveMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - shortwaveBegin).count();
+    writeScatteringStats(modelio, scatteringStats, shortwaveMs, orderMilliseconds,
+        !modelio->newShortwaveScattering);
 
     submit(modelio, VoxelEBStage::directTIR, voxelSize1D, std::nullopt, std::nullopt);
     waitFence(modelio);
@@ -97,6 +286,10 @@ bool Command::runEB(std::shared_ptr<VoxelebIO> &modelio){
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
 
+    setting.energyFinalize = 0;
+    modelio->energyIterations = 0;
+    modelio->energyFinalUnconvergedStateCount = 0;
+    modelio->energyFinalized = false;
     for(int kiter = 0;kiter < 50; kiter++) {
 
 
@@ -126,6 +319,7 @@ bool Command::runEB(std::shared_ptr<VoxelebIO> &modelio){
 
         submit(modelio, VoxelEBStage::budget, voxelSize1D, std::nullopt, std::nullopt);
         waitFence(modelio);
+        modelio->energyIterations = kiter + 1;
         if(kiter >= 2 && readEnergyState(modelio, stateReadback) == 0U) {
             break;
         }
@@ -135,6 +329,25 @@ bool Command::runEB(std::shared_ptr<VoxelebIO> &modelio){
         //--------------------------------------------------
 
     }
+    // budget updated temperature last. Refresh radiation, physiology and
+    // exchange fluxes at that final temperature before advancing history.
+    // The final budget dispatch only writes G/checks residuals; it cannot
+    // make another temperature update or advance the physical time node.
+    submit(modelio, VoxelEBStage::diffuseTIR, voxelSize1D, std::nullopt, std::nullopt);
+    waitFence(modelio);
+    submit(modelio, VoxelEBStage::aero, voxelSize1D, std::nullopt, std::nullopt);
+    waitFence(modelio);
+    submit(modelio, VoxelEBStage::bio, voxelSize1D, std::nullopt, std::nullopt);
+    waitFence(modelio);
+    submit(modelio, VoxelEBStage::evapo, voxelSize1D, std::nullopt, std::nullopt);
+    waitFence(modelio);
+    clearEnergyState(modelio);
+    setting.energyFinalize = 1;
+    submit(modelio, VoxelEBStage::budget, voxelSize1D, std::nullopt, std::nullopt);
+    waitFence(modelio);
+    modelio->energyFinalUnconvergedStateCount = readEnergyState(modelio, stateReadback);
+    modelio->energyFinalized = true;
+    setting.energyFinalize = 0;
     modelio->m_pAlloc->destroy(stateReadback);
 
     submit(modelio, VoxelEBStage::updateTp, voxelSize1D, std::nullopt, std::nullopt);
@@ -305,6 +518,13 @@ void Command::submit(std::shared_ptr<VoxelebIO> &modelio, VoxelEBStage stage, gl
 //    beginInfo.pInheritanceInfo = nullptr;
 //    vkBeginCommandBuffer(cmdBuf, &beginInfo);
 
+    // Queue/fence completion alone does not make previous SSBO writes visible
+    // to this dispatch. This also orders the previous scattering pass globally.
+    VkMemoryBarrier memoryBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    memoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmdBuf, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
     // Dispatching the shader only for the other;
     recordCommandBuffer(cmdBuf, descSet, pipelineLayout, pipeline, setting );
     vkCmdDispatch(cmdBuf, dispatchSize.x, dispatchSize.y, dispatchSize.z);

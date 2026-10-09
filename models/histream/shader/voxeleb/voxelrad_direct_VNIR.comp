@@ -74,11 +74,9 @@ void main()
     float cosSolar = abs(solarDirection.y);
     float alpha_toSolar = voxelDirs[bufferId0].solar;
     int kstep = max(setting.n_jump, 1);
-    int step_num = (NUM_VNIR + kstep - 1) / kstep;
-    for(int kbandi = 0; kbandi < step_num; kbandi++)
+    for(int kband_start = 0; kband_start < NUM_VNIR;)
     {
-        int kband_start = kbandi * kstep;
-        int kband_end = min(kband_start + kstep, NUM_VNIR);
+        int kband_end = shortwaveGroupEnd(kband_start, kstep, NUM_VNIR);
         int kband_center = (kband_start + kband_end - 1) / 2;
         float directFraction = 0.0;
         for(int kband = kband_start; kband < kband_end; kband++)
@@ -142,10 +140,11 @@ void main()
         // only for band from 400 nm to 700 nm 
         if((atomConds[kband_center].wavelength>=400) && (atomConds[kband_center].wavelength<=700))
         {
-            float pnet = rad * atomConds[kband_center].wavelength * 1e-3 /(AHC);
+            float pnet = absorbedParPhotonFlux(rad, atomConds[kband_center].wavelength);
             atomicAdd(voxelPnets[bufferId0].directPnet, pnet,
                 gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
         }
+        kband_start = kband_end;
     }
 
 }

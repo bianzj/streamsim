@@ -491,6 +491,22 @@ bool Buffer::createBuffer(std::shared_ptr<VoxelebIO> &voxellstio){
     std::cout << "RADIANCE_BUFFER\tbytes=" << radianceBytes
               << "\taddress=" << voxellstio->setting.radianceAddress << std::endl;
 
+    if (voxellstio->newShortwaveScattering) {
+        constexpr VkDeviceSize statsBytes = 4 * sizeof(ScatteringOrderStats);
+        voxellstio->m_pScatteringStats = std::make_shared<nvvk::Buffer>(m_pAlloc->createBuffer(
+            statsBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
+        if (!voxellstio->m_pScatteringStats->buffer) {
+            throw std::runtime_error("Cannot allocate shortwave scattering diagnostics");
+        }
+        voxellstio->setting.scatteringStatsAddress = nvvk::getBufferDeviceAddress(
+            m_device, voxellstio->m_pScatteringStats->buffer);
+        if (!voxellstio->setting.scatteringStatsAddress) {
+            throw std::runtime_error("Shortwave scattering diagnostics address is null");
+        }
+    }
+
     // netRad
     VkCommandBuffer cmdBufNetRad = cmdGen.createCommandBuffer();
     std::vector<VoxelNetRad> voxelNetRads(n_voxel, VoxelNetRad{0, 0, 0, 0});
@@ -503,7 +519,7 @@ bool Buffer::createBuffer(std::shared_ptr<VoxelebIO> &voxellstio){
     VkCommandBuffer cmdBufPnet = cmdGen.createCommandBuffer();
     std::vector<VoxelPnet> voxelPnets(n_voxel, VoxelPnet{0, 0});
     voxelio->m_pPnetBuffer = std::make_shared<nvvk::Buffer>(m_pAlloc->createBuffer(cmdBufPnet, voxelPnets,
-                                                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                                                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
     cmdGen.submitAndWait(cmdBufPnet);
 
@@ -570,7 +586,7 @@ bool Buffer::createBuffer(std::shared_ptr<VoxelebIO> &voxellstio){
 
     // rss
     voxelio->m_pRssBuffer = std::make_shared<nvvk::Buffer>(m_pAlloc->createBuffer(n_voxel * sizeof(VoxelRss),
-                                                                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                                                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                                                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
 
     ///--------------------------------------------------------------------
@@ -723,6 +739,7 @@ void Buffer::destroy(std::shared_ptr<VoxelebIO> &voxellstio){
     }
 
     m_pAlloc->destroy(*(voxelio->m_pDirBuffer));
+    if (voxellstio->m_pScatteringStats) m_pAlloc->destroy(*voxellstio->m_pScatteringStats);
     voxellstio->m_radianceAllocator->destroy(*(voxelio->m_pRadsBuffer));
     voxellstio->m_radianceAllocator.reset();
     m_pAlloc->destroy(*(voxelio->m_pNetRadBuffer));

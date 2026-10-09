@@ -442,34 +442,18 @@ int Utils::saveImage(std::string outfilepath, std::vector<std::vector<float>> &c
 
 std::vector<std::string> Utils::splitt(std::string& s, std::string& deli)
 {
-	// std::vector <std::string> ret;
-	// int last = 0;
-	// int index = s.find_first_of(deli, last);
-	// int endx = s.find_last_not_of(deli);
-	// std::string subpart;
-	// while (index != int(std::string::npos))
-	// {
-	// 	subpart = s.substr(last, index - last);
-	// 	if (subpart.size() != 0) ret.push_back(subpart);
-	// 	last = index + 1;
-	// 	index = s.find_first_of(deli, last);
-	// }
-	// if (endx - last > 0) ret.push_back(s.substr(last, endx));
-	// return ret;
-	std::vector <std::string> ret;
-	int last = 0;
-	int index = s.find_first_of(deli, last);
-	int endx = s.find_last_not_of(deli);
-	std::string subpart;
-	while (index != int(std::string::npos))
-	{
-		subpart = s.substr(last, index - last);
-		if (subpart.size() != 0) ret.push_back(subpart);
-		last = index + 1;
-		index = s.find_first_of(deli, last);
-	}
-	if (endx - last >= 0) ret.push_back(s.substr(last, endx));
-	return ret;
+    // Delimiters are a set of characters; retain the existing empty-field
+    // skipping contract without truncating a single-character final token.
+    std::vector<std::string> fields;
+    size_t first = s.find_first_not_of(deli);
+    while (first != std::string::npos)
+    {
+        const size_t end = s.find_first_of(deli, first);
+        fields.push_back(s.substr(first, end == std::string::npos ? end : end - first));
+        if (end == std::string::npos) break;
+        first = s.find_first_not_of(deli, end);
+    }
+    return fields;
 }
 
 float Utils::expint(float x)

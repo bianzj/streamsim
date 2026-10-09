@@ -109,22 +109,29 @@ void main()
         beta = leafBios[bioId].beta;
         leafM = leafBios[bioId].leafM;
         Tyear = leafBios[bioId].Tyear;
+		kv = leafBios[bioId].kV;
+		stress = leafBios[bioId].stressfactor;
 		hcmax = canopy.height;
 
-        xl = (hcmax - voxelPos0.y*scale)*(-1.0)/hcmax;
+        bool leafParametersValid = biochemicalFinite(qLs) && qLs >= 0.0 && qLs <= 1.0 &&
+            biochemicalFinite(NPQs) && NPQs >= 0.0 &&
+            biochemicalFinite(vcmax) && vcmax >= 0.0 &&
+            biochemicalFinite(Rdparam) && Rdparam >= 0.0 &&
+            biochemicalFinite(beta) && beta >= 0.0 && beta <= 1.0 &&
+            biochemicalFinite(leafM) && leafM >= 0.0 &&
+            biochemicalFinite(kv) && kv >= 0.0 && biochemicalFinite(Tyear) &&
+            biochemicalFinite(stress) && stress >= 0.0 && stress <= 1.0 &&
+            biochemicalFinite(hcmax) && hcmax > 0.0 && (Type == 3.0 || Type == 4.0);
+
+        xl = leafParametersValid ? (hcmax - voxelPos0.y*scale)*(-1.0)/hcmax : 0.0;
 		xl = clamp(xl,-1,0);
         Vcmo = vcmax * exp(kv*xl);
  
         float Tsunlit,Tshaded;
-        if(voxelTempes[bufferId0].sunlit < 100)
-        {
-            Tsunlit = voxelTempes[bufferId0].sunlit +273.15;
-            Tshaded = voxelTempes[bufferId0].shaded + 273.15;
-        }else
-        {
-            Tsunlit = voxelTempes[bufferId0].sunlit;
-            Tshaded = voxelTempes[bufferId0].shaded;
-        }
+        Tsunlit = voxelTempes[bufferId0].sunlit < 100.0 ?
+            voxelTempes[bufferId0].sunlit + 273.15 : voxelTempes[bufferId0].sunlit;
+        Tshaded = voxelTempes[bufferId0].shaded < 100.0 ?
+            voxelTempes[bufferId0].shaded + 273.15 : voxelTempes[bufferId0].shaded;
 
 		for(int kt = 0;kt<2;kt++)
 		{
@@ -137,13 +144,41 @@ void main()
 				Tc = Tshaded;
 			}
 
-			RH = voxelAirs[bufferId0].es / es_fun(Tc-273.15);
-			cs = voxelAirs[bufferId0].cs * p * 1e-11;
+			RH = clamp(voxelAirs[bufferId0].es / es_fun(Tc-273.15), 0.0, 1.0);
+            float ppmToBar = p * 1e-11;
+			cs = voxelAirs[bufferId0].cs * ppmToBar;
 
 			O = ubom.meteo.Oa;
 			O = O * p * 1e-8;
 			Q = voxelPnets[bufferId0].diffusePnet;
 			if(kt == 0) Q += voxelPnets[bufferId0].directPnet;
+
+            if(!leafParametersValid || !biochemicalFinite(Tc) || Tc <= 0.0 ||
+               !biochemicalFinite(p) || p <= 0.0 ||
+               !biochemicalFinite(ppmToBar) || ppmToBar <= 0.0 ||
+               !biochemicalFinite(voxelAirs[bufferId0].es) || voxelAirs[bufferId0].es < 0.0 ||
+               !biochemicalFinite(voxelAirs[bufferId0].cs) || voxelAirs[bufferId0].cs < 0.0 ||
+               !biochemicalFinite(O) || O < 0.0 || !biochemicalFinite(RH) ||
+               !biochemicalFinite(voxelPnets[bufferId0].directPnet) || voxelPnets[bufferId0].directPnet < 0.0 ||
+               !biochemicalFinite(voxelPnets[bufferId0].diffusePnet) || voxelPnets[bufferId0].diffusePnet < 0.0 ||
+               !biochemicalFinite(Q) || Q < 0.0)
+            {
+                float missing = biochemicalMissing();
+                if(kt == 0)
+                {
+                    voxelHeatFlux[bufferId0].GPPsunlit = missing;
+                    voxelHeatFlux[bufferId0].NPPsunlit = missing;
+                    atomicStore(voxelRsss[bufferId0].sunlit, missing, gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
+                }
+                else
+                {
+                    voxelHeatFlux[bufferId0].GPPshaded = missing;
+                    voxelHeatFlux[bufferId0].NPPshaded = missing;
+                    atomicStore(voxelRsss[bufferId0].shaded, missing, gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
+                }
+                atomicStore(voxelAirs[bufferId0].ci, missing, gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
+                continue;
+            }
 
 			SCOOP = 2862;
 			Rdopt = Rdparam * Vcmo;
@@ -276,7 +311,7 @@ void main()
 																	//---------------------------------------------------------------------------------------------------------
 																	//% Calculation of electron transport rate
 			Q2 = beta * Q * po0;
-			J = (Q2 + Jms - sqrt(pow((Q2 + Jms), 2) - 4 * THETA*Q2*Jms)) / (2 * THETA); // [umol e-/m2/s]    electron transport rate under light-limiting conditions
+			J = biochemicalElectronTransport(Q2, Jms, THETA);
 
 																						//---------------------------------------------------------------------------------------------------------
 																						//% Calculation of net photosynthesis
@@ -284,23 +319,22 @@ void main()
 			{
 
 				GSTAR = 0.5*O / SCO;                             // [bar]             CO2 compensation point in the absence of mitochondrial respiration
-				Ci = cs*(1 - 1.6 / (leafBios[bioId].leafM*RH*stress));
-				if (Ci<GSTAR) Ci = GSTAR;
+				Ci = biochemicalIntercellularCO2(cs, GSTAR, leafM, RH, stress);
 				// [bar]             intercellular CO2 concentration from Ball-Berry model (Ball et al. 1987)
 				Cc = Ci;                                        // [bar]             CO2 concentration at carboxylation sites (neglecting mesophyll resistance)
 
-				Wc = Vcmax * Cc / (Cc + Kc * (1 + O / Ko));     // [umol/m2/s]       RuBP-limited carboxylation
-				Wj = J*Cc / (4.5*Cc + 10.5*GSTAR);            // [umol/m2/s]       electr transp-limited carboxyl
+				Wc = Cc > 0.0 ? Vcmax * Cc / (Cc + Kc * (1 + O / Ko)) : 0.0;
+				Wj = Cc > 0.0 ? J*Cc / (4.5*Cc + 10.5*GSTAR) : 0.0;
 
 				W = min(Wc, Wj);                                // [umol/m2/s]       carboxylation rate
-				Ag = (1 - GSTAR / Cc) *W;                       // [umol/m2/s]       gross photosynthesis rate
+				Ag = Cc > 0.0 ? (1 - GSTAR / Cc) *W : 0.0;
 				A = Ag - Rd;                                   // [umol/m2/s]       net photosynthesis rate
-				Ja = J*W / Wj;                                 // [umole-/m2/s]     actual linear electron transport rate
+				Ja = Wj > 0.0 ? clamp(J*W / Wj, 0.0, J) : 0.0;
 
 			}
 			else                                             // C4 species, based on von Caemmerer model (von Caemmerer 2000)
 			{
-				Ci = max(9.9e-6*(p*1e-5), cs*(1 - 1.6 / (leafBios[bioId].leafM*RH*stress)));
+				Ci = biochemicalIntercellularCO2(cs, 9.9e-6*(p*1e-5), leafM, RH, stress);
 				// [bar]             intercellular CO2 concentration from Ball-Berry model (Ball et al. 1987)
 				Cm = Ci;                                     // [bar]             mesophyll CO2 concentration (neglecting mesophyll resistance)
 				Rs = 0.5 * Rd;                               // [umol/m2/s]       bundle sheath mitochondrial respiration (von Caemmerer 2000)
@@ -325,29 +359,29 @@ void main()
 				a = 1. - dum1 * dum2;
 				b = -(dum3 + dum4 + dum5 + dum1*(dum6 + Rd*dum2));
 				c = dum4*dum3 - dum6*gbs*O + Rd*dum5;
-				Ac = (-b - sqrt(b*b - 4 * a*c)) / (2 * a);           // [umol/m2/s]       CO2-limited net photosynthesis
+				Ac = biochemicalQuadraticRoot(a, b, c, -1.0);
 
-				a = 1. - 7 / 3 * gam*dum1;
+				a = 1.0 - 7.0 / 3.0 * gam*dum1;
 				b = -(dum7 + dum9 + gbs*gam*O * 7 / 3. + dum1*gam*dum10);
 				c = dum7*dum9 - gbs*gam*O*dum10;
-				Aj = (-b - sqrt(b*b - 4 * a*c)) / (2 * a);           // [umol/m2/s]       light-limited net photosynthesis (assuming that an obligatory Q cycle operates)
+				Aj = biochemicalQuadraticRoot(a, b, c, -1.0);
 
-				if (Ac != Ac && Aj == Aj) A = Aj;
-				if (Aj != Aj && Ac == Ac) A = Ac;
-				if (Ac == Ac && Aj == Aj)  A = min(Ac, Aj);                             // [umol/m2/s]       net photosynthesis
+				A = biochemicalFinite(Ac) && biochemicalFinite(Aj) ? min(Ac, Aj) : biochemicalMissing();
 				Ag = A + Rd;                                                            // [umol/m2/s]       gross photosynthesis
 
 				Ja = J;                                      // [umole-/m2/s]     actual electron transport rate, CO2-limited
 
 
-				if (Ac == Ac && A == Ac) //IPL 03/09/2013
+				if (biochemicalFinite(A) && A == Ac && J > 0.0)
 				{
 
 					// ind=A==Ac;
-					a = x*(1 - x) / 6 / A;
-					b = (1 - x) / 3 * (gbs / A*(Cm - Rm / gbs - gam*O) - 1 - alpha*gam / 0.047) - x / 2 * (1. + Rd / A);
-					c = (1 + Rd / A)*(Rm - gbs*Cm - 7 * gbs*gam*O / 3.0) + (Rd + A)*(1 - 7 * alpha*gam / 3 / 0.047);
-					Ja = (-b + sqrt(b*b - 4 * a*c)) / (2 * a);            // [umole-/m2/s]     actual electron transport rate, CO2-limited
+                    // Multiply the whole polynomial by A before solving. This
+                    // removes the artificial 1/A singularity at compensation.
+					a = x*(1 - x) / 6.0;
+					b = (1 - x) / 3.0 * (gbs*Cm - Rm - gbs*gam*O - A*(1 + alpha*gam / 0.047)) - x / 2.0 * (A + Rd);
+					c = (A + Rd)*(Rm - gbs*Cm - 7.0*gbs*gam*O / 3.0) + A*(Rd + A)*(1 - 7.0*alpha*gam / 3.0 / 0.047);
+					Ja = clamp(biochemicalQuadraticRoot(a, b, c, A < 0.0 ? -1.0 : 1.0), 0.0, J);
 
 				}
 
@@ -367,19 +401,53 @@ void main()
 
 			}
 
+            // Closed stomata and darkness have zero gross assimilation while
+            // mitochondrial respiration continues. This also covers qLs=0.
+            if(Q == 0.0 || J == 0.0 || leafM == 0.0 || RH == 0.0 || stress == 0.0 || cs == 0.0)
+            {
+                Ag = 0.0;
+                A = -Rd;
+                Ja = 0.0;
+            }
+            rss = biochemicalResistance(cs, Ci, A, rhoa, Mair, p);
+            float ciPpm = Ci / ppmToBar;
+            bool ratesValid = biochemicalFinite(Vcmo) && Vcmo >= 0.0 &&
+                biochemicalFinite(Vcmax) && Vcmax >= 0.0 &&
+                biochemicalFinite(Jmax) && Jmax >= 0.0 &&
+                biochemicalFinite(po0) && po0 >= 0.0 && po0 <= 1.0 &&
+                biochemicalFinite(THETA) && THETA >= 0.0 && THETA <= 1.0 &&
+                biochemicalFinite(cs) && cs >= 0.0 && biochemicalFinite(RH) &&
+                biochemicalFinite(SCO) && SCO > 0.0 &&
+                biochemicalFinite(Kc) && Kc > 0.0 && biochemicalFinite(Ko) && Ko > 0.0 &&
+                biochemicalFinite(kNPQs) && biochemicalFinite(kDs) &&
+                (Type == 3.0 || (biochemicalFinite(Vpmax) && Vpmax >= 0.0 &&
+                                 biochemicalFinite(Kp) && Kp > 0.0));
+            bool resultValid = ratesValid && biochemicalFinite(Ag) && biochemicalFinite(A) &&
+                biochemicalFinite(Ci) && biochemicalFinite(ciPpm) && ciPpm >= 0.0 &&
+                biochemicalFinite(rss) && rss >= 0.0 &&
+                biochemicalFinite(Rd) && Rd >= 0.0 && biochemicalFinite(J) && biochemicalFinite(Ja);
+            if(!resultValid)
+            {
+                Ag = biochemicalMissing();
+                A = biochemicalMissing();
+                Ci = biochemicalMissing();
+                ciPpm = biochemicalMissing();
+                rss = biochemicalMissing();
+            }
+
 			if(kt == 0)
 			{
-				voxelHeatFlux[bufferId0].GPPsunlit = max(0.0, Ag);
+				voxelHeatFlux[bufferId0].GPPsunlit = resultValid ? max(0.0, Ag) : biochemicalMissing();
 				voxelHeatFlux[bufferId0].NPPsunlit = A;
 			}else
 			{
-				voxelHeatFlux[bufferId0].GPPshaded = max(0.0, Ag);
+				voxelHeatFlux[bufferId0].GPPshaded = resultValid ? max(0.0, Ag) : biochemicalMissing();
 				voxelHeatFlux[bufferId0].NPPshaded = A;
 			}
 
 			//---------------------------------------------------------------------------------------------------------
 			//% Calculation of PSII quantum yield and fluorescence
-			ps = Ja / (beta*Q);                            // [mol e-/E]    PSII photochemical quantum yield
+			ps = beta*Q > 0.0 ? Ja / (beta*Q) : 0.0;
 														//fs   = MD12(ps,Ja,Jms,kps,kf,kds,kDs);            // [E/E]         PSII fluorescence yield
 														// eta    = fs/fo0;                                   // []            scaled PSII fluorescence yield
 
@@ -387,22 +455,14 @@ void main()
 														//% JP add
 														// [g mol-1]      molecular mass of dry air
 
-			rss = 0.625*(cs - Ci) / A *rhoa / Mair*1E3    * 1e6 / p * 1E5;
-
-			if (A <= 0) rss = 0.625*1E6;
-
-
-			Ci = Ci*1e6 / p * 1E5;
-
-
 			if(kt == 0)
 			{
 				atomicStore( voxelRsss[bufferId0].sunlit,rss, gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
-				atomicStore( voxelAirs[bufferId0].ci,Ci, gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
+				atomicStore( voxelAirs[bufferId0].ci,ciPpm, gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
 			}else
 			{
 				atomicStore( voxelRsss[bufferId0].shaded,rss, gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
-				atomicStore( voxelAirs[bufferId0].ci,Ci, gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
+				atomicStore( voxelAirs[bufferId0].ci,ciPpm, gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
 			}
 
 		}

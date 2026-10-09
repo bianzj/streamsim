@@ -41,6 +41,7 @@ void main()
     //------------------------------------------------------------
     uint bufferId = uint(gl_GlobalInvocationID.x);
     if(bufferId >= uint(setting.voxelCount)) return;
+    if(voxelLinks[bufferId].isValid == 0) return;
     //voxelRes: voxel number in 3 dimentions
     ivec3 voxelRes = ivec3(setting.voxelSize);
     uint instanceId = voxelLinks[bufferId].instanceId;
@@ -143,6 +144,8 @@ void main()
     {
         Gsunlit = netSunlitRad * GST;
         Gshaded = netShadedRad * GST;
+        voxelHeatFlux[bufferId].Gsunlit = Gsunlit;
+        voxelHeatFlux[bufferId].Gshaded = Gshaded;
     }
 
     //-------------------------------------------------------
@@ -307,6 +310,19 @@ void main()
     int count=0;
     if (abs(diffSunlitRad) > RAD_THRESHOLD) count = count + 1;
     if (abs(diffShadedRad) > RAD_THRESHOLD) count = count + 1;
+
+    if(setting.energyFinalize != 0)
+    {
+        // All input fluxes now use the exported temperatures. Retain these
+        // temperatures and assess closure independently of the last update.
+        // A non-finite residual cannot pass the final closure check.
+        count = int(isnan(diffSunlitRad) || isinf(diffSunlitRad) ||
+                    abs(diffSunlitRad) > RAD_THRESHOLD) +
+                int(isnan(diffShadedRad) || isinf(diffShadedRad) ||
+                    abs(diffShadedRad) > RAD_THRESHOLD);
+        atomicAdd(ebState.count,count,gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
+        return;
+    }
 
 
 

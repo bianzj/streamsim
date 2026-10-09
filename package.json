@@ -1,6 +1,6 @@
 {
   "name": "streamsim",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "private": true,
   "license": "SEE LICENSE IN LICENSE",
   "description": "Three.js web interface for HiStream",
@@ -16,6 +16,8 @@
     "validate:assets": "node tools/validate-obj-library.mjs",
     "lut:modtran": "node tools/modtran-lut.mjs",
     "test:atmosphere": "node tools/test-modtran-lut.mjs",
+    "test:physiology": "node tools/test-par-units.mjs && node tools/test-biochemical-core.mjs",
+    "test:physiology:engine": "node tools/test-physiology-engine.mjs",
     "smoke:atmosphere": "node tools/smoke-atmosphere.mjs",
     "smoke:atmosphere:facet": "node tools/smoke-atmosphere-facet.mjs",
     "desktop": "electron .",

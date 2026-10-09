@@ -7,7 +7,9 @@
 #include <cctype>
 #include <cmath>
 #include <limits>
+#include <sstream>
 #include "fileio.h"
+#include "radiation_spectrum.h"
 #pragma once
 //#include "tinyxml.h"
 #include "structs.h"
@@ -940,6 +942,14 @@ SettingXml FileIO::readSettingXML(TiXmlNode *controlNode, Mode mode){
         settingxml.vegetationTemperatureMethod = std::clamp(
             stoi(controlNode->FirstChildElement("vegetationTemperatureMethod")->GetText()), 0, 1);
     }
+    if (sonExists("shortwaveScatteringOrders", controlNode->ToElement())) {
+        settingxml.shortwaveScatteringOrders = std::clamp(
+            stoi(controlNode->FirstChildElement("shortwaveScatteringOrders")->GetText()), 1, 3);
+    }
+    if (sonExists("radiationMaxSteps", controlNode->ToElement())) {
+        settingxml.radiationMaxSteps = std::clamp(
+            stoi(controlNode->FirstChildElement("radiationMaxSteps")->GetText()), 1, 4096);
+    }
     if (sonExists("isUAVtrave", controlNode->ToElement())){
         settingxml.isUAVtrave = stoi(controlNode->FirstChildElement("isUAVtrave")->GetText());
     }
@@ -1437,11 +1447,11 @@ void FileIO::readMeteo(std::shared_ptr<DefinedIO> &defineio,int & n_node,
     if (!std::getline(infile, line)) {
         throw std::runtime_error("Meteorology file is empty: " + meteofile);
     }
-    fields = Utils::splitt(line, deli);
-    if (fields.empty()) {
+    std::istringstream header(line);
+    int fileNodeCount = 0;
+    if (!(header >> fileNodeCount) || (!header.eof() && !std::isspace(static_cast<unsigned char>(header.peek())))) {
         throw std::runtime_error("Meteorology header is invalid: " + meteofile);
     }
-    const int fileNodeCount = std::stoi(fields[0].c_str());
     if (fileNodeCount <= 0) {
         throw std::runtime_error("Meteorology node count must be positive");
     }
@@ -1461,21 +1471,21 @@ void FileIO::readMeteo(std::shared_ptr<DefinedIO> &defineio,int & n_node,
     int rowIndex = 0;
     while (std::getline(infile, line))
     {
-        if (line.empty()) continue;
-        fields = Utils::splitt(line, deli);
-        if (fields.size() < 7) {
-            throw std::runtime_error("Meteorology node " + std::to_string(rowIndex) +
-                                     " requires seven fields");
-        }
-
+        if (line.find_first_not_of(" \t\r\n") == std::string::npos) continue;
+        std::istringstream row(line);
         Meteo mi;
-        mi.t = std::atof(fields[0].c_str());
-        mi.Ta = std::atof(fields[1].c_str());
-        mi.ea = std::atof(fields[2].c_str());
-        mi.p = std::atof(fields[3].c_str());
-        mi.u = std::atof(fields[4].c_str());
-        mi.Rin = std::atof(fields[5].c_str());
-        mi.Rli = std::atof(fields[6].c_str());
+        if (!(row >> mi.t >> mi.Ta >> mi.ea >> mi.p >> mi.u >> mi.Rin >> mi.Rli) ||
+            (!row.eof() && !std::isspace(static_cast<unsigned char>(row.peek())))) {
+            throw std::runtime_error("Meteorology node " + std::to_string(rowIndex) +
+                                     " requires seven numeric fields");
+        }
+        if (!std::isfinite(mi.t) || !std::isfinite(mi.Ta) ||
+            !std::isfinite(mi.ea) || !std::isfinite(mi.p) ||
+            !std::isfinite(mi.u) || !std::isfinite(mi.Rin) || !std::isfinite(mi.Rli) ||
+            mi.p <= 0.0f || mi.ea < 0.0f || mi.u < 0.0f || mi.Rin < 0.0f || mi.Rli < 0.0f) {
+            throw std::runtime_error("Meteorology node " + std::to_string(rowIndex) +
+                                     " has non-finite or invalid physical values");
+        }
         mi.sm = sm;
         mi.z = z;
 //        mi.ea = ea;
@@ -1514,15 +1524,11 @@ void FileIO::readMeteo(std::shared_ptr<DefinedIO> &defineio,int & n_node,
     ///-----------------------------------------------------------------------------
     ///   Atmospheric condition in radiative transfer domain
     ///----------------------------------------------------------------------------
-    float  *esun_, *esky_, *fesky_, *fesun_;
-    int num = 1;
-    // wave_ = Utils::infile2num(predifineDir+'Esk', 0, 0, num);
-    esun_ = Utils::readascfile(m_pVoxelebXml->atomcondxml.rinfile, 0, 0, num);
-    esky_ = Utils::readascfile(m_pVoxelebXml->atomcondxml.rlifile, 0, 0, num);
-    fesky_ = new float[num];
-    fesun_ = new float[num];
+    const auto esun_ = readIncidentSpectrum(m_pVoxelebXml->atomcondxml.rinfile, N1 + N2);
+    const auto esky_ = readIncidentSpectrum(m_pVoxelebXml->atomcondxml.rlifile, N1 + N2);
+    std::vector<float> fesky_(N1 + N2), fesun_(N1 + N2);
 
-    float TsEsky = 0, TlEsky = 0, TlEsun = 0, TsEsun = 0, tstot = 0, tltot = 0, temp1, temp2, step;
+    float TsEsky = 0, TlEsky = 0, TlEsun = 0, TsEsun = 0, tltot = 0, temp1, temp2, step;
     int b1 = N1;
     int b2 = N1+N2;
 
@@ -1535,11 +1541,14 @@ void FileIO::readMeteo(std::shared_ptr<DefinedIO> &defineio,int & n_node,
         TsEsky += temp1 * step;
         TsEsun += temp2 * step;
     }
-    tstot = (TsEsky + TsEsun) * 0.001;
+    // Rin is total shortwave irradiance. Each retained spectral shape receives
+    // its configured fraction, including the pure-direct/pure-diffuse limits.
+    const float directFraction = m_pVoxelebXml->lightxml.direct;
     for (int i = 0; i < b1; i++)
     {
-        fesky_[i] = esky_[i] / tstot;
-        fesun_[i] = esun_[i] / tstot;
+        const float endpointWeight = i == 0 || i == b1 - 1 ? 0.5f : 1.0f;
+        fesky_[i] = endpointWeight * normalizedShortwaveCoefficient(esky_[i], TsEsky, 1.0f - directFraction);
+        fesun_[i] = endpointWeight * normalizedShortwaveCoefficient(esun_[i], TsEsun, directFraction);
     }
     // ����
     for (int j = b1; j < b2 - 1; j++)
@@ -1551,6 +1560,9 @@ void FileIO::readMeteo(std::shared_ptr<DefinedIO> &defineio,int & n_node,
         TlEsun += temp2 * step;
     }
     tltot = (TlEsky + TlEsun) * 0.001;
+    if (!std::isfinite(tltot) || tltot <= 0.0f) {
+        throw std::runtime_error("Incident longwave spectrum has no finite positive integral");
+    }
     for (int i = b1; i < b2; i++)
     {
         fesky_[i] = esky_[i] / tltot;
@@ -1562,11 +1574,6 @@ void FileIO::readMeteo(std::shared_ptr<DefinedIO> &defineio,int & n_node,
         wavesets[i].direct = fesun_[i];
         wavesets[i].diffuse = fesky_[i];
     }
-
-    delete[] fesky_;
-    delete[] fesun_;
-    delete[] esun_;
-    delete[] esky_;
 
 }
 

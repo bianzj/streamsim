@@ -49,6 +49,12 @@ struct VoxellstSetting
 	int skyboxEnabled;
 #if defined(VOXELLST)
 	uint64_t radianceAddress;
+	int scatteringBandStart;
+	int scatteringBandEnd;
+	int scatteringOrder;
+	int scatteringStage;
+	uint64_t scatteringStatsAddress;
+	int energyFinalize;
 #endif
 };
 

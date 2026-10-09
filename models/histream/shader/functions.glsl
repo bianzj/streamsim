@@ -242,6 +242,76 @@ float sel_root(float a,float b,float c,float design)
     return x;
 }
 
+// Scalar helpers for the Farquhar/von Caemmerer solver. Invalid equations
+// remain missing values rather than being replaced with plausible carbon flux.
+float biochemicalMissing()
+{
+    return uintBitsToFloat(0x7fc00000u);
+}
+
+bool biochemicalFinite(float value)
+{
+    return !isnan(value) && !isinf(value);
+}
+
+float biochemicalQuadraticRoot(float a, float b, float c, float design)
+{
+    if(!biochemicalFinite(a) || !biochemicalFinite(b) || !biochemicalFinite(c))
+        return biochemicalMissing();
+    if(a == 0.0)
+        return b != 0.0 ? -c / b : biochemicalMissing();
+    float coefficientScale = max(abs(a), max(abs(b), abs(c)));
+    a /= coefficientScale;
+    b /= coefficientScale;
+    c /= coefficientScale;
+    float bSquared = b * b;
+    float fourAC = 4.0 * a * c;
+    float discriminant = bSquared - fourAC;
+    // Only roundoff-sized negative discriminants may become a double root.
+    float tolerance = 8.0 * 1.192092896e-7 * (bSquared + abs(fourAC));
+    if(discriminant < -tolerance) return biochemicalMissing();
+    float radical = sqrt(max(discriminant, 0.0));
+    if(radical == 0.0) return -b / (2.0 * a);
+    float q = -0.5 * (b + (b < 0.0 ? -radical : radical));
+    // q/a is the non-cancelling root; c/q is its complementary root.
+    bool useQ = (design > 0.0) == (b < 0.0);
+    return useQ ? q / a : c / q;
+}
+
+float biochemicalElectronTransport(float absorbedExcitation, float capacity, float theta)
+{
+    if(!biochemicalFinite(absorbedExcitation) || !biochemicalFinite(capacity) ||
+       !biochemicalFinite(theta) || absorbedExcitation < 0.0 || capacity < 0.0 ||
+       theta < 0.0 || theta > 1.0) return biochemicalMissing();
+    if(absorbedExcitation == 0.0 || capacity == 0.0) return 0.0;
+    float scale = max(absorbedExcitation, capacity);
+    float excitation = absorbedExcitation / scale;
+    float maximum = capacity / scale;
+    float sum = excitation + maximum;
+    float radical = sqrt(max(sum * sum - 4.0 * theta * excitation * maximum, 0.0));
+    // Rationalized smaller root. At theta=0 this is Q2*Jms/(Q2+Jms),
+    // the exact linear limit of theta*J^2-(Q2+Jms)*J+Q2*Jms=0.
+    return scale * (2.0 * excitation * maximum / (sum + radical));
+}
+
+float biochemicalIntercellularCO2(float surfaceCO2, float lowerBound,
+                                 float slope, float relativeHumidity, float stress)
+{
+    float product = slope * relativeHumidity * stress;
+    return product > 0.0 ? max(lowerBound, surfaceCO2 * (1.0 - 1.6 / product)) : lowerBound;
+}
+
+float biochemicalResistance(float surfaceCO2, float intercellularCO2,
+                             float netAssimilation, float airDensity,
+                             float molarAirMass, float pressure)
+{
+    if(netAssimilation <= 0.0) return 625000.0;
+    // The difference is nonnegative for a photosynthesizing leaf. Do not
+    // divide by A until after testing the closed-stomata/respiration limit.
+    return 0.625 * max(surfaceCO2 - intercellularCO2, 0.0) / netAssimilation *
+           airDensity / molarAirMass * 1e3 * 1e6 / pressure * 1e5;
+}
+
 float computeA(float Ci, int Type, float g_m,float Vs_C3,float MM_consts,float Rd,float Vcmax,
                 float Gamma_star, float Je,float effcon, float atheta,float kpepcase)
 {

@@ -481,6 +481,7 @@ function setSimulationProgress(percent, stage = state.progressStage) {
 function setRunning(running) {
   state.running = running
   $('#runBtn').disabled = running
+  $('#openProjectPathBtn').disabled = running
   $('#stopBtn').disabled = !running
   $$('#modeGrid button').forEach((button) => { button.disabled = running })
   $('#drawRegionBtn').disabled = running
@@ -2478,6 +2479,48 @@ function loadXml(result) {
 }
 
 async function chooseXml() { const result = await api.chooseXml(); if (result) loadXml(result) }
+
+function renderProjectPathButton() {
+  const english = getLocale().startsWith('en')
+  $('#openProjectPathBtn').textContent = english ? 'Open Path' : '路径打开'
+  $('#projectOpenPathTitle').textContent = english ? 'Open Project by Path' : '路径打开'
+  $('#projectOpenPathLabel').textContent = english ? 'Local project.json path' : '本机 project.json 路径'
+  $('#cancelProjectOpenPathBtn').textContent = english ? 'Cancel' : '取消'
+  $('#submitProjectOpenPathBtn').textContent = english ? 'Open' : '打开'
+}
+
+function hideProjectOpenPathDialog() { $('#projectOpenPathDialog').hidden = true }
+
+function showProjectOpenPathDialog() {
+  if (state.running) {
+    toast(getLocale().startsWith('en') ? 'Unable to open project' : '无法打开工程',
+      getLocale().startsWith('en') ? 'A simulation is running.' : '模拟运行中，不能更换工程', 'error')
+    return
+  }
+  $('#projectOpenPathInput').value = state.inputPath || localStorage.getItem('histreamProject') || ''
+  $('#projectOpenPathDialog').hidden = false
+  setTimeout(() => { $('#projectOpenPathInput').focus(); $('#projectOpenPathInput').select() }, 0)
+}
+
+async function openProjectByPath(event) {
+  event.preventDefault()
+  const english = getLocale().startsWith('en')
+  const submit = $('#submitProjectOpenPathBtn')
+  try {
+    if (state.running) throw new Error(english
+      ? 'A simulation is running. Stop it before changing projects.' : '模拟运行中，不能更换工程')
+    const path = $('#projectOpenPathInput').value.trim().replace(/^"(.*)"$/, '$1')
+    if (!path) return
+    submit.disabled = true
+    const result = await api.openProject(path)
+    loadXml(result)
+    localStorage.setItem('histreamProject', result.path)
+    hideProjectOpenPathDialog()
+  } catch (error) {
+    toast(english ? 'Unable to open project' : '无法打开工程', error.message, 'error')
+    addLog(error.message, 'error')
+  } finally { submit.disabled = false }
+}
 
 async function importMeteo(file) {
   if (!file) return
@@ -6183,6 +6226,12 @@ window.addEventListener('keydown', (event) => {
   }
 })
 $('#fitBtn').addEventListener('click', fitCamera); $('#openXmlBtn').addEventListener('click', chooseXml); $('#drawerOpenBtn').addEventListener('click', chooseXml); $('#saveXmlBtn').addEventListener('click', saveXml); $('#saveAsBtn').addEventListener('click', showSaveAsDialog); $('#runBtn').addEventListener('click', runSimulation); $('#stopBtn').addEventListener('click', () => api.stop()); $('#resetBtn').addEventListener('click', resetSimulation)
+$('#openProjectPathBtn').addEventListener('click', showProjectOpenPathDialog)
+$('#projectOpenPathForm').addEventListener('submit', openProjectByPath)
+$('#cancelProjectOpenPathBtn').addEventListener('click', hideProjectOpenPathDialog)
+window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !$('#projectOpenPathDialog').hidden) hideProjectOpenPathDialog()
+})
 $('#newProjectBtn').addEventListener('click', showProjectDialog)
 $('#closeProjectBtn').addEventListener('click', hideProjectDialog)
 $('#projectDialog').addEventListener('click', (event) => { if (event.target === $('#projectDialog')) hideProjectDialog() })
@@ -6322,5 +6371,6 @@ async function init() {
   api.onSimulationEvent(handleSimulationEvent)
 }
 
-startLocalization({ onChange: () => renderInspector() })
+startLocalization({ onChange: () => { renderInspector(); renderProjectPathButton() } })
+renderProjectPathButton()
 init()

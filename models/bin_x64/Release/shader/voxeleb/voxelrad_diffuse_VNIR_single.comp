@@ -144,7 +144,7 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
 
         // add save the sky contribution
         // sky contribution: lightSet.Rli*waveSets[kband].diffuse*0.001
-        if(directioni0.y >= 0)
+        if(directioni0.y > 0.0)
         {
            float skyrad = alpha_toVoxel*Esky;
            //skyrad = 1000;
@@ -271,7 +271,15 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
       }// if vegetation
 
 
-      if (alignBufferId >= 0)
+      bool mediumBoundary = false;
+      if (alignBufferId >= 0) {
+          uint alignedMesh = instanceLinks[voxelLinks[alignBufferId].instanceId].meshId;
+          mediumBoundary = meshLinks[alignedMesh].type == TYPE_VEGETATION &&
+              isParticipatingMedium(canopies[meshLinks[alignedMesh].canopyId]);
+      }
+      // Keep a medium entry transparent; volume attenuation/scattering is
+      // evaluated for the completed segment at the next crossing.
+      if (alignBufferId >= 0 && !mediumBoundary)
       {
         //////////////////////////////
         /// facet case
@@ -351,15 +359,9 @@ bool voxel_raytracing_diffuse(vec3 voxelPos0, uint bufferId0, NanoVDBLink nanoVD
       ray.origin = OffsetRay(ray.origin, dot(ray.direction, ffnormal) > 0 ? ffnormal : -ffnormal);
     }
 
-    if((kstep >= setting.maxStep) && (alpha_toVoxel > 0.05))
-    {
-        float skyrad = alpha_toVoxel*Esky;
-        //skyrad = 0.5;
-        uint index = bufferId0*DIFFUSE_ANGLE_NUM+iangle;
-        atomicAdd(voxelRads[index].induced,
-            skyrad,
-            gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
-    }
+    // A step limit is an unresolved path, not a connection to the sky.
+    // Keep the accumulated source terms; only an actual upward miss above
+    // may supply sky illumination. Opacity and geometric offsets are unchanged.
   }
   return false;
 }
@@ -410,26 +412,21 @@ void main()
   voxelNetRads[bufferId0].diffuseVrad = 0;
   voxelPnets[bufferId0].diffusePnet = 0;
 
-  // maxIteration is scattering times.
-  // induced in primary time is calculated at solar file.
-  if(setting.maxIteration > 1)
+  // Sky illumination is present even when only one scattering is requested.
+  // This pipeline implements single scattering; repeating it does not add
+  // higher orders because its ray function never reads the previous field.
   {
 
       int kband_start = 0, kband_end = 0, kband_center;
       // Fixed shortwave samples are spaced by 1 nm; n_jump is the configured
       // spectral acceleration width in nanometres for VoxelEB.
       int kstep = max(setting.n_jump, 1);
-      int step_num = (NUM_VNIR + kstep - 1) / kstep;
       
       float EEsun = 0,EEsky =0;
-      for(int kbandi = 0; kbandi <step_num; kbandi++)
+      for(kband_start = 0; kband_start < NUM_VNIR;)
       {
-          kband_start = kbandi*kstep;
-          kband_end = kband_start+kstep;
-
-          if(kband_start >= NUM_VNIR) break;
-          if(kband_end > NUM_VNIR) kband_end = NUM_VNIR;
-          kband_center = int((kband_end + kband_start)/2);
+          kband_end = shortwaveGroupEnd(kband_start, kstep, NUM_VNIR);
+          kband_center = (kband_end + kband_start - 1) / 2;
           float Esun = 0, Esky = 0, wavelengthwidth = 0;
           float temp=0;
           for(int kbandj = kband_start; kbandj < kband_end; kbandj++)
@@ -442,9 +439,9 @@ void main()
               temp = temp +1;
           }
 
-          for(int kiter=0;kiter< 5;kiter++)
           {
-              voxel_raytracing_diffuse(voxelPos0, bufferId0, nanoVDBLink, kiter,kband_center,Esun,Esky,kstep);
+              int kiter = 0;
+              voxel_raytracing_diffuse(voxelPos0, bufferId0, nanoVDBLink, kiter,kband_center,Esun,Esky,kband_end-kband_start);
               // Directional records belong exclusively to bufferId0; no
               // other invocation supplies an iterative radiation value.
               // Tail and invalid lanes may return before this memory fence.
@@ -479,10 +476,11 @@ void main()
           if(atomConds[kband_center].wavelength >= 400.0 &&
              atomConds[kband_center].wavelength <= 700.0)
           {
-              float pnet = rads * atomConds[kband_center].wavelength * 1e-3 / AHC;
+              float pnet = absorbedParPhotonFlux(rads, atomConds[kband_center].wavelength);
               atomicAdd(voxelPnets[bufferId0].diffusePnet, pnet,
                   gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);
           }
+          kband_start = kband_end;
       }
 
 // atomicStore(voxelNetRads[bufferId0].directVrad, radSum, gl_ScopeDevice,gl_StorageSemanticsBuffer,gl_SemanticsRelaxed);

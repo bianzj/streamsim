@@ -96,10 +96,34 @@ struct alignas(32)  VoxelLstSetting
     int skyboxEnabled{0};
     // City scenes exceed Vulkan's storage-buffer descriptor range.
     uint64_t radianceAddress{0};
+    int scatteringBandStart{0};
+    int scatteringBandEnd{0};
+    int scatteringOrder{0};
+    int scatteringStage{0};
+    uint64_t scatteringStatsAddress{0};
+    // Evaluate final fluxes/residuals without another temperature update.
+    int energyFinalize{0};
 };
 
 static_assert(offsetof(VoxelLstSetting, radianceAddress) == 80,
               "VoxelLstSetting must match the GLSL push-constant layout");
+static_assert(offsetof(VoxelLstSetting, scatteringBandStart) == 88);
+static_assert(offsetof(VoxelLstSetting, scatteringStatsAddress) == 104);
+static_assert(offsetof(VoxelLstSetting, energyFinalize) == 112);
+static_assert(sizeof(VoxelLstSetting) == 128);
+
+// Three scattering orders plus the unscattered sky; matches scatter_stats.glsl.
+struct ScatteringOrderStats {
+    uint32_t maxStepTruncations{0};
+    uint32_t transmittanceStops{0};
+    uint32_t tracedRays{0};
+    uint32_t reserved{0};
+    float absorbedShortwave{0};
+    float absorbedPar{0};
+    float transmittanceResidual{0};
+    float truncatedResidual{0};
+};
+static_assert(sizeof(ScatteringOrderStats) == 32);
 
 struct alignas(32)  VoxelRTSetting
 {

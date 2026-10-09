@@ -49,6 +49,7 @@ bool Pipeline::createPipeline(std::shared_ptr<VoxelebIO> &modelio)
             {VoxelEBStage::directVNIR,  baseDirectory + "/shader/voxeleb/voxelrad_direct_VNIR.comp.spv"},
             {VoxelEBStage::directTIR,   baseDirectory + "/shader/voxeleb/voxelrad_direct_TIR.comp.spv"},
             {VoxelEBStage::diffuseVNIR, baseDirectory + "/shader/voxeleb/voxelrad_diffuse_VNIR_single.comp.spv"},
+            {VoxelEBStage::scatteringVNIR, baseDirectory + "/shader/voxeleb/voxelrad_scattering_VNIR.comp.spv"},
             {VoxelEBStage::diffuseTIR,  baseDirectory + "/shader/voxeleb/voxelrad_diffuse_TIR_single.comp.spv"},
             {VoxelEBStage::budget,      baseDirectory + "/shader/voxeleb/budget.comp.spv"},
             {VoxelEBStage::evapo,       baseDirectory + "/shader/voxeleb/evapo.comp.spv"},

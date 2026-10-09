@@ -175,7 +175,9 @@ void main()
         {
             if(soilSets[bioId].method == 0)
             {
-                Gst = GST;
+                // GST is dimensionless. budget.comp computes/writes GST*Rn
+                // after the independent net radiation is available.
+                Gst = 0.0;
             }
             else if(soilSets[bioId].method == 1){
                 // soil thermal inertial

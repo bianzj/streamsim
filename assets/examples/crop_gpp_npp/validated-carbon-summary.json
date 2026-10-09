@@ -1,5 +1,8 @@
 {
-  "source": "StreamSim VoxelEB validation run",
+  "source": "Historical StreamSim VoxelEB run before 1.1.2",
+  "status": "historical-reference-requires-rerun",
+  "currentEngineValidated": false,
+  "note": "Rerun project.json with the current engine; PAR and direct/diffuse normalization were corrected in 1.1.2. These rows are not current-version validation or field observations.",
   "method": "Ball-Berry",
   "unit": "umol CO2 m-2 leaf s-1",
   "vegetationVoxels": 1872,

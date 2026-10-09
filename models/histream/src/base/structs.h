@@ -48,6 +48,7 @@ enum class VoxelEBStage
     directVNIR,
     directTIR,
     diffuseVNIR,
+    scatteringVNIR,
     diffuseTIR,
     bio,
     aero,
@@ -280,6 +281,8 @@ struct SettingXml
     bool skyboxEnabled{false};
     bool acceleratedRadiationSolver{false};
     int spectralAccelerationWidth{100};
+    int shortwaveScatteringOrders{1};
+    int radiationMaxSteps{64};
     // 0: Ball-Berry empirical coupling; 1: Farquhar mechanistic coupling.
     int vegetationTemperatureMethod{0};
 

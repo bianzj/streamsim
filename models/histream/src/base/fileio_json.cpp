@@ -209,6 +209,10 @@ void configureCommon(FileIO& io, const ProjectJson& project, Mode mode) {
     settings.spectralAccelerationWidth = std::clamp(
         ProjectJson::integer(control, "spectralAccelerationWidth", 100), 1, 1000);
     settings.vegetationTemperatureMethod = std::clamp(ProjectJson::integer(control, "vegetationTemperatureMethod", 0), 0, 1);
+    settings.shortwaveScatteringOrders = std::clamp(
+        ProjectJson::integer(control, "shortwaveScatteringOrders", 1), 1, 3);
+    settings.radiationMaxSteps = std::clamp(
+        ProjectJson::integer(control, "radiationMaxSteps", 64), 1, 4096);
     const bool perspective = ProjectJson::string(sensor, "projection", "parallel") == "perspective";
     settings.isUAVtrave = perspective &&
         (ProjectJson::boolean(sensor, "cruiseEnabled", false) ||
